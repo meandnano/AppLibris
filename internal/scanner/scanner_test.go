@@ -2,8 +2,13 @@ package scanner
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,9 +29,15 @@ const testOPFTemplate = `<?xml version="1.0"?>
     <dc:title>%s</dc:title>
     <dc:creator>%s</dc:creator>
   </metadata>
+  <manifest>%s</manifest>
 </package>`
 
-func writeTestEPUB(t *testing.T, path, title, author string) {
+const testCoverManifestItem = `<item id="cover-image" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>`
+
+// writeTestEPUB writes a minimal EPUB to path. When coverImage is non-nil,
+// it's declared as the EPUB3 cover-image manifest item and embedded at
+// OEBPS/cover.jpg.
+func writeTestEPUB(t *testing.T, path, title, author string, coverImage []byte) {
 	t.Helper()
 
 	f, err := os.Create(path)
@@ -36,10 +47,16 @@ func writeTestEPUB(t *testing.T, path, title, author string) {
 	defer f.Close()
 
 	zw := zip.NewWriter(f)
+
+	var manifestItems string
+	if coverImage != nil {
+		manifestItems = testCoverManifestItem
+	}
+
 	files := map[string]string{
 		"mimetype":               "application/epub+zip",
 		"META-INF/container.xml": testContainerXML,
-		"OEBPS/content.opf":      fmt.Sprintf(testOPFTemplate, title, author),
+		"OEBPS/content.opf":      fmt.Sprintf(testOPFTemplate, title, author, manifestItems),
 	}
 	for name, content := range files {
 		w, err := zw.Create(name)
@@ -50,9 +67,38 @@ func writeTestEPUB(t *testing.T, path, title, author string) {
 			t.Fatalf("write %s in zip: %v", name, err)
 		}
 	}
+
+	if coverImage != nil {
+		w, err := zw.Create("OEBPS/cover.jpg")
+		if err != nil {
+			t.Fatalf("create cover.jpg in zip: %v", err)
+		}
+		if _, err := w.Write(coverImage); err != nil {
+			t.Fatalf("write cover.jpg in zip: %v", err)
+		}
+	}
+
 	if err := zw.Close(); err != nil {
 		t.Fatalf("close zip writer: %v", err)
 	}
+}
+
+// testCoverImage returns a small valid PNG, suitable as a fixture cover.
+func testCoverImage(t *testing.T) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, 20, 30))
+	for y := 0; y < 30; y++ {
+		for x := 0; x < 20; x++ {
+			img.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode test cover PNG: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func openTestDB(t *testing.T) *storage.DB {
@@ -67,11 +113,12 @@ func openTestDB(t *testing.T) *storage.DB {
 
 func TestScanBasic(t *testing.T) {
 	libDir := t.TempDir()
+	coversDir := t.TempDir()
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A")
-	writeTestEPUB(t, filepath.Join(libDir, "book2.epub"), "Book Two", "Author B")
+	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A", nil)
+	writeTestEPUB(t, filepath.Join(libDir, "book2.epub"), "Book Two", "Author B", nil)
 	if err := os.WriteFile(filepath.Join(libDir, "book3.fb2"), []byte("fake fb2 content"), 0o644); err != nil {
 		t.Fatalf("write fb2 stub: %v", err)
 	}
@@ -79,7 +126,7 @@ func TestScanBasic(t *testing.T) {
 		t.Fatalf("write notes.txt: %v", err)
 	}
 
-	result, err := Scan(ctx, db, libDir)
+	result, err := Scan(ctx, db, libDir, coversDir)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -100,6 +147,9 @@ func TestScanBasic(t *testing.T) {
 	if book1.Title != "Book One" {
 		t.Errorf("book1 Title = %q, want %q", book1.Title, "Book One")
 	}
+	if book1.CoverPath != "" {
+		t.Errorf("book1 CoverPath = %q, want empty (fixture declares no cover)", book1.CoverPath)
+	}
 
 	fb2Book, err := db.FindBookByPath(ctx, filepath.Join(libDir, "book3.fb2"))
 	if err != nil || fb2Book == nil {
@@ -113,14 +163,52 @@ func TestScanBasic(t *testing.T) {
 	}
 }
 
-func TestScanIsIdempotent(t *testing.T) {
+func TestScanExtractsCover(t *testing.T) {
 	libDir := t.TempDir()
+	coversDir := t.TempDir()
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A")
+	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A", testCoverImage(t))
 
-	first, err := Scan(ctx, db, libDir)
+	result, err := Scan(ctx, db, libDir, coversDir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.New != 1 || result.Errors != 0 {
+		t.Fatalf("scan = %+v, want New=1 Errors=0", result)
+	}
+
+	book, err := db.FindBookByPath(ctx, filepath.Join(libDir, "book1.epub"))
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByPath: %v", err)
+	}
+	if book.CoverPath == "" {
+		t.Fatal("CoverPath is empty, want a stored cover path")
+	}
+	if filepath.Dir(book.CoverPath) != coversDir {
+		t.Errorf("CoverPath = %q, want it under %q", book.CoverPath, coversDir)
+	}
+
+	f, err := os.Open(book.CoverPath)
+	if err != nil {
+		t.Fatalf("open stored cover: %v", err)
+	}
+	defer f.Close()
+	if _, err := jpeg.Decode(f); err != nil {
+		t.Errorf("stored cover does not decode as JPEG: %v", err)
+	}
+}
+
+func TestScanIsIdempotent(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A", nil)
+
+	first, err := Scan(ctx, db, libDir, coversDir)
 	if err != nil {
 		t.Fatalf("first Scan: %v", err)
 	}
@@ -128,7 +216,7 @@ func TestScanIsIdempotent(t *testing.T) {
 		t.Fatalf("first scan New = %d, want 1", first.New)
 	}
 
-	second, err := Scan(ctx, db, libDir)
+	second, err := Scan(ctx, db, libDir, coversDir)
 	if err != nil {
 		t.Fatalf("second Scan: %v", err)
 	}
@@ -139,13 +227,14 @@ func TestScanIsIdempotent(t *testing.T) {
 
 func TestScanDetectsMove(t *testing.T) {
 	libDir := t.TempDir()
+	coversDir := t.TempDir()
 	db := openTestDB(t)
 	ctx := context.Background()
 
 	oldPath := filepath.Join(libDir, "book1.epub")
-	writeTestEPUB(t, oldPath, "Book One", "Author A")
+	writeTestEPUB(t, oldPath, "Book One", "Author A", nil)
 
-	first, err := Scan(ctx, db, libDir)
+	first, err := Scan(ctx, db, libDir, coversDir)
 	if err != nil {
 		t.Fatalf("first Scan: %v", err)
 	}
@@ -163,7 +252,7 @@ func TestScanDetectsMove(t *testing.T) {
 		t.Fatalf("rename: %v", err)
 	}
 
-	second, err := Scan(ctx, db, libDir)
+	second, err := Scan(ctx, db, libDir, coversDir)
 	if err != nil {
 		t.Fatalf("second Scan: %v", err)
 	}

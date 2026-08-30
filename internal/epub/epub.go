@@ -7,6 +7,8 @@ import (
 	"archive/zip"
 	"encoding/xml"
 	"fmt"
+	"io"
+	"path"
 	"strings"
 )
 
@@ -17,6 +19,7 @@ type Metadata struct {
 	Language    string
 	ISBN        string
 	Description string
+	Cover       []byte
 }
 
 type container struct {
@@ -37,7 +40,18 @@ type opfPackage struct {
 			Scheme string `xml:"scheme,attr"`
 			Value  string `xml:",chardata"`
 		} `xml:"identifier"`
+		Meta []struct {
+			Name    string `xml:"name,attr"`
+			Content string `xml:"content,attr"`
+		} `xml:"meta"`
 	} `xml:"metadata"`
+	Manifest struct {
+		Item []struct {
+			ID         string `xml:"id,attr"`
+			Href       string `xml:"href,attr"`
+			Properties string `xml:"properties,attr"`
+		} `xml:"item"`
+	} `xml:"manifest"`
 }
 
 // ReadMetadata opens path as an EPUB (zip) container and parses the OPF
@@ -65,7 +79,68 @@ func ReadMetadata(path string) (Metadata, error) {
 		Language:    first(pkg.Metadata.Language),
 		ISBN:        findISBN(pkg),
 		Description: first(pkg.Metadata.Description),
+		Cover:       readCover(&zr.Reader, opfPath, pkg),
 	}, nil
+}
+
+// readCover locates the manifest item the OPF declares as the cover (EPUB3's
+// properties="cover-image", falling back to EPUB2's <meta name="cover">) and
+// returns its raw bytes. Returns nil whenever no cover is declared or the
+// declared entry can't be read — a missing/corrupt cover doesn't invalidate
+// the rest of the metadata.
+func readCover(zr *zip.Reader, opfPath string, pkg opfPackage) []byte {
+	href := findCoverHref(pkg)
+	if href == "" {
+		return nil
+	}
+
+	coverPath := path.Join(path.Dir(opfPath), href)
+	f, err := zr.Open(coverPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func findCoverHref(pkg opfPackage) string {
+	for _, item := range pkg.Manifest.Item {
+		if hasToken(item.Properties, "cover-image") {
+			return item.Href
+		}
+	}
+
+	var coverID string
+	for _, m := range pkg.Metadata.Meta {
+		if strings.EqualFold(m.Name, "cover") {
+			coverID = m.Content
+			break
+		}
+	}
+	if coverID == "" {
+		return ""
+	}
+
+	for _, item := range pkg.Manifest.Item {
+		if item.ID == coverID {
+			return item.Href
+		}
+	}
+	return ""
+}
+
+func hasToken(tokens, target string) bool {
+	for _, t := range strings.Fields(tokens) {
+		if t == target {
+			return true
+		}
+	}
+	return false
 }
 
 func findOPFPath(zr *zip.Reader) (string, error) {
