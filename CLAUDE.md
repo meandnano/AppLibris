@@ -13,8 +13,11 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   `YYYYMMDDNN_description.sql`, applied in filename order inside individual
   transactions and tracked in a `schema_migrations` table. `storage.Open` is
   idempotent — safe to call on every process start.
-- Schema so far: `books`, `authors`, `book_authors` (join table), plus an
-  index on `books.file_path` for the scanner's per-file lookup.
+- Schema so far: `books` (identity and metadata; no location fields),
+  `authors`, `book_authors` (join table), and `book_files` — one row per
+  physical file location, keyed by `book_id`, so byte-identical content at
+  more than one path is one `books` row with multiple `book_files` rows
+  rather than a single mutable `file_path`.
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
   ISBN, description) from the OPF package inside the zip, and extracts the
   declared cover image (EPUB3 `properties="cover-image"`, falling back to
@@ -23,12 +26,17 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   resized to ~400px on the long edge (never upscaling), JPEG, written to a
   derived directory keyed by content hash.
 - `internal/scanner` — walks the library directory and syncs it into
-  `internal/storage`. Cheap path+size+mtime check skips unchanged files;
-  content hash (SHA-256) is identity, so a moved/renamed file updates its
-  existing row instead of creating a duplicate. New EPUB files get embedded
-  metadata and a stored cover via `internal/epub`/`internal/cover`; FB2
-  files are indexed (format, filename as title) but don't get embedded
-  metadata or covers parsed yet.
+  `internal/storage`. Cheap path+size+mtime check (against `book_files`)
+  skips unchanged files; content hash (SHA-256) is a book's identity, so
+  known content found at a not-yet-seen path gets an additional
+  `book_files` row rather than a new book — this covers a moved/renamed
+  file and a genuine duplicate location alike, since the two are
+  indistinguishable from a single path's perspective. New EPUB files get
+  embedded metadata and a stored cover via `internal/epub`/`internal/cover`;
+  FB2 files are indexed (format, filename as title) but don't get embedded
+  metadata or covers parsed yet. Missing-file handling (a `book_files` row
+  whose path no longer exists on disk) is not implemented — such a row is
+  simply left stale.
 - `cmd/server` — entrypoint. Opens the database (`DB_PATH` env var, default
   `./data/library.db`), runs a synchronous full scan of `LIBRARY_DIR`
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)

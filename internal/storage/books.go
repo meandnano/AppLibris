@@ -19,20 +19,29 @@ type Book struct {
 	ISBN          string
 	Description   string
 	CoverPath     string
-	FilePath      string
 	Format        string
-	FileSize      int64
 	AddedAt       time.Time
 	ModifiedAt    time.Time
 	DerivedFrom   sql.NullInt64
 }
 
-const bookColumns = `id, content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, file_path, format, file_size, added_at, modified_at, derived_from`
+// BookFile mirrors the book_files table: one row per physical location a
+// book's content is known to live at.
+type BookFile struct {
+	ID         int64
+	BookID     int64
+	FilePath   string
+	FileSize   int64
+	ModifiedAt time.Time
+	AddedAt    time.Time
+}
+
+const bookColumns = `id, content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, format, added_at, modified_at, derived_from`
 
 func scanBook(row *sql.Row) (*Book, error) {
 	var b Book
 	err := row.Scan(&b.ID, &b.ContentHash, &b.Title, &b.SortTitle, &b.Publisher, &b.PublishedDate,
-		&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.FilePath, &b.Format, &b.FileSize,
+		&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.Format,
 		&b.AddedAt, &b.ModifiedAt, &b.DerivedFrom)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -43,10 +52,18 @@ func scanBook(row *sql.Row) (*Book, error) {
 	return &b, nil
 }
 
-// FindBookByPath returns the book at the given file_path, or nil if none exists.
-func (db *DB) FindBookByPath(ctx context.Context, path string) (*Book, error) {
-	row := db.read.QueryRowContext(ctx, `SELECT `+bookColumns+` FROM books WHERE file_path = ?`, path)
-	return scanBook(row)
+const bookFileColumns = `id, book_id, file_path, file_size, modified_at, added_at`
+
+func scanBookFile(row *sql.Row) (*BookFile, error) {
+	var f BookFile
+	err := row.Scan(&f.ID, &f.BookID, &f.FilePath, &f.FileSize, &f.ModifiedAt, &f.AddedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &f, nil
 }
 
 // FindBookByContentHash returns the book with the given content_hash, or nil if none exists.
@@ -55,17 +72,24 @@ func (db *DB) FindBookByContentHash(ctx context.Context, hash string) (*Book, er
 	return scanBook(row)
 }
 
+// FindFileByPath returns the book_files row at the given path, or nil if none exists.
+func (db *DB) FindFileByPath(ctx context.Context, path string) (*BookFile, error) {
+	row := db.read.QueryRowContext(ctx, `SELECT `+bookFileColumns+` FROM book_files WHERE file_path = ?`, path)
+	return scanBookFile(row)
+}
+
 // CreateBook inserts a new book row along with its authors, find-or-creating
 // each author by name and linking it via book_authors. Runs as one write
-// transaction.
+// transaction. Callers attach the book's first file location separately via
+// UpsertBookFile.
 func (db *DB) CreateBook(ctx context.Context, b Book, authorNames []string) (int64, error) {
 	var id int64
 	err := db.Write(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `
-			INSERT INTO books (content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, file_path, format, file_size, modified_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			INSERT INTO books (content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, format)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			b.ContentHash, b.Title, b.SortTitle, b.Publisher, b.PublishedDate, b.Language,
-			b.ISBN, b.Description, b.CoverPath, b.FilePath, b.Format, b.FileSize, b.ModifiedAt)
+			b.ISBN, b.Description, b.CoverPath, b.Format)
 		if err != nil {
 			return err
 		}
@@ -106,20 +130,35 @@ func findOrCreateAuthor(ctx context.Context, tx *sql.Tx, name string) (int64, er
 	return res.LastInsertId()
 }
 
-// UpdateBookFileLocation records that a book's content was found at a new
-// path (e.g. a move or rename). Metadata is left untouched.
-func (db *DB) UpdateBookFileLocation(ctx context.Context, id int64, path string, size int64, mtime time.Time) error {
-	return db.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE books SET file_path = ?, file_size = ?, modified_at = ? WHERE id = ?`, path, size, mtime, id)
-		return err
+// UpsertBookFile records that bookID's content is known to live at path,
+// with the given size/mtime. If path already has a book_files row (because
+// it used to point at different content, or simply needs a stat refresh),
+// that row is updated in place rather than erroring on the unique file_path
+// constraint — this single operation covers a brand-new location, a
+// moved/renamed file, an additional location for already-known duplicate
+// content, and a path whose content changed to match different already-known
+// content.
+func (db *DB) UpsertBookFile(ctx context.Context, bookID int64, path string, size int64, mtime time.Time) (int64, error) {
+	var id int64
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			INSERT INTO book_files (book_id, file_path, file_size, modified_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(file_path) DO UPDATE SET
+				book_id = excluded.book_id,
+				file_size = excluded.file_size,
+				modified_at = excluded.modified_at
+			RETURNING id`,
+			bookID, path, size, mtime).Scan(&id)
 	})
+	return id, err
 }
 
 // UpdateBookFileStat refreshes the cheap-check fields (size, mtime) for a
-// book whose content hash is unchanged but whose file was touched.
-func (db *DB) UpdateBookFileStat(ctx context.Context, id int64, size int64, mtime time.Time) error {
+// book_files row whose content hash is unchanged but whose file was touched.
+func (db *DB) UpdateBookFileStat(ctx context.Context, fileID int64, size int64, mtime time.Time) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE books SET file_size = ?, modified_at = ? WHERE id = ?`, size, mtime, id)
+		_, err := tx.ExecContext(ctx, `UPDATE book_files SET file_size = ?, modified_at = ? WHERE id = ?`, size, mtime, fileID)
 		return err
 	})
 }

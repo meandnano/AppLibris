@@ -111,6 +111,30 @@ func openTestDB(t *testing.T) *storage.DB {
 	return db
 }
 
+// bookByPath resolves a scanned file's path all the way to its book row,
+// via the book_files -> books join the storage package doesn't expose as a
+// single call.
+func bookByPath(t *testing.T, ctx context.Context, db *storage.DB, path string) *storage.Book {
+	t.Helper()
+
+	f, err := db.FindFileByPath(ctx, path)
+	if err != nil {
+		t.Fatalf("FindFileByPath %s: %v", path, err)
+	}
+	if f == nil {
+		t.Fatalf("FindFileByPath %s: no such file", path)
+	}
+
+	var b storage.Book
+	err = db.Read().QueryRowContext(ctx, `SELECT title, format, cover_path FROM books WHERE id = ?`, f.BookID).
+		Scan(&b.Title, &b.Format, &b.CoverPath)
+	if err != nil {
+		t.Fatalf("look up book %d: %v", f.BookID, err)
+	}
+	b.ID = f.BookID
+	return &b
+}
+
 func TestScanBasic(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
@@ -140,10 +164,7 @@ func TestScanBasic(t *testing.T) {
 		t.Errorf("Errors = %d, want 0", result.Errors)
 	}
 
-	book1, err := db.FindBookByPath(ctx, filepath.Join(libDir, "book1.epub"))
-	if err != nil || book1 == nil {
-		t.Fatalf("FindBookByPath book1: %v", err)
-	}
+	book1 := bookByPath(t, ctx, db, filepath.Join(libDir, "book1.epub"))
 	if book1.Title != "Book One" {
 		t.Errorf("book1 Title = %q, want %q", book1.Title, "Book One")
 	}
@@ -151,10 +172,7 @@ func TestScanBasic(t *testing.T) {
 		t.Errorf("book1 CoverPath = %q, want empty (fixture declares no cover)", book1.CoverPath)
 	}
 
-	fb2Book, err := db.FindBookByPath(ctx, filepath.Join(libDir, "book3.fb2"))
-	if err != nil || fb2Book == nil {
-		t.Fatalf("FindBookByPath fb2: %v", err)
-	}
+	fb2Book := bookByPath(t, ctx, db, filepath.Join(libDir, "book3.fb2"))
 	if fb2Book.Title != "book3" {
 		t.Errorf("fb2 Title = %q, want filename-derived %q", fb2Book.Title, "book3")
 	}
@@ -179,10 +197,7 @@ func TestScanExtractsCover(t *testing.T) {
 		t.Fatalf("scan = %+v, want New=1 Errors=0", result)
 	}
 
-	book, err := db.FindBookByPath(ctx, filepath.Join(libDir, "book1.epub"))
-	if err != nil || book == nil {
-		t.Fatalf("FindBookByPath: %v", err)
-	}
+	book := bookByPath(t, ctx, db, filepath.Join(libDir, "book1.epub"))
 	if book.CoverPath == "" {
 		t.Fatal("CoverPath is empty, want a stored cover path")
 	}
@@ -242,9 +257,9 @@ func TestScanDetectsMove(t *testing.T) {
 		t.Fatalf("first scan New = %d, want 1", first.New)
 	}
 
-	original, err := db.FindBookByPath(ctx, oldPath)
-	if err != nil || original == nil {
-		t.Fatalf("FindBookByPath oldPath: %v", err)
+	originalFile, err := db.FindFileByPath(ctx, oldPath)
+	if err != nil || originalFile == nil {
+		t.Fatalf("FindFileByPath oldPath: %v", err)
 	}
 
 	newPath := filepath.Join(libDir, "renamed.epub")
@@ -260,19 +275,94 @@ func TestScanDetectsMove(t *testing.T) {
 		t.Errorf("second scan = %+v, want Moved=1 New=0", second)
 	}
 
-	moved, err := db.FindBookByPath(ctx, newPath)
-	if err != nil || moved == nil {
-		t.Fatalf("FindBookByPath newPath: %v", err)
+	movedFile, err := db.FindFileByPath(ctx, newPath)
+	if err != nil || movedFile == nil {
+		t.Fatalf("FindFileByPath newPath: %v", err)
 	}
-	if moved.ID != original.ID {
-		t.Errorf("moved book id = %d, want %d (should be the same row)", moved.ID, original.ID)
+	if movedFile.BookID != originalFile.BookID {
+		t.Errorf("moved file's book id = %d, want %d (should be the same book)", movedFile.BookID, originalFile.BookID)
 	}
 
-	stillAtOldPath, err := db.FindBookByPath(ctx, oldPath)
+	// the old path's book_files row is deliberately left stale, not
+	// deleted or repointed — missing-file handling is separately deferred,
+	// and WalkDir never revisits a path once the file there is gone
+	staleFile, err := db.FindFileByPath(ctx, oldPath)
 	if err != nil {
-		t.Fatalf("FindBookByPath oldPath after move: %v", err)
+		t.Fatalf("FindFileByPath oldPath after move: %v", err)
 	}
-	if stillAtOldPath != nil {
-		t.Errorf("old path still resolves to a book: %+v", stillAtOldPath)
+	if staleFile == nil {
+		t.Error("old path's book_files row was removed, want it left stale")
+	} else if staleFile.BookID != originalFile.BookID {
+		t.Errorf("stale row's book id = %d, want unchanged %d", staleFile.BookID, originalFile.BookID)
+	}
+}
+
+func TestScanTracksMultipleLocations(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	sourcePath := filepath.Join(t.TempDir(), "source.epub")
+	writeTestEPUB(t, sourcePath, "Duplicated Book", "Author A", nil)
+	content, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	pathA := filepath.Join(libDir, "copy-a.epub")
+	pathB := filepath.Join(libDir, "copy-b.epub")
+	if err := os.WriteFile(pathA, content, 0o644); err != nil {
+		t.Fatalf("write copy-a: %v", err)
+	}
+	if err := os.WriteFile(pathB, content, 0o644); err != nil {
+		t.Fatalf("write copy-b: %v", err)
+	}
+
+	result, err := Scan(ctx, db, libDir, coversDir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.New != 1 || result.Moved != 1 {
+		t.Fatalf("scan = %+v, want New=1 Moved=1 (one book, one extra location)", result)
+	}
+
+	fileA, err := db.FindFileByPath(ctx, pathA)
+	if err != nil || fileA == nil {
+		t.Fatalf("FindFileByPath copy-a: %v", err)
+	}
+	fileB, err := db.FindFileByPath(ctx, pathB)
+	if err != nil || fileB == nil {
+		t.Fatalf("FindFileByPath copy-b: %v", err)
+	}
+	if fileA.BookID != fileB.BookID {
+		t.Errorf("copy-a book id %d != copy-b book id %d, want the same book", fileA.BookID, fileB.BookID)
+	}
+
+	var bookCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books`).Scan(&bookCount); err != nil {
+		t.Fatalf("count books: %v", err)
+	}
+	if bookCount != 1 {
+		t.Errorf("books count = %d, want 1 (byte-identical content is one book)", bookCount)
+	}
+
+	// rescan without touching the filesystem: both locations are cheap-path
+	// unchanged, and neither path's row is ever dropped or reassigned
+	rescan, err := Scan(ctx, db, libDir, coversDir)
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if rescan.Unchanged != 2 || rescan.New != 0 || rescan.Moved != 0 {
+		t.Errorf("rescan = %+v, want Unchanged=2 New=0 Moved=0", rescan)
+	}
+
+	fileA2, err := db.FindFileByPath(ctx, pathA)
+	if err != nil || fileA2 == nil || fileA2.ID != fileA.ID {
+		t.Errorf("copy-a row changed across rescans: before=%+v after=%+v (%v)", fileA, fileA2, err)
+	}
+	fileB2, err := db.FindFileByPath(ctx, pathB)
+	if err != nil || fileB2 == nil || fileB2.ID != fileB.ID {
+		t.Errorf("copy-b row changed across rescans: before=%+v after=%+v (%v)", fileB, fileB2, err)
 	}
 }
