@@ -201,3 +201,61 @@ func TestUpdateBookFileStat(t *testing.T) {
 		t.Errorf("updated file = %+v, unexpected fields", updated)
 	}
 }
+
+func TestListBooks(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	bID, err := db.CreateBook(ctx, Book{ContentHash: "hash-b", Title: "Book B", SortTitle: "Book B"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook B: %v", err)
+	}
+	aID, err := db.CreateBook(ctx, Book{ContentHash: "hash-a", Title: "Book A", SortTitle: "Book A"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook A: %v", err)
+	}
+
+	books, err := db.ListBooks(ctx)
+	if err != nil {
+		t.Fatalf("ListBooks: %v", err)
+	}
+	if len(books) != 2 {
+		t.Fatalf("ListBooks returned %d books, want 2", len(books))
+	}
+	if books[0].ID != aID || books[1].ID != bID {
+		t.Errorf("ListBooks order = [%d, %d], want [%d, %d] (sort_title order)", books[0].ID, books[1].ID, aID, bID)
+	}
+}
+
+func TestListBookAuthors(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	soloID, err := db.CreateBook(ctx, Book{ContentHash: "hash-solo", Title: "Solo Author Book"}, []string{"Jane Doe"})
+	if err != nil {
+		t.Fatalf("CreateBook solo: %v", err)
+	}
+	multiID, err := db.CreateBook(ctx, Book{ContentHash: "hash-multi", Title: "Multi Author Book"}, []string{"Jane Doe", "John Roe"})
+	if err != nil {
+		t.Fatalf("CreateBook multi: %v", err)
+	}
+	noneID, err := db.CreateBook(ctx, Book{ContentHash: "hash-none", Title: "No Author Book"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook none: %v", err)
+	}
+
+	authors, err := db.ListBookAuthors(ctx)
+	if err != nil {
+		t.Fatalf("ListBookAuthors: %v", err)
+	}
+
+	if got := authors[soloID]; len(got) != 1 || got[0] != "Jane Doe" {
+		t.Errorf("authors[solo] = %v, want [Jane Doe]", got)
+	}
+	if got := authors[multiID]; len(got) != 2 {
+		t.Errorf("authors[multi] = %v, want 2 authors", got)
+	}
+	if got := authors[noneID]; got != nil {
+		t.Errorf("authors[none] = %v, want no entry", got)
+	}
+}
