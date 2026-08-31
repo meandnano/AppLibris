@@ -63,8 +63,13 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   left with zero locations (`storage.ReassignFileAndPruneOrphan` /
   `CreateBookWithFile` — either can orphan a path's previous owner, since
   both reassign it unconditionally), logging the deletion at Info.
-  Missing-file handling (a `book_files` row whose path no longer exists on
-  disk) is not implemented — such a row is simply left stale.
+  `book_files.file_path` is stored relative to `LIBRARY_DIR`
+  (slash-separated), so the index survives the library being mounted at a
+  different absolute path (dev's `./library` versus a container's
+  `/library`); a directory `WalkDir` can't read skips its subtree and
+  counts an error rather than aborting the rest of the sweep. Missing-file
+  handling (a `book_files` row whose path no longer exists on disk) is not
+  implemented — such a row is simply left stale.
 - `internal/service` — the layer beneath HTTP handlers DESIGN.md's
   "Layering for a future API" calls for, so a future `/api/v1` can reuse it
   as a second thin transport alongside `internal/web`. One method so far:
