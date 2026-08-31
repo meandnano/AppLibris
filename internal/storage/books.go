@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// sqliteTimeLayout is the one format this package writes timestamps in:
+// UTC, fixed-width so text ordering matches chronological ordering, and
+// parseable by SQLite's own date functions. The CREATE TABLE defaults use
+// strftime to produce the identical shape.
+const sqliteTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+func formatTime(t time.Time) string { return t.UTC().Format(sqliteTimeLayout) }
+
 // Book mirrors the books table.
 type Book struct {
 	ID            int64
@@ -194,7 +202,7 @@ func (db *DB) UpsertBookFile(ctx context.Context, bookID int64, path string, siz
 				file_size = excluded.file_size,
 				modified_at = excluded.modified_at
 			RETURNING id`,
-			bookID, path, size, mtime).Scan(&id)
+			bookID, path, size, formatTime(mtime)).Scan(&id)
 	})
 	return id, err
 }
@@ -203,7 +211,7 @@ func (db *DB) UpsertBookFile(ctx context.Context, bookID int64, path string, siz
 // book_files row whose content hash is unchanged but whose file was touched.
 func (db *DB) UpdateBookFileStat(ctx context.Context, fileID int64, size int64, mtime time.Time) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE book_files SET file_size = ?, modified_at = ? WHERE id = ?`, size, mtime, fileID)
+		_, err := tx.ExecContext(ctx, `UPDATE book_files SET file_size = ?, modified_at = ? WHERE id = ?`, size, formatTime(mtime), fileID)
 		return err
 	})
 }

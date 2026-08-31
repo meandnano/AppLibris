@@ -12,7 +12,7 @@ CREATE TABLE books (
     file_path       TEXT NOT NULL,
     format          TEXT NOT NULL,
     file_size       INTEGER NOT NULL,
-    added_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    modified_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    added_at        TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000000000Z', 'now')),
+    modified_at     TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000000000Z', 'now')),
     derived_from    INTEGER REFERENCES books (id)
 );

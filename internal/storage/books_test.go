@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -293,5 +294,119 @@ func TestListBooksOrdersCaseInsensitively(t *testing.T) {
 	want := []string{"anna karenina", "Apple Book", "zebra book"}
 	if !slices.Equal(got, want) {
 		t.Errorf("ListBooks order = %v, want %v", got, want)
+	}
+}
+
+// modified_at used to be bound as a raw time.Time, which the driver rendered
+// as "2026-08-31 12:34:56.123456789 +0200 CEST" — a shape SQLite's own date
+// functions can't parse. This asserts the raw stored text, not just the
+// round-trip: the round-trip passes even with the broken format, which is
+// why it went unnoticed.
+func TestBookFileTimestampsAreSQLiteReadable(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	bookID, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Timestamp Book", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	mtime := time.Date(2026, 8, 31, 12, 34, 56, 123456789, time.FixedZone("CEST", 2*60*60))
+	fileID, err := db.UpsertBookFile(ctx, bookID, "/path.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("UpsertBookFile: %v", err)
+	}
+
+	f, err := db.FindFileByPath(ctx, "/path.epub")
+	if err != nil || f == nil {
+		t.Fatalf("FindFileByPath: %+v, %v", f, err)
+	}
+	if !f.ModifiedAt.Equal(mtime) {
+		t.Errorf("ModifiedAt round-trip = %v, want %v", f.ModifiedAt, mtime)
+	}
+
+	var raw string
+	if err := db.Read().QueryRowContext(ctx, `SELECT CAST(modified_at AS TEXT) FROM book_files WHERE id = ?`, fileID).Scan(&raw); err != nil {
+		t.Fatalf("read raw modified_at: %v", err)
+	}
+	if want := formatTime(mtime); raw != want {
+		t.Errorf("stored modified_at = %q, want %q (sqliteTimeLayout, in UTC)", raw, want)
+	}
+
+	var modifiedReadable, addedReadable sql.NullString
+	err = db.Read().QueryRowContext(ctx,
+		`SELECT datetime(modified_at), datetime(added_at) FROM book_files WHERE id = ?`, fileID).
+		Scan(&modifiedReadable, &addedReadable)
+	if err != nil {
+		t.Fatalf("datetime() query: %v", err)
+	}
+	if !modifiedReadable.Valid {
+		t.Error("datetime(modified_at) is NULL, want a value")
+	}
+	if !addedReadable.Valid {
+		t.Error("datetime(added_at) is NULL, want a value (book_files.added_at default)")
+	}
+}
+
+func TestDeletingBookCascadesFilesAndAuthorLinkButKeepsAuthor(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	bookID, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Cascade Book", Format: "epub"}, []string{"Jane Doe"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, bookID, "/path.epub", 100, time.Now()); err != nil {
+		t.Fatalf("UpsertBookFile: %v", err)
+	}
+
+	// No DeleteBook method exists yet (out of scope for this step); raw SQL
+	// is the only way to exercise the cascade the schema now provides.
+	if err := db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, bookID)
+		return err
+	}); err != nil {
+		t.Fatalf("delete book: %v", err)
+	}
+
+	var fileCount, joinCount, authorCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM book_files WHERE book_id = ?`, bookID).Scan(&fileCount); err != nil {
+		t.Fatalf("count book_files: %v", err)
+	}
+	if fileCount != 0 {
+		t.Errorf("book_files rows after delete = %d, want 0", fileCount)
+	}
+
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM book_authors WHERE book_id = ?`, bookID).Scan(&joinCount); err != nil {
+		t.Fatalf("count book_authors: %v", err)
+	}
+	if joinCount != 0 {
+		t.Errorf("book_authors rows after delete = %d, want 0", joinCount)
+	}
+
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM authors WHERE name = ?`, "Jane Doe").Scan(&authorCount); err != nil {
+		t.Fatalf("count authors: %v", err)
+	}
+	if authorCount != 1 {
+		t.Errorf("authors row for %q after book delete = %d, want 1 (the author itself must survive)", "Jane Doe", authorCount)
+	}
+}
+
+func TestAuthorNameIsUnique(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Book One"}, []string{"Shared Author"}); err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	// Bypass findOrCreateAuthor's own SELECT-then-INSERT dedup, to prove the
+	// database-level constraint is what actually stops a duplicate.
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO authors (name) VALUES (?)`, "Shared Author")
+		return err
+	})
+	if err == nil {
+		t.Fatal("inserting a duplicate author name: want an error, got nil")
 	}
 }
