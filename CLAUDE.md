@@ -132,13 +132,25 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   response. Book detail, search, inline metadata editing and
   send-to-Kindle are designed but not built — each needs backing features
   that don't exist yet.
-- `cmd/server` — entrypoint. Opens the database (`DB_PATH` env var, default
-  `./data/library.db`), runs a synchronous full scan of `LIBRARY_DIR`
+- `cmd/server` — entrypoint. `main` sets up logging and a
+  `signal.NotifyContext` (SIGINT/SIGTERM) and calls `run(ctx) error`, so
+  every failure path has one exit point (`slog.Error` + `os.Exit(1)`).
+  `run` opens the database (`DB_PATH` env var, default `./data/library.db`)
+  and starts serving immediately — `/healthz` and `internal/web`'s routes
+  at `/`, on `ADDR` (default `:8080`), with `ReadHeaderTimeout`,
+  `ReadTimeout`, `WriteTimeout` and `IdleTimeout` all set — rather than
+  blocking startup on a scan; the initial full sweep of `LIBRARY_DIR`
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
-  before serving, then reruns it on a `SCAN_INTERVAL` timer (default `15m`)
-  in the background, with missing-file grace period `MISSING_GRACE`
-  (default `24h`). Serves `/healthz` and mounts `internal/web`'s routes at
-  `/`, on `ADDR` (default `:8080`).
+  runs in the background alongside the `SCAN_INTERVAL`-timed (default
+  `15m`) periodic rescan, with missing-file grace period `MISSING_GRACE`
+  (default `24h`). Both scan loops take the signal-aware context, so a
+  sweep in progress unwinds on shutdown instead of being killed mid-write.
+  On SIGINT/SIGTERM, `run` shuts the HTTP server down first (bounded to
+  10s) and only then closes the database — order matters, so no request is
+  ever mid-query when the database closes. The image is built on
+  `distroless/static-debian12:nonroot` (CA certificates, tzdata, `/tmp`,
+  and a non-root uid, none of which `scratch` provides), so mounted
+  volumes must be writable by that uid.
 - Logging goes through `log/slog` (a text handler on stderr), leveled via
   the `LOG_LEVEL` env var (default `INFO`) set once in `cmd/server` and
   used everywhere else via `slog`'s package-level functions against that
