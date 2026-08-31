@@ -512,7 +512,7 @@ func TestScanSkipsUnreadableDirectory(t *testing.T) {
 	if err := os.Chmod(restrictedDir, 0o000); err != nil {
 		t.Fatalf("chmod restricted: %v", err)
 	}
-	// Restore before TempDir's own cleanup tries to remove it.
+	// restore before TempDir's own cleanup tries to remove it
 	t.Cleanup(func() { os.Chmod(restrictedDir, 0o755) })
 
 	result, err := Scan(ctx, db, libDir, coversDir)
@@ -551,8 +551,9 @@ func TestScanMissingLibraryDirReturnsError(t *testing.T) {
 	}
 }
 
-// The assertion that actually pins the relative-path fix: the existing
-// scanner tests all use a flat library, so they'd pass either way.
+// Stored paths must be relative to the library root even for a file several
+// directories deep — a flat library can't distinguish that from storing the
+// absolute path, since the two forms only diverge once a file is nested.
 func TestScanStoresRelativePaths(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
@@ -590,10 +591,10 @@ func TestScanStoresRelativePaths(t *testing.T) {
 	}
 }
 
-// The bug this half of the step fixes: the same library scanned through
-// two different absolute roots (dev's ./library versus the container's
-// /library, say) used to look like two different files, giving one book a
-// false second location on its first day in production.
+// The same content, at the same relative path, must be recognised as one
+// location regardless of the absolute root it's scanned through — dev's
+// ./library and the container's /library, say — rather than a false second
+// location on the book's first day in production.
 func TestScanSameLibraryThroughDifferentRootsYieldsOneLocation(t *testing.T) {
 	rootA := t.TempDir()
 	rootB := t.TempDir()
@@ -611,8 +612,8 @@ func TestScanSameLibraryThroughDifferentRootsYieldsOneLocation(t *testing.T) {
 		t.Fatalf("first scan New = %d, want 1", first.New)
 	}
 
-	// The exact same content, at the same relative path, mounted under a
-	// different absolute root.
+	// the exact same content, at the same relative path, mounted under a
+	// different absolute root
 	content, err := os.ReadFile(filepath.Join(rootA, "book.epub"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -625,8 +626,11 @@ func TestScanSameLibraryThroughDifferentRootsYieldsOneLocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Scan (rootB): %v", err)
 	}
-	if second.New != 0 || second.Moved != 0 {
-		t.Errorf("second scan through a different root = %+v, want New=0 Moved=0 (recognised as the same location)", second)
+	// Scanned/Unchanged pin that the file was actually visited and matched
+	// the existing row, not just that New/Moved happen to be zero — which a
+	// scan that silently skipped the file would also satisfy
+	if second.Scanned != 1 || second.Unchanged != 1 || second.New != 0 || second.Moved != 0 || second.Errors != 0 {
+		t.Errorf("second scan through a different root = %+v, want Scanned=1 Unchanged=1 New=0 Moved=0 Errors=0 (recognised as the same location)", second)
 	}
 
 	var fileCount int

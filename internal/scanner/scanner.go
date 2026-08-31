@@ -55,9 +55,9 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Re
 
 	err := filepath.WalkDir(libraryDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// A directory we can't read costs us its subtree, not the sweep.
-			// Anything else (including an error on the root itself) is fatal.
-			// d is nil when the error comes from os.Lstat on the root itself.
+			// a directory we can't read costs us its subtree, not the sweep —
+			// anything else (including an error on the root itself) is fatal;
+			// d is nil when the error comes from os.Lstat on the root itself
 			if d != nil && d.IsDir() && path != libraryDir {
 				slog.Warn("skipping unreadable directory", "path", path, "error", err)
 				result.Errors++
@@ -83,10 +83,10 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Re
 }
 
 func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) error {
-	// Stored relative to libraryDir (slash-separated) so the index survives
+	// stored relative to libraryDir (slash-separated) so the index survives
 	// the library being mounted at a different absolute path — dev's
-	// ./library versus the container's /library, say. Anything that needs
-	// to touch the filesystem below still uses the absolute path.
+	// ./library versus the container's /library, say; anything that needs
+	// to touch the filesystem below still uses the absolute path
 	rel, err := filepath.Rel(libraryDir, path)
 	if err != nil {
 		return fmt.Errorf("relativize: %w", err)
