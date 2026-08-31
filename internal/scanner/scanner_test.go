@@ -551,6 +551,38 @@ func TestScanMissingLibraryDirReturnsError(t *testing.T) {
 	}
 }
 
+// An existing-but-unreadable root exercises a different branch than a
+// missing one: WalkDir hands the callback a non-nil DirEntry for it (see
+// TestScanMissingLibraryDirReturnsError for the nil-DirEntry case), so
+// Scan's directory-skip guard has to check path != libraryDir to keep
+// treating the root itself as fatal rather than a skippable subtree.
+func TestScanUnreadableLibraryRootReturnsError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory mode bits aren't enforced")
+	}
+
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
+
+	if err := os.Chmod(libDir, 0o000); err != nil {
+		t.Fatalf("chmod libDir: %v", err)
+	}
+	// restore before TempDir's own cleanup tries to remove it
+	t.Cleanup(func() { os.Chmod(libDir, 0o755) })
+
+	result, err := Scan(ctx, db, libDir, coversDir)
+	if err == nil {
+		t.Fatal("Scan with an unreadable library root: want an error, got nil")
+	}
+	if result.Errors != 0 {
+		t.Errorf("Errors = %d, want 0 (this is the fatal-root path, not a counted skipped subtree)", result.Errors)
+	}
+}
+
 // Stored paths must be relative to the library root even for a file several
 // directories deep — a flat library can't distinguish that from storing the
 // absolute path, since the two forms only diverge once a file is nested.
