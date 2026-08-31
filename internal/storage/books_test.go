@@ -483,3 +483,204 @@ func TestComposedWritesRollBackTogether(t *testing.T) {
 		t.Errorf("FindFileByPath = %+v, want nil (rolled back)", file)
 	}
 }
+
+func TestCreateBookWithFile(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Atomic Book", Format: "epub"},
+		[]string{"Jane Doe"}, "/path.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+
+	book, err := db.FindBookByContentHash(ctx, "hash-1")
+	if err != nil || book == nil || book.ID != bookID {
+		t.Fatalf("FindBookByContentHash = %+v, %v; want book %d", book, err, bookID)
+	}
+	file, err := db.FindFileByPath(ctx, "/path.epub")
+	if err != nil || file == nil || file.BookID != bookID {
+		t.Fatalf("FindFileByPath = %+v, %v; want book %d", file, err, bookID)
+	}
+}
+
+// A failure anywhere inside CreateBookWithFile's single transaction must
+// leave no books row behind, not just return an error. book_files' only
+// real per-row constraint (file_path uniqueness) is absorbed by its own
+// ON CONFLICT DO UPDATE, so it can never be the thing that fails; a
+// duplicate author name is: both occurrences resolve to the same author
+// id, so the second book_authors insert hits the (book_id, author_id)
+// primary key. That happens inside createBookTx, before the file insert
+// even runs — which is itself part of what this proves: the whole
+// operation is one transaction, not "insert the book, then maybe insert
+// the file."
+func TestCreateBookWithFileIsAtomic(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	_, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Should Not Exist", Format: "epub"},
+		[]string{"Dup Author", "Dup Author"}, "/path.epub", 100, mtime)
+	if err == nil {
+		t.Fatal("CreateBookWithFile with a duplicate author: want an error, got nil")
+	}
+
+	var count int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books WHERE content_hash = ?`, "hash-1").Scan(&count); err != nil {
+		t.Fatalf("count books: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("books row survived a failed CreateBookWithFile call; want 0 rows, got %d", count)
+	}
+}
+
+func TestReassignFileAndPruneOrphanDeletesSingleLocationOwner(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old Content", Format: "epub"},
+		[]string{"Jane Doe"}, "/x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile old: %v", err)
+	}
+	newID, err := db.CreateBook(ctx, Book{ContentHash: "hash-new", Title: "New Content", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook new: %v", err)
+	}
+
+	fileID, orphanedID, orphanedTitle, err := db.ReassignFileAndPruneOrphan(ctx, newID, "/x.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("ReassignFileAndPruneOrphan: %v", err)
+	}
+	if fileID == 0 {
+		t.Error("fileID = 0, want a nonzero book_files id")
+	}
+	if orphanedID != oldID {
+		t.Errorf("orphanedID = %d, want %d", orphanedID, oldID)
+	}
+	if orphanedTitle != "Old Content" {
+		t.Errorf("orphanedTitle = %q, want %q", orphanedTitle, "Old Content")
+	}
+
+	f, err := db.FindFileByPath(ctx, "/x.epub")
+	if err != nil || f == nil || f.BookID != newID {
+		t.Errorf("FindFileByPath after reassign = %+v, %v; want book %d", f, err, newID)
+	}
+
+	var oldCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books WHERE id = ?`, oldID).Scan(&oldCount); err != nil {
+		t.Fatalf("count old book: %v", err)
+	}
+	if oldCount != 0 {
+		t.Errorf("old book row survived orphaning; want 0, got %d", oldCount)
+	}
+}
+
+// The case a before-upsert count gets wrong: a book with two locations
+// loses one to a reassignment and must survive, still owning the other.
+func TestReassignFileAndPruneOrphanKeepsMultiLocationOwner(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Duplicated Content", Format: "epub"}, nil,
+		"/a/copy.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, oldID, "/b/copy.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile second location: %v", err)
+	}
+	newID, err := db.CreateBook(ctx, Book{ContentHash: "hash-new", Title: "New Content", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook new: %v", err)
+	}
+
+	_, orphanedID, _, err := db.ReassignFileAndPruneOrphan(ctx, newID, "/a/copy.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("ReassignFileAndPruneOrphan: %v", err)
+	}
+	if orphanedID != 0 {
+		t.Errorf("orphanedID = %d, want 0 (book still owns /b/copy.epub)", orphanedID)
+	}
+
+	var oldCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books WHERE id = ?`, oldID).Scan(&oldCount); err != nil {
+		t.Fatalf("count old book: %v", err)
+	}
+	if oldCount != 1 {
+		t.Errorf("old book row = %d rows, want 1 (must survive)", oldCount)
+	}
+
+	remaining, err := db.FindFileByPath(ctx, "/b/copy.epub")
+	if err != nil || remaining == nil || remaining.BookID != oldID {
+		t.Errorf("FindFileByPath /b/copy.epub = %+v, %v; want it still owned by %d", remaining, err, oldID)
+	}
+}
+
+func TestReassignFileAndPruneOrphanNoopOnUnchangedOwner(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Touched Book", Format: "epub"}, nil,
+		"/path.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+
+	newMtime := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	_, orphanedID, _, err := db.ReassignFileAndPruneOrphan(ctx, bookID, "/path.epub", 150, newMtime)
+	if err != nil {
+		t.Fatalf("ReassignFileAndPruneOrphan: %v", err)
+	}
+	if orphanedID != 0 {
+		t.Errorf("orphanedID = %d, want 0 (same owner, just a stat refresh)", orphanedID)
+	}
+
+	var count int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books WHERE id = ?`, bookID).Scan(&count); err != nil {
+		t.Fatalf("count book: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("book row = %d rows, want 1", count)
+	}
+}
+
+func TestReassignFileAndPruneOrphanCascadesAuthorLinkButKeepsAuthor(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old Content", Format: "epub"},
+		[]string{"Jane Doe"}, "/x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	newID, err := db.CreateBook(ctx, Book{ContentHash: "hash-new", Title: "New Content", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	if _, _, _, err := db.ReassignFileAndPruneOrphan(ctx, newID, "/x.epub", 200, mtime); err != nil {
+		t.Fatalf("ReassignFileAndPruneOrphan: %v", err)
+	}
+
+	var joinCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM book_authors WHERE book_id = ?`, oldID).Scan(&joinCount); err != nil {
+		t.Fatalf("count book_authors: %v", err)
+	}
+	if joinCount != 0 {
+		t.Errorf("book_authors rows for orphaned book = %d, want 0", joinCount)
+	}
+
+	var authorCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM authors WHERE name = ?`, "Jane Doe").Scan(&authorCount); err != nil {
+		t.Fatalf("count authors: %v", err)
+	}
+	if authorCount != 1 {
+		t.Errorf("authors row for %q after orphaning = %d, want 1 (the author itself must survive)", "Jane Doe", authorCount)
+	}
+}
