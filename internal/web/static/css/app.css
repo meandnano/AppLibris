@@ -1,1 +1,299 @@
-/* placeholder — real styles land once the Claude Design markup is translated */
+/* Bookshelf — library UI.
+   Editorial: hairline rules, a serif for titles, mono for anything the
+   machine is saying. Covers do the colour work; one accent, used sparingly.
+   Light is the default; dark follows the OS unless [data-theme] overrides. */
+
+:root {
+  --bg: #fbfaf8;
+  --bg-raised: #ffffff;
+  --bg-sunken: #f4f2ee;
+  --fg: #17140f;
+  --fg-muted: #57534b;
+  --fg-faint: #8d877d;
+  --rule: #ded9d1;
+  --rule-faint: #eae6e0;
+  --accent: #8a5a3c;
+  --accent-soft: #f3ebe4;
+
+  --serif: "Newsreader", Georgia, "Times New Roman", serif;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --shelf-height: 210px;
+  --card-width: 148px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121110;
+    --bg-raised: #1a1817;
+    --bg-sunken: #221f1d;
+    --fg: #f1ede5;
+    --fg-muted: #a9a29a;
+    --fg-faint: #7b756c;
+    --rule: #322e2a;
+    --rule-faint: #262322;
+    --accent: #c98a5f;
+    --accent-soft: #2b211a;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #121110;
+  --bg-raised: #1a1817;
+  --bg-sunken: #221f1d;
+  --fg: #f1ede5;
+  --fg-muted: #a9a29a;
+  --fg-faint: #7b756c;
+  --rule: #322e2a;
+  --rule-faint: #262322;
+  --accent: #c98a5f;
+  --accent-soft: #2b211a;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 16px 32px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg-raised);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.masthead__left,
+.masthead__right {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.masthead__brand {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.masthead__nav {
+  display: flex;
+  gap: 20px;
+  font-size: 13.5px;
+}
+
+.masthead__link {
+  color: var(--fg-faint);
+  padding-bottom: 2px;
+}
+
+.masthead__link--current {
+  color: var(--fg);
+  border-bottom: 2px solid var(--accent);
+}
+
+.masthead__count {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+
+.masthead__theme {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 8px 15px;
+  min-height: 34px;
+  cursor: pointer;
+}
+
+.masthead__theme:hover {
+  border-color: var(--fg);
+  color: var(--fg);
+}
+
+/* ---------- grid ---------- */
+
+.page {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 32px 32px 96px;
+}
+
+.grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--card-width), 1fr));
+  gap: 34px 22px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* Covers vary in aspect ratio, so they hang from a fixed-height shelf and
+   bottom-align to it, left-aligned so the title starts at the cover's edge. */
+.card__shelf {
+  height: var(--shelf-height);
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+}
+
+.card__cover {
+  max-height: 100%;
+  max-width: 100%;
+  width: auto;
+  border: 1px solid var(--rule);
+  background: var(--bg-sunken);
+}
+
+.card__cover--missing {
+  height: 100%;
+  aspect-ratio: 0.66;
+  border-style: dashed;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.card__title {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 16.5px;
+  line-height: 1.25;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
+.card__author {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+}
+
+.card__author--unknown {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+.card__meta {
+  margin: 1px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.badge {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  border: 1px solid var(--rule);
+  padding: 2px 5px;
+}
+
+/* ---------- empty state ---------- */
+
+.empty {
+  border: 1px dashed var(--rule);
+  padding: 72px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.empty__title {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 26px;
+}
+
+.empty__body {
+  margin: 0;
+  max-width: 42ch;
+  color: var(--fg-muted);
+  font-size: 14px;
+  text-wrap: pretty;
+}
+
+/* ---------- small screens ---------- */
+
+@media (max-width: 640px) {
+  :root {
+    --shelf-height: 168px;
+    --card-width: 132px;
+  }
+
+  .masthead {
+    padding: 12px 16px;
+    gap: 12px;
+  }
+
+  .masthead__left,
+  .masthead__right {
+    gap: 16px;
+  }
+
+  .page {
+    padding: 20px 16px 64px;
+  }
+
+  .grid {
+    gap: 26px 16px;
+  }
+}
