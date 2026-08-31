@@ -781,7 +781,12 @@ func TestListFilesUnder(t *testing.T) {
 	}
 }
 
-func TestPruneMissingFilesDeletesOnlyPastGraceAndOutsideExcluded(t *testing.T) {
+// PruneMissingFiles does no filtering of its own — the caller (reconcile-
+// Missing, in internal/scanner) is the one that decides what's eligible,
+// via age and a current Lstat reconfirmation. This test only pins the
+// mechanical contract: it deletes exactly the rows named, and nothing else,
+// regardless of how long other rows have been marked.
+func TestPruneMissingFilesDeletesOnlyTheGivenIDs(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
@@ -797,36 +802,30 @@ func TestPruneMissingFilesDeletesOnlyPastGraceAndOutsideExcluded(t *testing.T) {
 		return f.ID
 	}
 
-	dueID := setup("due.epub", "hash-due")
-	notYetDueID := setup("not-yet-due.epub", "hash-not-yet-due")
-	excludedID := setup("skipped/due.epub", "hash-excluded")
+	targetID := setup("target.epub", "hash-target")
+	untouchedID := setup("untouched.epub", "hash-untouched")
 
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	recent := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
-	if err := db.SetFilesMissing(ctx, []int64{dueID, excludedID}, old); err != nil {
-		t.Fatalf("SetFilesMissing (due/excluded): %v", err)
-	}
-	if err := db.SetFilesMissing(ctx, []int64{notYetDueID}, recent); err != nil {
-		t.Fatalf("SetFilesMissing (not yet due): %v", err)
+	if err := db.SetFilesMissing(ctx, []int64{targetID, untouchedID}, old); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
 	}
 
-	cutoff := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	files, books, err := db.PruneMissingFiles(ctx, cutoff, []string{"skipped"})
+	files, books, err := db.PruneMissingFiles(ctx, []int64{targetID})
 	if err != nil {
 		t.Fatalf("PruneMissingFiles: %v", err)
 	}
 	if files != 1 || books != 1 {
-		t.Errorf("PruneMissingFiles = files=%d books=%d, want files=1 books=1 (only due.epub)", files, books)
+		t.Errorf("PruneMissingFiles = files=%d books=%d, want files=1 books=1 (only target.epub)", files, books)
 	}
 
-	if f, err := db.FindFileByPath(ctx, "due.epub"); err != nil || f != nil {
-		t.Errorf("due.epub survived pruning: %+v, %v", f, err)
+	if f, err := db.FindFileByPath(ctx, "target.epub"); err != nil || f != nil {
+		t.Errorf("target.epub survived pruning: %+v, %v", f, err)
 	}
-	if f, err := db.FindFileByPath(ctx, "not-yet-due.epub"); err != nil || f == nil {
-		t.Errorf("not-yet-due.epub was pruned early: %+v, %v", f, err)
-	}
-	if f, err := db.FindFileByPath(ctx, "skipped/due.epub"); err != nil || f == nil {
-		t.Errorf("skipped/due.epub was pruned despite being under an excluded prefix: %+v, %v", f, err)
+	// untouched.epub is just as overdue as target.epub was, but wasn't
+	// named — PruneMissingFiles must not decide on its own that it also
+	// qualifies.
+	if f, err := db.FindFileByPath(ctx, "untouched.epub"); err != nil || f == nil {
+		t.Errorf("untouched.epub was pruned despite not being in the given ID list: %+v, %v", f, err)
 	}
 }
 
@@ -853,13 +852,12 @@ func TestPruneMissingFilesDeletesBookOnlyWhenLastLocationGoes(t *testing.T) {
 	}
 
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	cutoff := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 
 	// Losing one of two locations must not delete the book.
 	if err := db.SetFilesMissing(ctx, []int64{fileA.ID}, old); err != nil {
 		t.Fatalf("SetFilesMissing a: %v", err)
 	}
-	files, books, err := db.PruneMissingFiles(ctx, cutoff, nil)
+	files, books, err := db.PruneMissingFiles(ctx, []int64{fileA.ID})
 	if err != nil {
 		t.Fatalf("PruneMissingFiles (one of two): %v", err)
 	}
@@ -878,7 +876,7 @@ func TestPruneMissingFilesDeletesBookOnlyWhenLastLocationGoes(t *testing.T) {
 	if err := db.SetFilesMissing(ctx, []int64{fileB.ID}, old); err != nil {
 		t.Fatalf("SetFilesMissing b: %v", err)
 	}
-	files, books, err = db.PruneMissingFiles(ctx, cutoff, nil)
+	files, books, err = db.PruneMissingFiles(ctx, []int64{fileB.ID})
 	if err != nil {
 		t.Fatalf("PruneMissingFiles (last location): %v", err)
 	}

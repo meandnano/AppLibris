@@ -426,22 +426,31 @@ func (db *DB) ClearFilesMissing(ctx context.Context, fileIDs []int64) error {
 	})
 }
 
-// PruneMissingFiles deletes every book_files row marked missing before
-// before, then deletes any book those deletions left with no locations.
+// PruneMissingFiles deletes exactly the book_files rows named by fileIDs,
+// then deletes any book those deletions left with no locations.
 //
-// excludePrefixes names directories the caller could not currently
-// re-verify (an unreadable subtree from this sweep, say): a row whose path
-// falls under one of them is left alone regardless of how long ago it was
-// marked, since being unable to look isn't evidence the file is still
-// gone. An empty excludePrefixes list excludes nothing — pass it whenever
-// the whole library was walked cleanly.
-func (db *DB) PruneMissingFiles(ctx context.Context, before time.Time, excludePrefixes []string) (files int, books int, err error) {
+// It does no re-verification of its own — no age check, no path exclusion.
+// Deciding what's safe to delete belongs entirely to the caller, which is
+// the only place with access to live filesystem state: fileIDs must
+// already be rows the caller independently confirmed, this exact sweep,
+// via a current os.Lstat returning fs.ErrNotExist, and separately past
+// their grace period. A row merely aged past grace, or under a directory
+// the sweep couldn't re-read, must never appear here — only a
+// currently-reconfirmed absence earns deletion.
+func (db *DB) PruneMissingFiles(ctx context.Context, fileIDs []int64) (files int, books int, err error) {
+	if len(fileIDs) == 0 {
+		return 0, 0, nil
+	}
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		clause, args := excludePrefixMatchClause(excludePrefixes)
-		args = append([]any{formatTime(before)}, args...)
+		placeholders := make([]string, len(fileIDs))
+		args := make([]any, len(fileIDs))
+		for i, id := range fileIDs {
+			placeholders[i] = "?"
+			args[i] = id
+		}
 
 		rows, qErr := tx.QueryContext(ctx,
-			`DELETE FROM book_files WHERE missing_since IS NOT NULL AND missing_since < ? AND (`+clause+`) RETURNING book_id`,
+			`DELETE FROM book_files WHERE id IN (`+strings.Join(placeholders, ",")+`) RETURNING book_id`,
 			args...)
 		if qErr != nil {
 			return qErr
@@ -474,19 +483,4 @@ func (db *DB) PruneMissingFiles(ctx context.Context, before time.Time, excludePr
 		return nil
 	})
 	return files, books, err
-}
-
-// excludePrefixMatchClause builds the SQL fragment for "file_path is not
-// under any of prefixes" — an empty list excludes nothing.
-func excludePrefixMatchClause(prefixes []string) (string, []any) {
-	if len(prefixes) == 0 {
-		return "1 = 1", nil
-	}
-	clauses := make([]string, len(prefixes))
-	args := make([]any, len(prefixes))
-	for i, p := range prefixes {
-		clauses[i] = "file_path NOT LIKE ?"
-		args[i] = p + "/%"
-	}
-	return strings.Join(clauses, " AND "), args
 }

@@ -74,18 +74,27 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   taking its book with it via the same orphan-pruning path as a reassigned
   file if it was the book's last location) once it's stayed missing past
   the `MISSING_GRACE` duration — a row that reappears before then has its
-  mark cleared (`storage.ClearFilesMissing`) instead. Three guards keep
-  this from misreading a transient failure as deletion: a row is only
-  eligible if `os.Lstat` on it fails with `fs.ErrNotExist` specifically
-  (any other error, e.g. a path component that's no longer a directory,
-  only logs a warning); a row under a directory the sweep couldn't read
-  *this* sweep is left untouched, at both mark and prune time (`Scan`
-  tracks these as `skippedDirs`, a negative list — `WalkDir`'s callback
-  only ever reports directory-read failure as a second, error-bearing
-  invocation, so a positive "cleanly read" list isn't obtainable from the
-  API); and reconciliation is skipped entirely if the sweep visited zero
-  files (an unmounted volume can present as an empty directory, so seeing
-  nothing is not evidence that everything is gone), logged at Warn.
+  mark cleared (`storage.ClearFilesMissing`) instead. `storage.
+  PruneMissingFiles` does no filtering of its own (no age check, no path
+  exclusion) — it deletes exactly the file IDs it's given; every guard
+  below lives in the scanner, the only place with access to live
+  filesystem state, and decides that ID list. Guards that keep this from
+  misreading a transient failure as deletion: a row is only eligible if
+  `os.Lstat` on it fails with `fs.ErrNotExist` specifically (any other
+  error, e.g. a path component that's no longer a directory, only logs a
+  warning), and this check runs fresh *every* sweep — including for a row
+  already marked from an earlier sweep — so a row whose failure mode
+  later changes (`ErrNotExist` to `EACCES`, say, or to a directory now
+  sitting at that path) can never be deleted on the strength of a
+  confirmation that's since gone stale; a row under a directory the sweep
+  couldn't read *this* sweep is left untouched, at both mark and prune
+  time (`Scan` tracks these as `skippedDirs`, a negative list — `WalkDir`'s
+  callback only ever reports directory-read failure as a second,
+  error-bearing invocation, so a positive "cleanly read" list isn't
+  obtainable from the API); and reconciliation is skipped entirely if the
+  sweep visited zero files (an unmounted volume can present as an empty
+  directory, so seeing nothing is not evidence that everything is gone),
+  logged at Warn.
 - `internal/service` — the layer beneath HTTP handlers DESIGN.md's
   "Layering for a future API" calls for, so a future `/api/v1` can reuse it
   as a second thin transport alongside `internal/web`. One method so far:
