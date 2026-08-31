@@ -172,6 +172,42 @@ func (db *DB) CreateBook(ctx context.Context, b Book, authorNames []string) (id 
 	return id, err
 }
 
+// CreateBookWithFile inserts a new book row, its authors, and its first
+// file location in one transaction — a crash or write error between the
+// two inserts can no longer leave a book with zero locations. Use this
+// instead of CreateBook + UpsertBookFile whenever both are needed together,
+// which is every case except a derived book created ahead of its (not yet
+// written) file.
+//
+// path may already belong to a different book (a re-download over the same
+// filename, or a library tool rewriting a file in place) — upsertBookFileTx
+// reassigns it unconditionally, same as it always has, so this also prunes
+// that previous owner if the reassignment leaves it with zero locations.
+// Returns the id and title of any book this deleted (both zero if none
+// was), same contract as ReassignFileAndPruneOrphan and for the same
+// reason: the row is gone by the time this returns, so a caller can't look
+// it up afterward.
+func (db *DB) CreateBookWithFile(ctx context.Context, b Book, authorNames []string, path string, size int64, mtime time.Time) (id int64, orphanedID int64, orphanedTitle string, err error) {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		previousOwner, err := previousFileOwnerTx(ctx, tx, path)
+		if err != nil {
+			return err
+		}
+
+		id, err = createBookTx(ctx, tx, b, authorNames)
+		if err != nil {
+			return err
+		}
+		if _, err := upsertBookFileTx(ctx, tx, id, path, size, mtime); err != nil {
+			return err
+		}
+
+		orphanedID, orphanedTitle, err = pruneOrphanIfEmptyTx(ctx, tx, previousOwner, id)
+		return err
+	})
+	return id, orphanedID, orphanedTitle, err
+}
+
 func findOrCreateAuthor(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
 	var id int64
 	err := tx.QueryRowContext(ctx, `SELECT id FROM authors WHERE name = ?`, name).Scan(&id)
@@ -220,6 +256,80 @@ func (db *DB) UpsertBookFile(ctx context.Context, bookID int64, path string, siz
 		return err
 	})
 	return id, err
+}
+
+// ReassignFileAndPruneOrphan is upsertBookFileTx run as its own write
+// transaction, followed by pruning whatever book previously owned path if
+// the reassignment left it orphaned — see pruneOrphanIfEmptyTx.
+//
+// Returns the id and title of any book this deleted (both zero if none
+// was), so the caller can log and count it without a second lookup — the
+// row is gone by the time this returns, so that lookup would be too late.
+func (db *DB) ReassignFileAndPruneOrphan(ctx context.Context, bookID int64, path string, size int64, mtime time.Time) (fileID int64, orphanedID int64, orphanedTitle string, err error) {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		previousOwner, err := previousFileOwnerTx(ctx, tx, path)
+		if err != nil {
+			return err
+		}
+
+		fileID, err = upsertBookFileTx(ctx, tx, bookID, path, size, mtime)
+		if err != nil {
+			return err
+		}
+
+		orphanedID, orphanedTitle, err = pruneOrphanIfEmptyTx(ctx, tx, previousOwner, bookID)
+		return err
+	})
+	return fileID, orphanedID, orphanedTitle, err
+}
+
+// previousFileOwnerTx returns the book_id currently at path, if any, for a
+// caller about to reassign that path via upsertBookFileTx — read first,
+// since the upsert overwrites it. It must be called from inside a DB.Write
+// callback — see DB.Write's contract.
+func previousFileOwnerTx(ctx context.Context, tx *sql.Tx, path string) (sql.NullInt64, error) {
+	var owner sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT book_id FROM book_files WHERE file_path = ?`, path).Scan(&owner)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return sql.NullInt64{}, err
+	}
+	return owner, nil
+}
+
+// pruneOrphanIfEmptyTx deletes previousOwner if it is a real, different
+// book (not newOwnerID itself — a path reassigned to the book that already
+// owned it, e.g. a plain stat refresh, is not a reassignment at all) that
+// upsertBookFileTx has just left with zero book_files rows.
+//
+// The "still has rows" check runs after the upsert, not as a count taken
+// before it: a book with two known locations that loses one to a
+// reassignment is not an orphan, and a before-check gets that wrong.
+//
+// It must be called from inside a DB.Write callback, after the upsert —
+// see DB.Write's contract.
+func pruneOrphanIfEmptyTx(ctx context.Context, tx *sql.Tx, previousOwner sql.NullInt64, newOwnerID int64) (orphanedID int64, orphanedTitle string, err error) {
+	if !previousOwner.Valid || previousOwner.Int64 == newOwnerID {
+		return 0, "", nil
+	}
+
+	var stillHasFiles bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM book_files WHERE book_id = ?)`, previousOwner.Int64).
+		Scan(&stillHasFiles)
+	if err != nil {
+		return 0, "", err
+	}
+	if stillHasFiles {
+		return 0, "", nil
+	}
+
+	var title string
+	if err := tx.QueryRowContext(ctx, `SELECT title FROM books WHERE id = ?`, previousOwner.Int64).Scan(&title); err != nil {
+		return 0, "", err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, previousOwner.Int64); err != nil {
+		return 0, "", err
+	}
+	return previousOwner.Int64, title, nil
 }
 
 // updateBookFileStatTx refreshes the cheap-check fields (size, mtime) for a

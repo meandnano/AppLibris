@@ -367,6 +367,118 @@ func TestScanTracksMultipleLocations(t *testing.T) {
 	}
 }
 
+// Regression for the orphan bug this step fixes: overwriting a path with
+// different, never-before-seen content used to reassign the path (new
+// content means the scanner takes the "create a book" branch, and
+// upsertBookFileTx's ON CONFLICT reassigns the path unconditionally) and
+// leave the previous book's row behind with zero locations, forever.
+// Before this step, this assertion failed with 2 books.
+func TestScanPrunesOrphanWhenPathContentReplaced(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	path := filepath.Join(libDir, "book.epub")
+	writeTestEPUB(t, path, "Book A", "Author A", nil)
+
+	first, err := Scan(ctx, db, libDir, coversDir)
+	if err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	if first.New != 1 || first.Orphaned != 0 {
+		t.Fatalf("first scan = %+v, want New=1 Orphaned=0", first)
+	}
+
+	// Overwrite the same path with genuinely different, new content — same
+	// filename, a different book, the way a re-download over an existing
+	// file or an in-place metadata rewrite would. New content means this
+	// scan takes the create-a-book branch, not the known-content one.
+	writeTestEPUB(t, path, "Book B", "Author B", nil)
+
+	second, err := Scan(ctx, db, libDir, coversDir)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.New != 1 || second.Orphaned != 1 || second.Moved != 0 {
+		t.Errorf("second scan = %+v, want New=1 Orphaned=1 Moved=0", second)
+	}
+
+	var bookCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books`).Scan(&bookCount); err != nil {
+		t.Fatalf("count books: %v", err)
+	}
+	if bookCount != 1 {
+		t.Errorf("books count = %d, want 1 (Book A's orphaned row must be gone)", bookCount)
+	}
+
+	book := bookByPath(t, ctx, db, path)
+	if book.Title != "Book B" {
+		t.Errorf("book at path = %q, want %q", book.Title, "Book B")
+	}
+}
+
+// The other branch that can orphan a book: the path is overwritten with
+// content that matches an *existing* book elsewhere in the library, not
+// new content. This takes the known-content branch (ReassignFileAndPrune-
+// Orphan) rather than create-a-book (CreateBookWithFile) — both call
+// upsertBookFileTx, which reassigns a path unconditionally, so both need
+// the prune.
+func TestScanPrunesOrphanWhenPathReassignedToKnownContent(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	pathA := filepath.Join(libDir, "a.epub")
+	writeTestEPUB(t, pathA, "Book A", "Author A", nil)
+	pathB := filepath.Join(libDir, "b.epub")
+	writeTestEPUB(t, pathB, "Book B", "Author B", nil)
+
+	first, err := Scan(ctx, db, libDir, coversDir)
+	if err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	if first.New != 2 || first.Orphaned != 0 {
+		t.Fatalf("first scan = %+v, want New=2 Orphaned=0", first)
+	}
+
+	contentB, err := os.ReadFile(pathB)
+	if err != nil {
+		t.Fatalf("read Book B content: %v", err)
+	}
+	// Overwrite A's path with B's exact bytes — known content, reassigned
+	// to a different, already-existing book.
+	if err := os.WriteFile(pathA, contentB, 0o644); err != nil {
+		t.Fatalf("overwrite pathA with Book B's content: %v", err)
+	}
+
+	second, err := Scan(ctx, db, libDir, coversDir)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.Moved != 1 || second.Orphaned != 1 || second.New != 0 {
+		t.Errorf("second scan = %+v, want Moved=1 Orphaned=1 New=0", second)
+	}
+
+	var bookCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books`).Scan(&bookCount); err != nil {
+		t.Fatalf("count books: %v", err)
+	}
+	if bookCount != 1 {
+		t.Errorf("books count = %d, want 1 (Book A's orphaned row must be gone)", bookCount)
+	}
+
+	bookAtA := bookByPath(t, ctx, db, pathA)
+	if bookAtA.Title != "Book B" {
+		t.Errorf("book at pathA = %q, want %q", bookAtA.Title, "Book B")
+	}
+	bookAtB := bookByPath(t, ctx, db, pathB)
+	if bookAtB.ID != bookAtA.ID {
+		t.Errorf("pathA and pathB resolve to different books (%d, %d); want the same Book B", bookAtA.ID, bookAtB.ID)
+	}
+}
+
 func TestSortTitle(t *testing.T) {
 	tests := []struct {
 		name  string
