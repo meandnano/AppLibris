@@ -23,14 +23,15 @@ import (
 
 // Result summarizes what a Scan did, for logging.
 type Result struct {
-	Scanned   int
-	New       int
-	Moved     int
-	Unchanged int
-	Orphaned  int
-	Missing   int
-	Pruned    int
-	Errors    int
+	Scanned           int
+	New               int
+	Moved             int
+	Unchanged         int
+	Orphaned          int
+	Missing           int
+	Pruned            int
+	CoversRegenerated int
+	Errors            int
 }
 
 var supportedExtensions = map[string]bool{
@@ -247,6 +248,11 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 		return fmt.Errorf("find file by path: %w", err)
 	}
 	if bf != nil && bf.FileSize == size && bf.ModifiedAt.Equal(mtime) {
+		book, err := db.FindBookByID(ctx, bf.BookID)
+		if err != nil {
+			return fmt.Errorf("find book by id: %w", err)
+		}
+		maybeRegenerateCover(ctx, db, book, path, coversDir, result)
 		result.Unchanged++
 		return nil
 	}
@@ -266,6 +272,7 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 		if err := db.UpdateBookFileStat(ctx, bf.ID, size, mtime); err != nil {
 			return fmt.Errorf("update file stat: %w", err)
 		}
+		maybeRegenerateCover(ctx, db, book, path, coversDir, result)
 		result.Unchanged++
 		return nil
 	}
@@ -280,6 +287,8 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 		return nil
 	}
 
+	maybeRegenerateCover(ctx, db, book, path, coversDir, result)
+
 	// known content at a path with no (or a stale) book_files row: a move,
 	// a rename, or an additional location for byte-identical content
 	_, orphanedID, orphanedTitle, err := db.ReassignFileAndPruneOrphan(ctx, book.ID, rel, size, mtime)
@@ -289,6 +298,40 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 	logOrphan(path, orphanedID, orphanedTitle, result)
 	result.Moved++
 	return nil
+}
+
+func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Book, sourcePath, coversDir string, result *Result) {
+	if book == nil || book.CoverPath == "" {
+		return
+	}
+
+	info, err := os.Stat(book.CoverPath)
+	if err == nil && info.Size() > 0 {
+		return
+	}
+
+	meta, err := epub.ReadMetadata(sourcePath)
+	if err != nil {
+		slog.Warn("regenerate cover failed", "path", sourcePath, "error", err)
+		return
+	}
+	if len(meta.Cover) == 0 {
+		slog.Warn("regenerate cover failed", "path", sourcePath, "error", "embedded cover is missing")
+		return
+	}
+
+	coverPath, err := cover.Store(coversDir, book.ContentHash, meta.Cover)
+	if err != nil {
+		slog.Warn("regenerate cover failed", "path", sourcePath, "error", err)
+		return
+	}
+	if err := db.UpdateBookCoverPath(ctx, book.ID, coverPath); err != nil {
+		slog.Warn("update regenerated cover path failed", "path", sourcePath, "error", err)
+		return
+	}
+
+	result.CoversRegenerated++
+	slog.Info("cover regenerated", "path", sourcePath, "cover_path", coverPath)
 }
 
 // logOrphan records a book deleted because a path reassignment left it

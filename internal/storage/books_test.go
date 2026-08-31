@@ -52,6 +52,25 @@ func TestCreateAndFindBook(t *testing.T) {
 		t.Errorf("FindBookByContentHash = %+v, want id %d", byHash, id)
 	}
 
+	byID, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatalf("FindBookByID: %v", err)
+	}
+	if byID == nil || byID.ContentHash != "hash-1" {
+		t.Errorf("FindBookByID = %+v, want content hash %q", byID, "hash-1")
+	}
+
+	if err := db.UpdateBookCoverPath(ctx, id, "/covers/hash-1.jpg"); err != nil {
+		t.Fatalf("UpdateBookCoverPath: %v", err)
+	}
+	byID, err = db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatalf("FindBookByID after cover update: %v", err)
+	}
+	if byID == nil || byID.CoverPath != "/covers/hash-1.jpg" {
+		t.Errorf("CoverPath = %q, want %q", byID.CoverPath, "/covers/hash-1.jpg")
+	}
+
 	byPath, err := db.FindFileByPath(ctx, "/library/example.epub")
 	if err != nil {
 		t.Fatalf("FindFileByPath: %v", err)
@@ -82,6 +101,11 @@ func TestFindNotFound(t *testing.T) {
 	byHash, err := db.FindBookByContentHash(ctx, "no-such-hash")
 	if err != nil || byHash != nil {
 		t.Errorf("FindBookByContentHash = %+v, %v; want nil, nil", byHash, err)
+	}
+
+	byID, err := db.FindBookByID(ctx, 999)
+	if err != nil || byID != nil {
+		t.Errorf("FindBookByID = %+v, %v; want nil, nil", byID, err)
 	}
 
 	byPath, err := db.FindFileByPath(ctx, "/nowhere.epub")

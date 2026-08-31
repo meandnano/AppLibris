@@ -82,6 +82,12 @@ func (db *DB) FindBookByContentHash(ctx context.Context, hash string) (*Book, er
 	return scanBook(row)
 }
 
+// FindBookByID returns the book with the given id, or nil if none exists
+func (db *DB) FindBookByID(ctx context.Context, id int64) (*Book, error) {
+	row := db.read.QueryRowContext(ctx, `SELECT `+bookColumns+` FROM books WHERE id = ?`, id)
+	return scanBook(row)
+}
+
 // ListBooks returns every book, ordered by sort_title.
 func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
 	rows, err := db.read.QueryContext(ctx, `SELECT `+bookColumns+` FROM books ORDER BY sort_title`)
@@ -387,6 +393,14 @@ func updateBookFileStatTx(ctx context.Context, tx *sql.Tx, fileID int64, size in
 func (db *DB) UpdateBookFileStat(ctx context.Context, fileID int64, size int64, mtime time.Time) error {
 	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		return updateBookFileStatTx(ctx, tx, fileID, size, mtime)
+	})
+}
+
+// UpdateBookCoverPath records the current derived cover location
+func (db *DB) UpdateBookCoverPath(ctx context.Context, bookID int64, path string) error {
+	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE books SET cover_path = ? WHERE id = ?`, path, bookID)
+		return err
 	})
 }
 
