@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"sort"
 )
 
@@ -43,9 +44,11 @@ func migrate(db *sql.DB) error {
 		if applied[name] {
 			continue
 		}
+		slog.Warn("applying migration", "version", name)
 		if err := applyMigration(db, name); err != nil {
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
+		slog.Warn("migration applied", "version", name)
 	}
 	return nil
 }

@@ -4,7 +4,7 @@
 package web
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -47,7 +47,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		books, err := svc.ListBooks(r.Context())
 		if err != nil {
-			log.Printf("web: list books: %v", err)
+			slog.Error("list books failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -65,7 +65,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 
 		page := libraryPage{Title: "Library", Count: len(cards), Books: cards}
 		if err := render(w, "library.html", page); err != nil {
-			log.Printf("web: render library.html: %v", err)
+			slog.Error("render template failed", "template", "library.html", "error", err)
 		}
 	}
 }

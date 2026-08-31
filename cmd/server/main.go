@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -19,21 +19,32 @@ func main() {
 	libraryDir := envOrDefault("LIBRARY_DIR", "./library")
 	coversDir := envOrDefault("COVERS_DIR", "./data/covers")
 
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(envOrDefault("LOG_LEVEL", "INFO"))); err != nil {
+		slog.Error("parse LOG_LEVEL", "error", err)
+		os.Exit(1)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
 	scanInterval, err := time.ParseDuration(envOrDefault("SCAN_INTERVAL", "15m"))
 	if err != nil {
-		log.Fatalf("parse SCAN_INTERVAL: %v", err)
+		slog.Error("parse SCAN_INTERVAL", "error", err)
+		os.Exit(1)
 	}
 
 	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
-		log.Fatalf("create library directory: %v", err)
+		slog.Error("create library directory", "error", err)
+		os.Exit(1)
 	}
 	if err := os.MkdirAll(coversDir, 0o755); err != nil {
-		log.Fatalf("create covers directory: %v", err)
+		slog.Error("create covers directory", "error", err)
+		os.Exit(1)
 	}
 
 	db, err := storage.Open(dbPath)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		slog.Error("open database", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
@@ -48,9 +59,10 @@ func main() {
 	})
 	mux.Handle("/", web.Routes(svc, coversDir))
 
-	log.Printf("listening on %s (db: %s)", addr, dbPath)
+	slog.Info("listening", "addr", addr, "db_path", dbPath)
 	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("serve: %v", err)
+		slog.Error("serve", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -63,13 +75,21 @@ func periodicScan(db *storage.DB, libraryDir, coversDir string, interval time.Du
 }
 
 func runScan(db *storage.DB, libraryDir, coversDir string) {
+	slog.Debug("scan starting", "library_dir", libraryDir)
+
 	result, err := scanner.Scan(context.Background(), db, libraryDir, coversDir)
 	if err != nil {
-		log.Printf("scan: %v", err)
+		slog.Error("scan", "error", err)
 		return
 	}
-	log.Printf("scan complete: %d scanned, %d new, %d moved, %d unchanged, %d errors",
-		result.Scanned, result.New, result.Moved, result.Unchanged, result.Errors)
+
+	attrs := []any{"scanned", result.Scanned, "new", result.New, "moved", result.Moved,
+		"unchanged", result.Unchanged, "errors", result.Errors}
+	if result.Errors > 0 {
+		slog.Warn("scan complete", attrs...)
+	} else {
+		slog.Info("scan complete", attrs...)
+	}
 }
 
 func envOrDefault(key, def string) string {
