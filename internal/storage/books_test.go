@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -362,7 +363,7 @@ func TestDeletingBookCascadesFilesAndAuthorLinkButKeepsAuthor(t *testing.T) {
 
 	// No DeleteBook method exists yet (out of scope for this step); raw SQL
 	// is the only way to exercise the cascade the schema now provides.
-	if err := db.Write(ctx, func(tx *sql.Tx) error {
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, bookID)
 		return err
 	}); err != nil {
@@ -402,11 +403,83 @@ func TestAuthorNameIsUnique(t *testing.T) {
 
 	// Bypass findOrCreateAuthor's own SELECT-then-INSERT dedup, to prove the
 	// database-level constraint is what actually stops a duplicate.
-	err := db.Write(ctx, func(tx *sql.Tx) error {
+	err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO authors (name) VALUES (?)`, "Shared Author")
 		return err
 	})
 	if err == nil {
 		t.Fatal("inserting a duplicate author name: want an error, got nil")
+	}
+}
+
+// The …Tx helpers exist so a caller can compose more than one write inside
+// a single DB.Write, atomically. This is what composing two of them,
+// successfully, actually looks like.
+func TestComposedWritesCommitTogether(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	var bookID int64
+	err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		id, err := createBookTx(ctx, tx, Book{ContentHash: "hash-1", Title: "Composed Book", Format: "epub"}, nil)
+		if err != nil {
+			return err
+		}
+		bookID = id
+		_, err = upsertBookFileTx(ctx, tx, id, "/path.epub", 100, mtime)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("db.Write: %v", err)
+	}
+
+	book, err := db.FindBookByContentHash(ctx, "hash-1")
+	if err != nil || book == nil || book.ID != bookID {
+		t.Fatalf("FindBookByContentHash = %+v, %v; want book %d", book, err, bookID)
+	}
+	file, err := db.FindFileByPath(ctx, "/path.epub")
+	if err != nil || file == nil || file.BookID != bookID {
+		t.Fatalf("FindFileByPath = %+v, %v; want book %d", file, err, bookID)
+	}
+}
+
+// The property the whole step is for: a later failure in the same callback
+// must undo an earlier successful …Tx call too, not just its own statement.
+// Before this step there was no way for two writes to even share a
+// transaction, so this case could not previously exist, let alone be tested.
+func TestComposedWritesRollBackTogether(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	sentinel := errors.New("boom")
+	err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		id, err := createBookTx(ctx, tx, Book{ContentHash: "hash-1", Title: "Rolled Back Book", Format: "epub"}, nil)
+		if err != nil {
+			return err
+		}
+		if _, err := upsertBookFileTx(ctx, tx, id, "/path.epub", 100, mtime); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("db.Write error = %v, want %v", err, sentinel)
+	}
+
+	book, err := db.FindBookByContentHash(ctx, "hash-1")
+	if err != nil {
+		t.Fatalf("FindBookByContentHash: %v", err)
+	}
+	if book != nil {
+		t.Errorf("FindBookByContentHash = %+v, want nil (rolled back)", book)
+	}
+	file, err := db.FindFileByPath(ctx, "/path.epub")
+	if err != nil {
+		t.Fatalf("FindFileByPath: %v", err)
+	}
+	if file != nil {
+		t.Errorf("FindFileByPath = %+v, want nil (rolled back)", file)
 	}
 }
