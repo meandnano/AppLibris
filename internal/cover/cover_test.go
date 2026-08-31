@@ -94,3 +94,50 @@ func TestStoreRejectsCorruptInput(t *testing.T) {
 		t.Errorf("dir has %d entries, want 0 (no file should be written on decode failure)", len(entries))
 	}
 }
+
+func TestStoreCreatesMissingDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "covers")
+
+	path, err := Store(dir, "hash", solidPNG(t, 20, 30))
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat stored cover: %v", err)
+	}
+}
+
+func TestStoreRemovesTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+
+	path, err := Store(dir, "hash", solidPNG(t, 20, 30))
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || filepath.Join(dir, entries[0].Name()) != path {
+		t.Errorf("cover directory entries = %v, want only %s", entries, path)
+	}
+}
+
+func TestStoreReplacesExistingCover(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hash.jpg")
+	if err := os.WriteFile(path, []byte("partial"), 0o644); err != nil {
+		t.Fatalf("write existing cover: %v", err)
+	}
+
+	storedPath, err := Store(dir, "hash", solidPNG(t, 80, 100))
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	if storedPath != path {
+		t.Errorf("stored path = %q, want %q", storedPath, path)
+	}
+	if width, height := decodedSize(t, path); width != 80 || height != 100 {
+		t.Errorf("stored size = %dx%d, want 80x100", width, height)
+	}
+}

@@ -40,7 +40,9 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   EPUB2's `<meta name="cover">`) as raw bytes.
 - `internal/cover` — turns a raw cover image into the stored thumbnail:
   resized to ~400px on the long edge (never upscaling), JPEG, written to a
-  derived directory keyed by content hash.
+  derived directory keyed by content hash. `Store` creates that directory
+  on demand and writes through a same-directory temporary file plus atomic
+  rename, so readers never observe a partial canonical cover.
 - `internal/resend` — `Client.Send` POSTs one attachment to Resend's API
   (DESIGN.md's send-to-Kindle transport), enforcing the ~28MB size limit
   DESIGN.md derives before attempting a send. Nothing calls it yet — no
@@ -55,8 +57,15 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   file and a genuine duplicate location alike, since the two are
   indistinguishable from a single path's perspective. New EPUB files get
   embedded metadata and a stored cover via `internal/epub`/`internal/cover`;
-  FB2 files are indexed (format, filename as title) but don't get embedded
-  metadata or covers parsed yet. A new book is created together with its
+  for known content, a sweep re-extracts a recorded cover whose file is
+  missing or zero bytes and refreshes its stored path, making `COVERS_DIR`
+  disposable. An empty stored cover path records that no embedded cover
+  was found and is not retried on every sweep; a separate `cover_retry`
+  marker records a transient initial store failure and retries it later.
+  Cover inspection regenerates only on a missing or zero-byte file; other
+  stat failures warn without re-parsing the source. FB2 files are indexed
+  (format, filename as title) but don't get embedded metadata or covers
+  parsed yet. A new book is created together with its
   first file location in one transaction (`storage.CreateBookWithFile`).
   Content replacing a known path's previous content reassigns that
   `book_files` row and, in the same transaction, deletes whatever book it

@@ -22,23 +22,35 @@ const (
 )
 
 // Store decodes raw, resizes it so its long edge is ~maxLongEdge (never
-// upscaling a smaller source), and writes it as a JPEG to
-// dir/contentHash.jpg. dir must already exist — Store doesn't create it.
+// upscaling a smaller source), and atomically writes it as a JPEG to
+// dir/contentHash.jpg, creating dir when needed
 func Store(dir, contentHash string, raw []byte) (string, error) {
 	src, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return "", fmt.Errorf("decode cover image: %w", err)
 	}
 
-	path := filepath.Join(dir, contentHash+".jpg")
-	f, err := os.Create(path)
-	if err != nil {
-		return "", fmt.Errorf("create %s: %w", path, err)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create cover directory %s: %w", dir, err)
 	}
-	defer f.Close()
 
-	if err := jpeg.Encode(f, resize(src), &jpeg.Options{Quality: jpegQuality}); err != nil {
+	path := filepath.Join(dir, contentHash+".jpg")
+	tmp, err := os.CreateTemp(dir, contentHash+".jpg.tmp*")
+	if err != nil {
+		return "", fmt.Errorf("create temporary cover: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := jpeg.Encode(tmp, resize(src), &jpeg.Options{Quality: jpegQuality}); err != nil {
+		tmp.Close()
 		return "", fmt.Errorf("encode jpeg: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close temporary cover: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return "", fmt.Errorf("replace cover %s: %w", path, err)
 	}
 	return path, nil
 }

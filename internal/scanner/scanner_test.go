@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,8 +136,8 @@ func bookByPath(t *testing.T, ctx context.Context, db *storage.DB, relPath strin
 	}
 
 	var b storage.Book
-	err = db.Read().QueryRowContext(ctx, `SELECT title, format, cover_path FROM books WHERE id = ?`, f.BookID).
-		Scan(&b.Title, &b.Format, &b.CoverPath)
+	err = db.Read().QueryRowContext(ctx, `SELECT title, format, cover_path, cover_retry FROM books WHERE id = ?`, f.BookID).
+		Scan(&b.Title, &b.Format, &b.CoverPath, &b.CoverRetry)
 	if err != nil {
 		t.Fatalf("look up book %d: %v", f.BookID, err)
 	}
@@ -222,6 +223,192 @@ func TestScanExtractsCover(t *testing.T) {
 	if _, err := jpeg.Decode(f); err != nil {
 		t.Errorf("stored cover does not decode as JPEG: %v", err)
 	}
+}
+
+func TestScanRegeneratesMissingCoverDirectory(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", testCoverImage(t))
+	first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	if first.New != 1 {
+		t.Fatalf("first scan = %+v, want New=1", first)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	if err := os.RemoveAll(coversDir); err != nil {
+		t.Fatalf("remove covers directory: %v", err)
+	}
+
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.Unchanged != 1 || second.CoversRegenerated != 1 || second.Errors != 0 {
+		t.Errorf("second scan = %+v, want Unchanged=1 CoversRegenerated=1 Errors=0", second)
+	}
+	if _, err := os.Stat(book.CoverPath); err != nil {
+		t.Fatalf("stat regenerated cover: %v", err)
+	}
+	if width, height := decodedJPEGSize(t, book.CoverPath); width != 20 || height != 30 {
+		t.Errorf("regenerated cover size = %dx%d, want 20x30", width, height)
+	}
+}
+
+func TestScanRegeneratesZeroByteCover(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", testCoverImage(t))
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	if err := os.WriteFile(book.CoverPath, nil, 0o644); err != nil {
+		t.Fatalf("truncate cover: %v", err)
+	}
+
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.CoversRegenerated != 1 {
+		t.Errorf("second scan = %+v, want CoversRegenerated=1", second)
+	}
+	if width, height := decodedJPEGSize(t, book.CoverPath); width != 20 || height != 30 {
+		t.Errorf("regenerated cover size = %dx%d, want 20x30", width, height)
+	}
+}
+
+func TestScanDoesNotRetryCoverlessBook(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
+	first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if first.CoversRegenerated != 0 || second.CoversRegenerated != 0 {
+		t.Errorf("cover regeneration counts = first %d, second %d, want both 0", first.CoversRegenerated, second.CoversRegenerated)
+	}
+	if book := bookByPath(t, ctx, db, "book.epub"); book.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", book.CoverPath)
+	}
+	if strings.Contains(logs.String(), "regenerate cover failed") {
+		t.Errorf("coverless rescan attempted regeneration: %s", logs.String())
+	}
+}
+
+func TestScanRetriesInitialCoverStoreFailure(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := filepath.Join(t.TempDir(), "covers")
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if err := os.WriteFile(coversDir, []byte("blocks directory creation"), 0o644); err != nil {
+		t.Fatalf("write covers path blocker: %v", err)
+	}
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", testCoverImage(t))
+	first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	if first.New != 1 || first.Errors != 0 {
+		t.Fatalf("first scan = %+v, want New=1 Errors=0", first)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	if book.CoverPath != "" || !book.CoverRetry {
+		t.Fatalf("book after failed store = %+v, want empty path and retry marker", book)
+	}
+
+	if err := os.Remove(coversDir); err != nil {
+		t.Fatalf("remove covers path blocker: %v", err)
+	}
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.Unchanged != 1 || second.CoversRegenerated != 1 || second.Errors != 0 {
+		t.Errorf("second scan = %+v, want Unchanged=1 CoversRegenerated=1 Errors=0", second)
+	}
+	book = bookByPath(t, ctx, db, "book.epub")
+	if book.CoverPath == "" || book.CoverRetry {
+		t.Fatalf("book after retry = %+v, want stored path and cleared retry marker", book)
+	}
+	decodedJPEGSize(t, book.CoverPath)
+}
+
+func TestScanDoesNotRegenerateCoverOnNonNotExistStatError(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", testCoverImage(t))
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	if err := os.Remove(book.CoverPath); err != nil {
+		t.Fatalf("remove cover: %v", err)
+	}
+	if err := os.Symlink(filepath.Base(book.CoverPath), book.CoverPath); err != nil {
+		t.Fatalf("create cover symlink loop: %v", err)
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.CoversRegenerated != 0 || second.Errors != 0 {
+		t.Errorf("second scan = %+v, want CoversRegenerated=0 Errors=0", second)
+	}
+	if !strings.Contains(logs.String(), "inspect cover failed") {
+		t.Errorf("scan log = %q, want inspect-cover warning", logs.String())
+	}
+	info, err := os.Lstat(book.CoverPath)
+	if err != nil {
+		t.Fatalf("lstat cover after scan: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("cover path mode after scan = %v, want original symlink untouched", info.Mode())
+	}
+}
+
+func decodedJPEGSize(t *testing.T, path string) (width, height int) {
+	t.Helper()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+	img, err := jpeg.Decode(f)
+	if err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return img.Bounds().Dx(), img.Bounds().Dy()
 }
 
 func TestScanIsIdempotent(t *testing.T) {

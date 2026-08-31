@@ -30,6 +30,7 @@ func TestCreateAndFindBook(t *testing.T) {
 		ContentHash: "hash-1",
 		Title:       "Example Book",
 		SortTitle:   "Example Book",
+		CoverRetry:  true,
 		Format:      "epub",
 	}, []string{"Jane Doe", "John Roe"})
 	if err != nil {
@@ -51,6 +52,20 @@ func TestCreateAndFindBook(t *testing.T) {
 	if byHash == nil || byHash.ID != id {
 		t.Errorf("FindBookByContentHash = %+v, want id %d", byHash, id)
 	}
+	if !byHash.CoverRetry {
+		t.Error("CoverRetry = false, want true before cover update")
+	}
+
+	if err := db.UpdateBookCoverPath(ctx, id, "/covers/hash-1.jpg"); err != nil {
+		t.Fatalf("UpdateBookCoverPath: %v", err)
+	}
+	byHash, err = db.FindBookByContentHash(ctx, "hash-1")
+	if err != nil {
+		t.Fatalf("FindBookByContentHash after cover update: %v", err)
+	}
+	if byHash == nil || byHash.CoverPath != "/covers/hash-1.jpg" || byHash.CoverRetry {
+		t.Errorf("book after cover update = %+v, want path set and retry cleared", byHash)
+	}
 
 	byPath, err := db.FindFileByPath(ctx, "/library/example.epub")
 	if err != nil {
@@ -61,6 +76,9 @@ func TestCreateAndFindBook(t *testing.T) {
 	}
 	if byPath.ID != fileID || byPath.BookID != id || byPath.FileSize != 1234 {
 		t.Errorf("FindFileByPath = %+v, unexpected fields", byPath)
+	}
+	if byPath.BookContentHash != "hash-1" || byPath.BookCoverPath != "/covers/hash-1.jpg" || byPath.BookCoverRetry {
+		t.Errorf("FindFileByPath book cover fields = %+v, unexpected values", byPath)
 	}
 	if !byPath.ModifiedAt.Equal(mtime) {
 		t.Errorf("ModifiedAt = %v, want %v", byPath.ModifiedAt, mtime)
