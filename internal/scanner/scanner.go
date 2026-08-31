@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,7 +55,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Re
 
 		result.Scanned++
 		if err := scanFile(ctx, db, path, coversDir, &result); err != nil {
-			log.Printf("scanner: %s: %v", path, err)
+			slog.Warn("scan file failed", "path", path, "error", err)
 			result.Errors++
 		}
 		return nil
@@ -131,7 +131,7 @@ func createBook(ctx context.Context, db *storage.DB, path, hash, coversDir strin
 	if len(meta.Cover) > 0 {
 		p, err := cover.Store(coversDir, hash, meta.Cover)
 		if err != nil {
-			log.Printf("scanner: %s: storing cover: %v", path, err)
+			slog.Warn("store cover failed", "path", path, "error", err)
 		} else {
 			coverPath = p
 		}
@@ -171,7 +171,7 @@ func extractMetadata(path, ext string) bookMeta {
 
 	m, err := epub.ReadMetadata(path)
 	if err != nil {
-		log.Printf("scanner: %s: reading embedded metadata: %v", path, err)
+		slog.Warn("read embedded metadata failed", "path", path, "error", err)
 		return bookMeta{Title: fallbackTitle}
 	}
 
