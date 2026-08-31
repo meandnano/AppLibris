@@ -6,16 +6,41 @@ package web
 import (
 	"log"
 	"net/http"
+	"path/filepath"
+	"strconv"
 
 	"library/internal/service"
 )
 
-// Routes builds the web UI's HTTP handler.
-func Routes(svc *service.Service) http.Handler {
+// Routes builds the web UI's HTTP handler. coversDir is the directory the
+// scanner writes stored cover thumbnails into; it is served read-only under
+// /covers/ so the library grid can reference a cover by URL rather than by
+// the absolute on-disk path storage keeps.
+func Routes(svc *service.Service, coversDir string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", libraryHandler(svc))
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
+	mux.Handle("GET /covers/", http.StripPrefix("/covers/", http.FileServer(http.Dir(coversDir))))
 	return mux
+}
+
+// bookCard is one library-grid entry shaped for the template: a
+// service.BookSummary with its author list flattened to a single line and
+// its stored cover path turned into a URL. The template stays logic-free;
+// the shaping happens here.
+type bookCard struct {
+	ID         int64
+	Title      string
+	AuthorLine string
+	Format     string
+	CoverURL   string
+}
+
+// libraryPage is the data library.html renders against.
+type libraryPage struct {
+	Title string
+	Count int
+	Books []bookCard
 }
 
 func libraryHandler(svc *service.Service) http.HandlerFunc {
@@ -26,8 +51,46 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		if err := render(w, "library.html", books); err != nil {
+
+		cards := make([]bookCard, len(books))
+		for i, b := range books {
+			cards[i] = bookCard{
+				ID:         b.ID,
+				Title:      b.Title,
+				AuthorLine: authorLine(b.Authors),
+				Format:     b.Format,
+				CoverURL:   coverURL(b.CoverPath),
+			}
+		}
+
+		page := libraryPage{Title: "Library", Count: len(cards), Books: cards}
+		if err := render(w, "library.html", page); err != nil {
 			log.Printf("web: render library.html: %v", err)
 		}
 	}
+}
+
+// authorLine renders a book's authors as the single line a grid card has room
+// for. Three or more names would wrap past the card, so they collapse.
+func authorLine(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " & " + names[1]
+	default:
+		return names[0] + " and " + strconv.Itoa(len(names)-1) + " others"
+	}
+}
+
+// coverURL maps a stored cover's filesystem path to its /covers/ URL. Covers
+// are named by content hash in one flat directory, so the base name is the
+// whole URL.
+func coverURL(coverPath string) string {
+	if coverPath == "" {
+		return ""
+	}
+	return "/covers/" + filepath.Base(coverPath)
 }
