@@ -248,9 +248,11 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 		return fmt.Errorf("find file by path: %w", err)
 	}
 	if bf != nil && bf.FileSize == size && bf.ModifiedAt.Equal(mtime) {
-		book, err := db.FindBookByID(ctx, bf.BookID)
-		if err != nil {
-			return fmt.Errorf("find book by id: %w", err)
+		book := &storage.Book{
+			ID:          bf.BookID,
+			ContentHash: bf.BookContentHash,
+			CoverPath:   bf.BookCoverPath,
+			CoverRetry:  bf.BookCoverRetry,
 		}
 		maybeRegenerateCover(ctx, db, book, path, coversDir, result)
 		result.Unchanged++
@@ -301,13 +303,20 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 }
 
 func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Book, sourcePath, coversDir string, result *Result) {
-	if book == nil || book.CoverPath == "" {
+	if book == nil || (book.CoverPath == "" && !book.CoverRetry) {
 		return
 	}
 
-	info, err := os.Stat(book.CoverPath)
-	if err == nil && info.Size() > 0 {
-		return
+	if !book.CoverRetry {
+		info, err := os.Stat(book.CoverPath)
+		if err == nil {
+			if info.Size() > 0 {
+				return
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("inspect cover failed", "path", book.CoverPath, "error", err)
+			return
+		}
 	}
 
 	meta, err := epub.ReadMetadata(sourcePath)
@@ -355,10 +364,12 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 	meta := extractMetadata(path, ext)
 
 	var coverPath string
+	var coverRetry bool
 	if len(meta.Cover) > 0 {
 		p, err := cover.Store(coversDir, hash, meta.Cover)
 		if err != nil {
 			slog.Warn("store cover failed", "path", path, "error", err)
+			coverRetry = true
 		} else {
 			coverPath = p
 		}
@@ -372,6 +383,7 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 		ISBN:        meta.ISBN,
 		Description: meta.Description,
 		CoverPath:   coverPath,
+		CoverRetry:  coverRetry,
 		Format:      strings.TrimPrefix(ext, "."),
 	}
 	_, orphanedID, orphanedTitle, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)

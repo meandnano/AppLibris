@@ -60,7 +60,10 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   for known content, a sweep re-extracts a recorded cover whose file is
   missing or zero bytes and refreshes its stored path, making `COVERS_DIR`
   disposable. An empty stored cover path records that no embedded cover
-  was found and is not retried on every sweep. FB2 files are indexed
+  was found and is not retried on every sweep; a separate `cover_retry`
+  marker records a transient initial store failure and retries it later.
+  Cover inspection regenerates only on a missing or zero-byte file; other
+  stat failures warn without re-parsing the source. FB2 files are indexed
   (format, filename as title) but don't get embedded metadata or covers
   parsed yet. A new book is created together with its
   first file location in one transaction (`storage.CreateBookWithFile`).
