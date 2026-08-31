@@ -78,8 +78,9 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
-// Send emails a to a single recipient. Amazon's Send-to-Kindle only looks
-// at the attachment, so the subject and body are static rather than
+// Send emails a to a single recipient. The subject is always "Convert" —
+// Amazon requires it to accept and convert an EPUB attachment for Kindle,
+// and it's otherwise ignored, so there's no reason to make it
 // caller-configurable. On success it returns Resend's message id, for a
 // future send_log to correlate against delivery/bounce webhooks.
 func (c *Client) Send(ctx context.Context, to string, a Attachment) (id string, err error) {
@@ -90,7 +91,7 @@ func (c *Client) Send(ctx context.Context, to string, a Attachment) (id string, 
 	body, err := json.Marshal(sendRequest{
 		From:    c.from,
 		To:      []string{to},
-		Subject: "Sent from Bookshelf",
+		Subject: "Convert",
 		Attachments: []attachmentPayload{{
 			Filename: a.Filename,
 			Content:  base64.StdEncoding.EncodeToString(a.Content),
