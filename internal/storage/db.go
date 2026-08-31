@@ -10,13 +10,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 
 	_ "modernc.org/sqlite"
 )
 
-// ErrNestedWrite is returned by Write when a write transaction is already
-// in flight on this DB — see Write's doc comment.
+// ErrNestedWrite is returned by Write when the ctx passed to it already
+// carries another Write's in-progress marker — see Write's doc comment.
 var ErrNestedWrite = errors.New("storage: nested DB.Write")
 
 // DB wraps a single SQLite file with two connection pools sharing it: a
@@ -25,9 +24,8 @@ var ErrNestedWrite = errors.New("storage: nested DB.Write")
 // write pool to one connection serializes writes without a hand-rolled
 // goroutine/channel.
 type DB struct {
-	read    *sql.DB
-	write   *sql.DB
-	writing atomic.Bool
+	read  *sql.DB
+	write *sql.DB
 }
 
 // Open opens (creating if necessary) the SQLite database at path, enables
@@ -77,21 +75,35 @@ func (db *DB) Read() *sql.DB {
 	return db.read
 }
 
+// writeInProgressKey marks, on the ctx Write hands to its callback, that a
+// write transaction is already open on this call chain — see Write's doc
+// comment.
+type writeInProgressKey struct{}
+
 // Write runs fn inside a transaction on the single-connection write pool,
 // serializing it against every other write.
 //
-// fn must not call any exported *DB method: the pool has exactly one
-// connection, and an exported method's own BeginTx would block waiting for
-// the connection fn's own caller is already holding — hanging until ctx
-// expires rather than returning an error. Compose a multi-step atomic write
-// from the package-internal "…Tx" helpers (e.g. createBookTx) inside one
-// Write callback instead. A directly nested Write call is caught and
-// returns ErrNestedWrite rather than hanging.
-func (db *DB) Write(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	if !db.writing.CompareAndSwap(false, true) {
+// fn is handed a ctx derived from the one passed to Write; use *that* ctx,
+// not Write's own parameter, for anything fn calls — package-internal "…Tx"
+// helpers (e.g. createBookTx) included. It carries a marker recording that
+// a write is already in flight on this call chain, so that calling an
+// exported *DB method with it — the mistake this guards against, since the
+// pool has exactly one connection and that nested call's own BeginTx would
+// otherwise block on the connection this call already holds, hanging until
+// ctx expires rather than returning an error — is instead caught
+// immediately and returns ErrNestedWrite.
+//
+// A genuinely concurrent call made with an unrelated ctx carries no such
+// marker, so it is unaffected: it blocks on BeginTx like any second caller
+// of a one-connection pool, and succeeds once this transaction commits.
+// The marker is scoped to the ctx passed through a call chain, not to the
+// DB as a whole, specifically so it cannot mistake that ordinary
+// concurrency for nesting.
+func (db *DB) Write(ctx context.Context, fn func(ctx context.Context, tx *sql.Tx) error) error {
+	if ctx.Value(writeInProgressKey{}) != nil {
 		return ErrNestedWrite
 	}
-	defer db.writing.Store(false)
+	ctx = context.WithValue(ctx, writeInProgressKey{}, true)
 
 	tx, err := db.write.BeginTx(ctx, nil)
 	if err != nil {
@@ -99,7 +111,7 @@ func (db *DB) Write(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	}
 	defer tx.Rollback()
 
-	if err := fn(tx); err != nil {
+	if err := fn(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()

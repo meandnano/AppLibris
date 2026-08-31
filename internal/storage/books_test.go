@@ -363,7 +363,7 @@ func TestDeletingBookCascadesFilesAndAuthorLinkButKeepsAuthor(t *testing.T) {
 
 	// No DeleteBook method exists yet (out of scope for this step); raw SQL
 	// is the only way to exercise the cascade the schema now provides.
-	if err := db.Write(ctx, func(tx *sql.Tx) error {
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, bookID)
 		return err
 	}); err != nil {
@@ -403,7 +403,7 @@ func TestAuthorNameIsUnique(t *testing.T) {
 
 	// Bypass findOrCreateAuthor's own SELECT-then-INSERT dedup, to prove the
 	// database-level constraint is what actually stops a duplicate.
-	err := db.Write(ctx, func(tx *sql.Tx) error {
+	err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO authors (name) VALUES (?)`, "Shared Author")
 		return err
 	})
@@ -421,7 +421,7 @@ func TestComposedWritesCommitTogether(t *testing.T) {
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
 	var bookID int64
-	err := db.Write(ctx, func(tx *sql.Tx) error {
+	err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		id, err := createBookTx(ctx, tx, Book{ContentHash: "hash-1", Title: "Composed Book", Format: "epub"}, nil)
 		if err != nil {
 			return err
@@ -454,7 +454,7 @@ func TestComposedWritesRollBackTogether(t *testing.T) {
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
 	sentinel := errors.New("boom")
-	err := db.Write(ctx, func(tx *sql.Tx) error {
+	err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		id, err := createBookTx(ctx, tx, Book{ContentHash: "hash-1", Title: "Rolled Back Book", Format: "epub"}, nil)
 		if err != nil {
 			return err

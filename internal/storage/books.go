@@ -165,7 +165,7 @@ func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string)
 // transaction. Callers attach the book's first file location separately via
 // UpsertBookFile.
 func (db *DB) CreateBook(ctx context.Context, b Book, authorNames []string) (id int64, err error) {
-	err = db.Write(ctx, func(tx *sql.Tx) error {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		id, err = createBookTx(ctx, tx, b, authorNames)
 		return err
 	})
@@ -215,7 +215,7 @@ func upsertBookFileTx(ctx context.Context, tx *sql.Tx, bookID int64, path string
 // UpsertBookFile is upsertBookFileTx run as its own write transaction. See
 // upsertBookFileTx for what it does.
 func (db *DB) UpsertBookFile(ctx context.Context, bookID int64, path string, size int64, mtime time.Time) (id int64, err error) {
-	err = db.Write(ctx, func(tx *sql.Tx) error {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		id, err = upsertBookFileTx(ctx, tx, bookID, path, size, mtime)
 		return err
 	})
@@ -234,7 +234,7 @@ func updateBookFileStatTx(ctx context.Context, tx *sql.Tx, fileID int64, size in
 // UpdateBookFileStat is updateBookFileStatTx run as its own write
 // transaction. See updateBookFileStatTx for what it does.
 func (db *DB) UpdateBookFileStat(ctx context.Context, fileID int64, size int64, mtime time.Time) error {
-	return db.Write(ctx, func(tx *sql.Tx) error {
+	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		return updateBookFileStatTx(ctx, tx, fileID, size, mtime)
 	})
 }
