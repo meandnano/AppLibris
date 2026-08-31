@@ -21,6 +21,12 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   from the title rather than a copy of it — one leading English article
   stripped, case folded — and the column is declared `COLLATE NOCASE`, so
   any `ORDER BY sort_title` is case-insensitive without a per-query clause.
+  `book_files.book_id` and both `book_authors` foreign keys are `ON DELETE
+  CASCADE`, so deleting a book takes its file locations and author links
+  with it (the author row itself survives). `authors.name` has a unique
+  index. Every timestamp column is written as fixed-width UTC RFC 3339 text
+  (`sqliteTimeLayout`/`formatTime` in `internal/storage`), so SQLite's own
+  date functions and a plain `ORDER BY` both work on it.
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
   ISBN, description) from the OPF package inside the zip, and extracts the
   declared cover image (EPUB3 `properties="cover-image"`, falling back to
