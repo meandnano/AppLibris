@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -36,12 +37,13 @@ type Book struct {
 // BookFile mirrors the book_files table: one row per physical location a
 // book's content is known to live at.
 type BookFile struct {
-	ID         int64
-	BookID     int64
-	FilePath   string
-	FileSize   int64
-	ModifiedAt time.Time
-	AddedAt    time.Time
+	ID           int64
+	BookID       int64
+	FilePath     string
+	FileSize     int64
+	ModifiedAt   time.Time
+	AddedAt      time.Time
+	MissingSince sql.NullTime
 }
 
 const bookColumns = `id, content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, format, added_at, modified_at, derived_from`
@@ -60,11 +62,11 @@ func scanBook(row *sql.Row) (*Book, error) {
 	return &b, nil
 }
 
-const bookFileColumns = `id, book_id, file_path, file_size, modified_at, added_at`
+const bookFileColumns = `id, book_id, file_path, file_size, modified_at, added_at, missing_since`
 
 func scanBookFile(row *sql.Row) (*BookFile, error) {
 	var f BookFile
-	err := row.Scan(&f.ID, &f.BookID, &f.FilePath, &f.FileSize, &f.ModifiedAt, &f.AddedAt)
+	err := row.Scan(&f.ID, &f.BookID, &f.FilePath, &f.FileSize, &f.ModifiedAt, &f.AddedAt, &f.MissingSince)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -129,6 +131,32 @@ func (db *DB) ListBookAuthors(ctx context.Context) (map[int64][]string, error) {
 func (db *DB) FindFileByPath(ctx context.Context, path string) (*BookFile, error) {
 	row := db.read.QueryRowContext(ctx, `SELECT `+bookFileColumns+` FROM book_files WHERE file_path = ?`, path)
 	return scanBookFile(row)
+}
+
+// ListFilesUnder returns every book_files row whose path is nested under
+// prefix; prefix "" matches every row. Used to fetch the whole table for
+// missing-file reconciliation, which needs each row's MissingSince to
+// decide what to mark, clear, or leave alone.
+func (db *DB) ListFilesUnder(ctx context.Context, prefix string) ([]BookFile, error) {
+	pattern := "%"
+	if prefix != "" {
+		pattern = prefix + "/%"
+	}
+	rows, err := db.read.QueryContext(ctx, `SELECT `+bookFileColumns+` FROM book_files WHERE file_path LIKE ?`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []BookFile
+	for rows.Next() {
+		var f BookFile
+		if err := rows.Scan(&f.ID, &f.BookID, &f.FilePath, &f.FileSize, &f.ModifiedAt, &f.AddedAt, &f.MissingSince); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
 }
 
 // createBookTx inserts a book and its authors, find-or-creating each author
@@ -296,10 +324,37 @@ func previousFileOwnerTx(ctx context.Context, tx *sql.Tx, path string) (sql.Null
 	return owner, nil
 }
 
-// pruneOrphanIfEmptyTx deletes previousOwner if it is a real, different
-// book (not newOwnerID itself — a path reassigned to the book that already
-// owned it, e.g. a plain stat refresh, is not a reassignment at all) that
-// upsertBookFileTx has just left with zero book_files rows.
+// pruneOrphanedBookTx deletes bookID if it now has zero book_files rows.
+// The cascade from book_authors takes its author links with it; the
+// authors rows themselves are left alone — an author with no books is not
+// itself wrong, and reference-counting authors is a separate concern.
+//
+// Shared by every caller that can leave a book with no locations: a path
+// reassignment (CreateBookWithFile, ReassignFileAndPruneOrphan, via
+// pruneOrphanIfEmptyTx below) and missing-file pruning (PruneMissingFiles).
+// It must be called from inside a DB.Write callback, after whatever change
+// might have emptied the book — see DB.Write's contract.
+func pruneOrphanedBookTx(ctx context.Context, tx *sql.Tx, bookID int64) (deleted bool, title string, err error) {
+	var stillHasFiles bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM book_files WHERE book_id = ?)`, bookID).Scan(&stillHasFiles)
+	if err != nil || stillHasFiles {
+		return false, "", err
+	}
+
+	if err := tx.QueryRowContext(ctx, `SELECT title FROM books WHERE id = ?`, bookID).Scan(&title); err != nil {
+		return false, "", err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, bookID); err != nil {
+		return false, "", err
+	}
+	return true, title, nil
+}
+
+// pruneOrphanIfEmptyTx deletes previousOwner via pruneOrphanedBookTx if it
+// is a real, different book (not newOwnerID itself — a path reassigned to
+// the book that already owned it, e.g. a plain stat refresh, is not a
+// reassignment at all) that upsertBookFileTx has just left with zero
+// book_files rows.
 //
 // The "still has rows" check runs after the upsert, not as a count taken
 // before it: a book with two known locations that loses one to a
@@ -311,22 +366,8 @@ func pruneOrphanIfEmptyTx(ctx context.Context, tx *sql.Tx, previousOwner sql.Nul
 	if !previousOwner.Valid || previousOwner.Int64 == newOwnerID {
 		return 0, "", nil
 	}
-
-	var stillHasFiles bool
-	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM book_files WHERE book_id = ?)`, previousOwner.Int64).
-		Scan(&stillHasFiles)
-	if err != nil {
-		return 0, "", err
-	}
-	if stillHasFiles {
-		return 0, "", nil
-	}
-
-	var title string
-	if err := tx.QueryRowContext(ctx, `SELECT title FROM books WHERE id = ?`, previousOwner.Int64).Scan(&title); err != nil {
-		return 0, "", err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, previousOwner.Int64); err != nil {
+	deleted, title, err := pruneOrphanedBookTx(ctx, tx, previousOwner.Int64)
+	if err != nil || !deleted {
 		return 0, "", err
 	}
 	return previousOwner.Int64, title, nil
@@ -347,4 +388,114 @@ func (db *DB) UpdateBookFileStat(ctx context.Context, fileID int64, size int64, 
 	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		return updateBookFileStatTx(ctx, tx, fileID, size, mtime)
 	})
+}
+
+// SetFilesMissing marks each of fileIDs missing as of at — but only a row
+// that doesn't already have missing_since set. First-seen-missing wins, so
+// a row already marked keeps its original timestamp rather than having its
+// grace period restarted by every sweep that still can't find it.
+func (db *DB) SetFilesMissing(ctx context.Context, fileIDs []int64, at time.Time) error {
+	if len(fileIDs) == 0 {
+		return nil
+	}
+	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		for _, id := range fileIDs {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE book_files SET missing_since = ? WHERE id = ? AND missing_since IS NULL`,
+				formatTime(at), id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ClearFilesMissing clears missing_since for each of fileIDs — a row seen
+// again during a sweep is no longer missing, whatever grace period remained.
+func (db *DB) ClearFilesMissing(ctx context.Context, fileIDs []int64) error {
+	if len(fileIDs) == 0 {
+		return nil
+	}
+	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		for _, id := range fileIDs {
+			if _, err := tx.ExecContext(ctx, `UPDATE book_files SET missing_since = NULL WHERE id = ?`, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// PruneMissingFiles deletes every book_files row marked missing before
+// before, then deletes any book those deletions left with no locations.
+//
+// excludePrefixes names directories the caller could not currently
+// re-verify (an unreadable subtree from this sweep, say): a row whose path
+// falls under one of them is left alone regardless of how long ago it was
+// marked, since being unable to look isn't evidence the file is still
+// gone. An empty excludePrefixes list excludes nothing — pass it whenever
+// the whole library was walked cleanly.
+func (db *DB) PruneMissingFiles(ctx context.Context, before time.Time, excludePrefixes []string) (files int, books int, err error) {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		clause, args := excludePrefixMatchClause(excludePrefixes)
+		args = append([]any{formatTime(before)}, args...)
+
+		rows, qErr := tx.QueryContext(ctx,
+			`SELECT id, book_id FROM book_files WHERE missing_since IS NOT NULL AND missing_since < ? AND (`+clause+`)`,
+			args...)
+		if qErr != nil {
+			return qErr
+		}
+		type candidate struct{ fileID, bookID int64 }
+		var candidates []candidate
+		for rows.Next() {
+			var c candidate
+			if err := rows.Scan(&c.fileID, &c.bookID); err != nil {
+				rows.Close()
+				return err
+			}
+			candidates = append(candidates, c)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+
+		affectedBooks := map[int64]bool{}
+		for _, c := range candidates {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM book_files WHERE id = ?`, c.fileID); err != nil {
+				return err
+			}
+			affectedBooks[c.bookID] = true
+		}
+		files = len(candidates)
+
+		for bookID := range affectedBooks {
+			deleted, _, err := pruneOrphanedBookTx(ctx, tx, bookID)
+			if err != nil {
+				return err
+			}
+			if deleted {
+				books++
+			}
+		}
+		return nil
+	})
+	return files, books, err
+}
+
+// excludePrefixMatchClause builds the SQL fragment for "file_path is not
+// under any of prefixes" — an empty list excludes nothing.
+func excludePrefixMatchClause(prefixes []string) (string, []any) {
+	if len(prefixes) == 0 {
+		return "1 = 1", nil
+	}
+	clauses := make([]string, len(prefixes))
+	args := make([]any, len(prefixes))
+	for i, p := range prefixes {
+		clauses[i] = "file_path NOT LIKE ?"
+		args[i] = p + "/%"
+	}
+	return strings.Join(clauses, " AND "), args
 }

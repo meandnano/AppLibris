@@ -31,6 +31,11 @@ func main() {
 		slog.Error("parse SCAN_INTERVAL", "error", err)
 		os.Exit(1)
 	}
+	missingGrace, err := time.ParseDuration(envOrDefault("MISSING_GRACE", "24h"))
+	if err != nil {
+		slog.Error("parse MISSING_GRACE", "error", err)
+		os.Exit(1)
+	}
 
 	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
 		slog.Error("create library directory", "error", err)
@@ -48,8 +53,8 @@ func main() {
 	}
 	defer db.Close()
 
-	runScan(db, libraryDir, coversDir)
-	go periodicScan(db, libraryDir, coversDir, scanInterval)
+	runScan(db, libraryDir, coversDir, missingGrace)
+	go periodicScan(db, libraryDir, coversDir, scanInterval, missingGrace)
 
 	svc := service.New(db)
 
@@ -66,25 +71,26 @@ func main() {
 	}
 }
 
-func periodicScan(db *storage.DB, libraryDir, coversDir string, interval time.Duration) {
+func periodicScan(db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		runScan(db, libraryDir, coversDir)
+		runScan(db, libraryDir, coversDir, missingGrace)
 	}
 }
 
-func runScan(db *storage.DB, libraryDir, coversDir string) {
+func runScan(db *storage.DB, libraryDir, coversDir string, missingGrace time.Duration) {
 	slog.Debug("scan starting", "library_dir", libraryDir)
 
-	result, err := scanner.Scan(context.Background(), db, libraryDir, coversDir)
+	result, err := scanner.Scan(context.Background(), db, libraryDir, coversDir, missingGrace)
 	if err != nil {
 		slog.Error("scan", "error", err)
 		return
 	}
 
 	attrs := []any{"scanned", result.Scanned, "new", result.New, "moved", result.Moved,
-		"unchanged", result.Unchanged, "orphaned", result.Orphaned, "errors", result.Errors}
+		"unchanged", result.Unchanged, "orphaned", result.Orphaned, "missing", result.Missing,
+		"pruned", result.Pruned, "errors", result.Errors}
 	if result.Errors > 0 {
 		slog.Warn("scan complete", attrs...)
 	} else {
