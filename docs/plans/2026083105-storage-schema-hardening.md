@@ -43,8 +43,9 @@ thousand books.
 
 In scope: the migrations and the `internal/storage` changes needed to make
 them correct. Out of scope: actually deleting anything (the two plans named
-above own that), and the `books.sort_title` problem, which is a separate
-step (`2026083106-sort-title-normalisation`).
+above own that), and the `books.sort_title` problem, which was a separate
+step and is already done — see
+`docs/plans/completed/2026083106-sort-title-normalisation.md`.
 
 ## Migrations
 
