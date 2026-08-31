@@ -105,14 +105,18 @@ func run(ctx context.Context) error {
 	// than blocking startup — a large library's first scan is minutes of
 	// hashing, during which an orchestrator's readiness probe would
 	// otherwise conclude the container is dead and restart it.
+	scanDone := make(chan struct{})
 	go func() {
+		defer close(scanDone)
 		runScan(ctx, db, libraryDir, coversDir, missingGrace)
 		periodicScan(ctx, db, libraryDir, coversDir, scanInterval, missingGrace)
 	}()
 
 	select {
 	case err := <-serveErr:
-		db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			slog.Error("close database", "error", closeErr)
+		}
 		return err
 	case <-ctx.Done():
 	}
@@ -123,6 +127,18 @@ func run(ctx context.Context) error {
 		slog.Error("shutdown", "error", err)
 	}
 	<-serveErr
+
+	// Give the scan goroutine the rest of the shutdown budget to notice
+	// ctx.Done() and unwind cleanly (its in-flight DB call returns on
+	// cancellation, rolling back rather than committing a partial write)
+	// before the database closes out from under it. A sweep stuck outside
+	// any context-aware call — mid-hash on a large file, say — can still
+	// miss this window; the bound exists so that doesn't hang shutdown.
+	select {
+	case <-scanDone:
+	case <-shutdownCtx.Done():
+		slog.Warn("scan did not exit before shutdown deadline")
+	}
 
 	return db.Close()
 }

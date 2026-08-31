@@ -144,10 +144,12 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   runs in the background alongside the `SCAN_INTERVAL`-timed (default
   `15m`) periodic rescan, with missing-file grace period `MISSING_GRACE`
   (default `24h`). Both scan loops take the signal-aware context, so a
-  sweep in progress unwinds on shutdown instead of being killed mid-write.
-  On SIGINT/SIGTERM, `run` shuts the HTTP server down first (bounded to
-  10s) and only then closes the database — order matters, so no request is
-  ever mid-query when the database closes. The image is built on
+  sweep in progress gets a bounded window (part of the same 10s shutdown
+  budget) to unwind on cancellation rather than being cut off by process
+  exit mid-write. On SIGINT/SIGTERM, `run` shuts the HTTP server down
+  first, then waits out that window, and only then closes the database —
+  order matters, so no request or in-flight scan write is torn down by the
+  database closing under it. The image is built on
   `distroless/static-debian12:nonroot` (CA certificates, tzdata, `/tmp`,
   and a non-root uid, none of which `scratch` provides), so mounted
   volumes must be writable by that uid.
