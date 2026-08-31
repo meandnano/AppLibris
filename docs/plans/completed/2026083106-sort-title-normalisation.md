@@ -25,8 +25,8 @@ visible correctness bug in the app today.
 
 ## Scope
 
-In scope: deriving a real `sort_title` on write, fixing the collation on
-read, and backfilling existing rows.
+In scope: deriving a real `sort_title` on write, and putting the collation
+on the column so ordering stays correct regardless of what a writer stores.
 
 Out of scope: author sort names (`Tolkien, J.R.R.` vs `J.R.R. Tolkien`) —
 DESIGN.md doesn't call for a sort form on authors, and browse-by-author
@@ -57,9 +57,12 @@ Rules, in order:
    any title that legitimately starts with those words. If `language` ever
    proves reliable enough to key off, that is a later refinement.
 3. Lower-case the result (`strings.ToLower`).
-4. If the result is empty (a title that is only an article, or only
-   whitespace), fall back to the lower-cased original — never store an
-   empty `sort_title`, or the book sorts to the very top of the library.
+4. If *stripping the article* emptied the result, fall back to the
+   lower-cased original — a title of "A" must file under `a`, not sort to
+   the very top of the library on an empty key. (A title that was empty or
+   whitespace to begin with still yields `""`; that is the honest answer,
+   and it is unreachable in practice because `extractMetadata` always falls
+   back to a filename-derived title.)
 
 Do **not** strip punctuation or leading digits. `'Salem's Lot` and
 `1984` file under `'` and `1` respectively, which is where a reader looking
@@ -79,52 +82,48 @@ column `COLLATE NOCASE`, so the ordering is right even if a future writer
 (inline metadata editing, provider enrichment) sets `sort_title` without
 folding.
 
-The column can't be altered in place, so this is a `books` table rebuild —
-four statements, four migration files, per the one-statement-per-file
-convention. `books` is a *parent* table, so unlike the child-table rebuilds
-in `2026083105-storage-schema-hardening` this one does interact with foreign
-keys: `book_files` and `book_authors` reference it. Rebuilding under
-`foreign_keys=ON` inside a transaction will either rewrite the children's
-references onto the temp name or trip a constraint, and the pragma can't be
-toggled inside the transaction the migration runner opens.
+**The collation goes on the column, in the schema.** Verified: a
+column-level `COLLATE NOCASE` governs a bare `ORDER BY sort_title`, so
+`storage.ListBooks` needs no query change and no future title-ordered query
+(search results, `/api/v1`) has to remember a clause.
 
-**Therefore prefer the cheap option:** skip the rebuild and put the
-collation at the query site instead —
-`ORDER BY sort_title COLLATE NOCASE` in `storage.ListBooks`. Same ordering,
-no rebuild, no runner change. The downside is that it has to be repeated on
-every future query that orders by title (search results, the API), so add a
-comment on the column in CLAUDE.md's schema notes saying the collation lives
-in the queries.
+> **Revised decision.** An earlier draft of this plan put the collation at
+> the query site instead, on the grounds that changing a column's collation
+> needs a `books` table rebuild — and `books` is a *parent* table, so unlike
+> the child-table rebuilds in `2026083105-storage-schema-hardening` that
+> rebuild interacts with foreign keys the migration runner cannot disable
+> inside its per-file transaction.
+>
+> That reasoning assumed a database worth preserving. There isn't one: the
+> service has never been deployed and no instance exists. So there is no
+> rebuild to do and no migration to add — **edit
+> `2026083001_create_books_table.sql` in place** and declare the column
+> `sort_title TEXT NOT NULL COLLATE NOCASE`. Every database is created by
+> running the migrations from empty, so every database gets it.
+>
+> This works exactly once. The moment a real database exists, editing an
+> applied migration stops being an option — the runner records it in
+> `schema_migrations` and never re-runs it — and the rebuild reasoning above
+> becomes correct again. Any later collation change is a rebuild.
 
-If a later step needs a `books` rebuild anyway (adding a column that can't
-be `ALTER TABLE ADD`, say), move the collation onto the column then and
-drop the per-query clause.
+One consequence worth knowing: `NOCASE` changes **equality** as well as
+ordering, so `WHERE sort_title = 'ZEBRA BOOK'` matches `zebra book`.
+Nothing does equality on `sort_title` today, and for a sort key that
+behaviour is desirable rather than surprising — but it also means a
+`UNIQUE` index on this column would treat case variants as collisions, so
+don't add one casually.
 
 ## Backfill
 
-`2026083114_backfill_sort_title.sql`:
+**None needed.** Databases are created by running the migrations from
+empty and no deployed instance exists, so no rows carry an un-normalised
+`sort_title`.
 
-```sql
-UPDATE books SET sort_title = lower(
-    CASE
-        WHEN lower(title) LIKE 'the %' THEN substr(title, 5)
-        WHEN lower(title) LIKE 'an %'  THEN substr(title, 4)
-        WHEN lower(title) LIKE 'a %'   THEN substr(title, 3)
-        ELSE title
-    END
-);
-```
-
-`lower()` in SQLite is ASCII-only, matching `NOCASE` — and deliberately
-*not* matching Go's `strings.ToLower`, which folds Unicode. A title with
-non-ASCII capitals will therefore be backfilled slightly differently from
-how the scanner would write it. That divergence is invisible at the
-ordering level (both sort by code point beyond ASCII either way) and
-self-corrects the next time the book's metadata is rewritten; not worth a
-Go-side migration runner to avoid. Note it in the migration comment.
-
-The `CASE` ordering matters: test `'an %'` before `'a %'`, or "An Ideal
-Husband" loses only `A` and files under "n Ideal Husband".
+One caveat for anyone holding a local `data/library.db` from an earlier
+run: the edited `CREATE TABLE` will **not** re-apply to it — the runner
+recorded that migration as done and never re-runs it — so an old file
+silently keeps the BINARY collation and the un-derived sort titles. Delete
+it and let the next start rebuild from scratch.
 
 ## Tests
 
@@ -139,22 +138,32 @@ Husband" loses only `A` and files under "n Ideal Husband".
 | `Theory of Everything` | `theory of everything` (not `ory of everything`) |
 | `A` | `a` (article-only, falls back) |
 | `The ` | `the` (falls back rather than empty) |
+| `Android Dreams` | `android dreams` |
 | `apple book` | `apple book` |
-| `  Spaced  ` | `spaced` |
+| `Zebra Book` | `zebra book` |
+| `  Spaced Out  ` | `spaced out` |
+| `1984` | `1984` |
+| `'Salem's Lot` | `'salem's lot` |
+| `The A Team` | `a team` (one article, not two) |
+| `   ` | `""` |
 
-The `Theory` case is the one that catches a naive `strings.HasPrefix(t,
-"The")` without the trailing space.
+`Theory of Everything` and `Android Dreams` are the cases that catch a naive
+`strings.HasPrefix(t, "The")` / `"An"` without the trailing space — the two
+most likely ways to get this wrong.
 
-`internal/storage`: insert the four titles from the Context section above
-and assert `ListBooks` returns them as `anna karenina`, `apple book`,
-`hobbit`, `zebra book` — i.e. assert the *fixed* order explicitly, since
-the current test (`TestListBooks`) passes today with the broken one.
+`internal/storage`: `TestListBooksOrdersCaseInsensitively` inserts
+`zebra book`, `anna karenina` and `Apple Book` and asserts they come back in
+that case-insensitive order. Under the default BINARY collation they come
+back as `[Apple Book, anna karenina, zebra book]`, so the test fails without
+the schema change — confirmed by reverting it. The pre-existing
+`TestListBooks` passes either way, which is why it never caught this.
 
 ## CLAUDE.md
 
 Note under the schema paragraph that `sort_title` is derived (leading
-article stripped, case folded) rather than a copy of `title`, and that
-title ordering applies `COLLATE NOCASE` at the query.
+article stripped, case folded) rather than a copy of `title`, and that the
+column is declared `COLLATE NOCASE`, so any `ORDER BY sort_title` is
+case-insensitive without a per-query clause.
 
 ## Verification
 
