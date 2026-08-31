@@ -69,6 +69,58 @@ func TestLibraryHandlerRendersEmptyState(t *testing.T) {
 	}
 }
 
+func TestUnknownPathReturns404(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	handler := Routes(service.New(db), t.TempDir())
+
+	for _, path := range []string{"/nope", "/books/1"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want 404", path, rec.Code)
+		}
+	}
+}
+
+func TestLibraryHandlerSetsContentType(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	handler := Routes(service.New(db), t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Errorf("GET / Content-Type = %q, want %q", got, "text/html; charset=utf-8")
+	}
+}
+
+func TestRenderFailureProducesNoPartialBody(t *testing.T) {
+	rec := httptest.NewRecorder()
+	err := render(rec, "no-such-template", nil)
+	if err == nil {
+		t.Fatal("render with an unknown template name returned nil error, want one")
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("render body = %q, want empty on error", rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "" {
+		t.Errorf("render set Content-Type %q on a failed render, want unset", rec.Header().Get("Content-Type"))
+	}
+}
+
 func TestStaticFileServed(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
 	if err != nil {

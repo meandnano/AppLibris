@@ -112,15 +112,20 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
-  step. `GET /` renders the library grid — the first real page, translated
-  from Claude Design's mockups (see `UI.md`, kept on the `init`
-  branch/worktree, not on `master`); `GET /static/` serves the embedded
-  stylesheet and theme script; `GET /covers/` serves the scanner's stored
-  cover thumbnails out of `COVERS_DIR` (runtime data, so it's passed into
-  `Routes` rather than embedded). Handlers map `service.BookSummary` onto a
-  small per-page view model so templates stay logic-free. Book detail,
-  search, inline metadata editing and send-to-Kindle are designed but not
-  built — each needs backing features that don't exist yet.
+  step. `GET /{$}` renders the library grid — the first real page,
+  translated from Claude Design's mockups (see `UI.md`, kept on the `init`
+  branch/worktree, not on `master`) — `{$}` matches only the exact path, so
+  the mux's own 404 handles everything else, including a stale or mistyped
+  `/books/{id}`; `GET /static/` serves the embedded stylesheet and theme
+  script; `GET /covers/` serves the scanner's stored cover thumbnails out of
+  `COVERS_DIR` (runtime data, so it's passed into `Routes` rather than
+  embedded). Handlers map `service.BookSummary` onto a small per-page view
+  model so templates stay logic-free. `render` executes into a buffer
+  before writing anything to the response, so a template error is a clean
+  500 rather than a truncated page, and sets `Content-Type` explicitly
+  rather than relying on sniffing. Book detail, search, inline metadata
+  editing and send-to-Kindle are designed but not built — each needs
+  backing features that don't exist yet.
 - `cmd/server` — entrypoint. Opens the database (`DB_PATH` env var, default
   `./data/library.db`), runs a synchronous full scan of `LIBRARY_DIR`
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
