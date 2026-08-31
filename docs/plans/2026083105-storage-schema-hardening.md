@@ -43,6 +43,14 @@ SELECT is a full table scan of `authors` for every author of every new
 book — the dominant cost after hashing during a first sweep of a few
 thousand books.
 
+## Scope
+
+In scope: the migrations and the `internal/storage` changes needed to make
+them correct. Out of scope: actually deleting anything — the two plans named
+above own that, and this step only makes it *possible* — and the
+`books.sort_title` problem, which was a separate step and is already done;
+see `docs/plans/completed/2026083106-sort-title-normalisation.md`.
+
 ## Premise: there is no existing database
 
 The service has never been deployed and no instance exists. Every database
