@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -257,5 +259,39 @@ func TestListBookAuthors(t *testing.T) {
 	}
 	if got := authors[noneID]; got != nil {
 		t.Errorf("authors[none] = %v, want no entry", got)
+	}
+}
+
+// ListBooks orders by sort_title, which is declared COLLATE NOCASE so that a
+// lowercase title files among its own letter rather than after every
+// capitalised one. Under the default BINARY collation this returns
+// [Anna Karenina, Zebra Book, apple book], because 'Z' (0x5A) < 'a' (0x61).
+func TestListBooksOrdersCaseInsensitively(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// Inserted in an order that matches neither the wanted nor the binary one.
+	for i, sortTitle := range []string{"zebra book", "anna karenina", "Apple Book"} {
+		if _, err := db.CreateBook(ctx, Book{
+			ContentHash: fmt.Sprintf("hash-%d", i),
+			Title:       sortTitle,
+			SortTitle:   sortTitle,
+		}, nil); err != nil {
+			t.Fatalf("CreateBook %q: %v", sortTitle, err)
+		}
+	}
+
+	books, err := db.ListBooks(ctx)
+	if err != nil {
+		t.Fatalf("ListBooks: %v", err)
+	}
+
+	var got []string
+	for _, b := range books {
+		got = append(got, b.SortTitle)
+	}
+	want := []string{"anna karenina", "Apple Book", "zebra book"}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListBooks order = %v, want %v", got, want)
 	}
 }
