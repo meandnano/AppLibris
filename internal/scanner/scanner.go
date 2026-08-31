@@ -177,7 +177,13 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 	}
 	if len(toClear) > 0 {
 		if err := db.ClearFilesMissing(ctx, toClear); err != nil {
-			slog.Warn("clear missing files failed", "error", err)
+			// toClear rows are confirmed present this sweep but may still
+			// carry a stale, past-grace missing_since if the clear didn't
+			// take — pruning now, blind to that, could delete a file that's
+			// sitting right there on disk. Skip pruning entirely rather than
+			// risk it; the next successful sweep clears them and resumes.
+			slog.Warn("clear missing files failed, skipping prune this sweep", "error", err)
+			return
 		}
 	}
 

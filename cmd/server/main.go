@@ -36,6 +36,13 @@ func main() {
 		slog.Error("parse MISSING_GRACE", "error", err)
 		os.Exit(1)
 	}
+	if missingGrace < 0 {
+		// A negative grace pulls the pruning cutoff into the future, so a
+		// file marked missing this very sweep would immediately qualify for
+		// deletion — silently bypassing the two-phase safeguard entirely.
+		slog.Error("parse MISSING_GRACE", "error", "must not be negative", "value", missingGrace)
+		os.Exit(1)
+	}
 
 	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
 		slog.Error("create library directory", "error", err)

@@ -441,35 +441,26 @@ func (db *DB) PruneMissingFiles(ctx context.Context, before time.Time, excludePr
 		args = append([]any{formatTime(before)}, args...)
 
 		rows, qErr := tx.QueryContext(ctx,
-			`SELECT id, book_id FROM book_files WHERE missing_since IS NOT NULL AND missing_since < ? AND (`+clause+`)`,
+			`DELETE FROM book_files WHERE missing_since IS NOT NULL AND missing_since < ? AND (`+clause+`) RETURNING book_id`,
 			args...)
 		if qErr != nil {
 			return qErr
 		}
-		type candidate struct{ fileID, bookID int64 }
-		var candidates []candidate
+		affectedBooks := map[int64]bool{}
 		for rows.Next() {
-			var c candidate
-			if err := rows.Scan(&c.fileID, &c.bookID); err != nil {
+			var bookID int64
+			if err := rows.Scan(&bookID); err != nil {
 				rows.Close()
 				return err
 			}
-			candidates = append(candidates, c)
+			affectedBooks[bookID] = true
+			files++
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			return err
 		}
 		rows.Close()
-
-		affectedBooks := map[int64]bool{}
-		for _, c := range candidates {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM book_files WHERE id = ?`, c.fileID); err != nil {
-				return err
-			}
-			affectedBooks[c.bookID] = true
-		}
-		files = len(candidates)
 
 		for bookID := range affectedBooks {
 			deleted, _, err := pruneOrphanedBookTx(ctx, tx, bookID)
