@@ -3,15 +3,19 @@
 ## Context
 
 Three defects in the schema as it stands after `2026083002-book-file-locations`.
-They are grouped into one step because two of them require rebuilding the same
-table, and doing that once is much cheaper than twice.
+They are grouped into one step because they are all schema edits landing in the
+same handful of migration files, and splitting them would mean touching those
+files three times.
 
 **1. No `ON DELETE CASCADE` anywhere.** `book_files.book_id`,
 `book_authors.book_id` and `book_authors.author_id` are plain `REFERENCES`
 clauses, and `storage.Open` turns `foreign_keys` ON. Nothing deletes a book
 today, so nothing has failed yet — but **deleting a book is currently
 impossible** without hand-written multi-table cleanup at every call site.
-Two planned steps need exactly that:
+Verified against the real driver and DSN: with a plain-`REFERENCES` child row
+present, `DELETE FROM books` fails with `FOREIGN KEY constraint failed (787)`.
+
+Two planned steps need exactly that delete:
 `2026083110-missing-file-reconciliation` (a book whose files are all gone)
 and `2026083108-scanner-orphan-books` (a book left with no locations when
 content at a path is replaced). Both are blocked on this.
@@ -42,56 +46,111 @@ thousand books.
 ## Scope
 
 In scope: the migrations and the `internal/storage` changes needed to make
-them correct. Out of scope: actually deleting anything (the two plans named
-above own that), and the `books.sort_title` problem, which was a separate
-step and is already done — see
-`docs/plans/completed/2026083106-sort-title-normalisation.md`.
+them correct. Out of scope: actually deleting anything — the two plans named
+above own that, and this step only makes it *possible* — and the
+`books.sort_title` problem, which was a separate step and is already done;
+see `docs/plans/completed/2026083106-sort-title-normalisation.md`.
 
-## Migrations
+## Premise: there is no existing database
 
-Per the convention in CLAUDE.md, **one statement per file**, applied in
-filename order. A SQLite table rebuild is four statements, so it is four
-files.
+The service has never been deployed and no instance exists. Every database
+is created by running the migrations from empty.
 
-The usual 12-step `ALTER TABLE` dance requires `PRAGMA foreign_keys=OFF`,
-which is a no-op inside a transaction — and `applyMigration` wraps every
-file in one. **That is fine here**: the standard procedure needs the pragma
-only so that *other* tables' FK clauses aren't rewritten when the target is
-renamed, and so a `DROP` doesn't trip a parent-side check. `book_files` and
-`book_authors` are pure child tables — nothing references either — so both
-can be rebuilt with foreign keys left ON, inside the per-file transaction
-the runner already gives us. Do not add pragma-toggling to the runner.
+That changes the shape of this step completely. **Fix the schema by editing
+the `CREATE TABLE` migrations in place**, rather than adding rebuild
+migrations to transform data that doesn't exist. No table rebuilds, no
+backfills, no `INSERT INTO … SELECT`, no legacy-format tolerance in the Go
+reader.
 
-**`book_files` rebuild** (cascade + timestamp normalisation together):
+> An earlier draft of this plan specified the full SQLite 12-step rebuild
+> for `book_files` and `book_authors` — four migration files each, plus
+> recreating their indexes, plus a carefully-reasoned backfill that had to
+> avoid a timezone trap in the old `modified_at` text. All of that was
+> correct *given a database worth preserving*. There isn't one, so it is
+> now pure ceremony, and the ceremony was the riskiest part of the step.
+>
+> This works exactly once. The moment a real database exists, editing an
+> applied migration stops being possible — the runner records it in
+> `schema_migrations` and never re-runs it — and the rebuild reasoning
+> becomes correct again. The same reversal was already applied to
+> `docs/plans/completed/2026083106-sort-title-normalisation.md`; that plan
+> records the reasoning in more detail.
 
-- `2026083101_create_book_files_new.sql` — same columns, but
-  `book_id INTEGER NOT NULL REFERENCES books (id) ON DELETE CASCADE`.
-- `2026083102_copy_book_files.sql` — `INSERT INTO book_files_new SELECT ...`,
-  converting `modified_at` (see **Backfill** below).
-- `2026083103_drop_book_files.sql`
-- `2026083104_rename_book_files_new.sql`
-- Then recreate the two indexes the drop takes with it:
-  `2026083105_create_book_files_file_path_index.sql` (UNIQUE on `file_path`)
-  and `2026083106_create_book_files_book_id_index.sql`.
+Anyone holding a local `data/library.db` from an earlier run must delete
+it. The edited migrations are already recorded as applied and will not
+re-run, so an old file silently keeps the old schema — and here that means
+no cascades and no unique index, i.e. the two later plans failing in
+confusing ways.
 
-**`book_authors` rebuild** (cascade only) — same four-file shape, with both
-FKs gaining `ON DELETE CASCADE`, plus recreating
-`book_authors_author_id_idx`. `book_authors` has no timestamps, so nothing
-to backfill.
+## Schema edits
 
-**`authors.name`** — `2026083113_create_authors_name_index.sql`:
-`CREATE UNIQUE INDEX authors_name_idx ON authors (name)`.
+All in place, no new files except the one index.
 
-> If the existing library already contains two `authors` rows with the same
-> name, this index creation fails and the migration aborts (correctly —
-> better than silently merging). `findOrCreateAuthor`'s
-> SELECT-then-INSERT on a single-connection write pool makes duplicates
-> very unlikely, but check with
-> `SELECT name, COUNT(*) FROM authors GROUP BY name HAVING COUNT(*) > 1`
-> before running, and dedupe by hand if it returns rows.
+**`2026083007_create_book_files_table.sql`** — add the cascade and change
+the `added_at` default:
 
-Renumber if these collide with migrations added by a step that lands first;
-the numbers above assume this is the next migration batch.
+```sql
+CREATE TABLE book_files (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id         INTEGER NOT NULL REFERENCES books (id) ON DELETE CASCADE,
+    file_path       TEXT NOT NULL,
+    file_size       INTEGER NOT NULL,
+    modified_at     TIMESTAMP NOT NULL,
+    added_at        TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000000000Z', 'now'))
+);
+```
+
+**`2026083004_create_book_authors_table.sql`** — both FKs cascade:
+
+```sql
+CREATE TABLE book_authors (
+    book_id     INTEGER NOT NULL REFERENCES books (id) ON DELETE CASCADE,
+    author_id   INTEGER NOT NULL REFERENCES authors (id) ON DELETE CASCADE,
+    PRIMARY KEY (book_id, author_id)
+);
+```
+
+Cascading `author_id` too is deliberate: deleting an author should take its
+join rows, not leave them dangling. Nothing deletes authors yet, and this
+step does not add that — but the constraint should say what is true.
+
+**`2026083001_create_books_table.sql`** — change `added_at` and
+`modified_at` from `DEFAULT CURRENT_TIMESTAMP` to the same
+`DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000000000Z', 'now'))`.
+
+Verified: SQLite accepts the parenthesised expression as a column default,
+it produces exactly the layout below (`2026-08-31T13:36:42.000000000Z`), it
+scans back into a `time.Time` through the driver, and `datetime()` reads
+it. The earlier draft had to leave `books`' defaults inconsistent because
+rebuilding a parent table was too expensive; that compromise is gone.
+
+**`2026083101_create_authors_name_index.sql`** (new) —
+`CREATE UNIQUE INDEX authors_name_idx ON authors (name);`
+
+A new file rather than a `UNIQUE` constraint on the column, to match how
+every other index in this schema is expressed (`books_content_hash_idx`,
+`book_files_file_path_idx`). `2026083101` is the next free migration
+number: existing migrations run `2026083001`–`2026083013`.
+
+## Deliberately *not* collapsing the book_files migration history
+
+Migrations `2026083010`–`2026083013` move `file_path`/`file_size` off
+`books` and into `book_files`, and `2026083006` creates an index that
+`2026083011` then drops. Against an empty database all of that is a no-op:
+the `INSERT INTO book_files … SELECT … FROM books` copies zero rows.
+
+It is tempting to collapse them — drop those five files and remove
+`file_path`/`file_size` from `books`' `CREATE TABLE` — since the same
+no-existing-database argument applies. **Don't.**
+`docs/plans/completed/2026083002-book-file-locations.md` is immutable and
+describes those migrations by name; deleting them would leave a completed
+plan documenting files that no longer exist, and the completed plans are
+the project's only record of why the schema looks like it does. The cost of
+keeping them is one no-op INSERT against an empty table, once, at first
+start.
+
+The edits above are different in kind: they change what a migration
+*creates*, and every completed plan's description of them stays true.
 
 ## Timestamp format
 
@@ -103,104 +162,56 @@ column's declared type is `TIMESTAMP`), `datetime()` reads it, and
 lexicographic `ORDER BY` matches chronological order.
 
 Explicitly **not** `time.RFC3339Nano`: it strips trailing zeros from the
-fraction, so `…56.1Z` and `…56.10000001Z` (and a whole-second `…56Z`
-against `…56.5Z`) compare in the wrong order as text. The instant still
-round-trips, but a plain `ORDER BY` on the column would be subtly wrong,
-and that is exactly what a send-history view will want to do.
+fraction, so a whole-second `…56Z` sorts after `…56.5Z` as text, and
+`…56.1Z` after `…56.10000001Z`. The instant still round-trips, but a plain
+`ORDER BY` on the column would be subtly wrong, and that is exactly what a
+send-history view will want to do.
 
 Add to `internal/storage`:
 
 ```go
 // sqliteTimeLayout is the one format this package writes timestamps in:
 // UTC, fixed-width so text ordering matches chronological ordering, and
-// parseable by SQLite's own date functions.
+// parseable by SQLite's own date functions. The CREATE TABLE defaults use
+// strftime to produce the identical shape.
 const sqliteTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
 func formatTime(t time.Time) string { return t.UTC().Format(sqliteTimeLayout) }
 ```
 
-`UpsertBookFile` and `UpdateBookFileStat` bind `formatTime(mtime)` instead
-of the raw `time.Time`. Reads are unchanged — scanning into `time.Time`
-keeps working.
-
-Change the `books.added_at` / `books.modified_at` and `book_files.added_at`
-defaults to match, so a row's timestamps are all one shape: replace
-`DEFAULT CURRENT_TIMESTAMP` with
-`DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000000000Z', 'now'))` in the rebuilt
-`book_files`. `books` is not being rebuilt in this step, so leave its
-defaults alone and note the inconsistency — `books.added_at` is not read by
-anything yet, and rebuilding `books` means rewriting the FK from
-`book_files` and `book_authors` too, which is a much larger change for no
-current benefit. Fold it into whichever later step first needs to sort by
-`books.added_at`.
-
-## Backfill
-
-The `INSERT INTO book_files_new ... SELECT` must convert existing
-`modified_at` values. **The obvious SQL is wrong**: the stored text carries
-whatever zone the scanning process was in (verified — the driver does *not*
-normalise to UTC before formatting; a `+02:00` time is stored as
-`… +0200 CEST`), so `substr(modified_at, 1, 19)` yields the *local wall
-time*, silently shifting every timestamp by the machine's offset. On a UTC
-host it happens to be right, which is exactly what makes it a trap.
-
-Rather than reimplementing Go's zone parsing in SQL, exploit the fact that
-**a wrong `modified_at` is self-healing**: it only feeds the scanner's
-path+size+mtime cheap check, and a mismatch there costs one re-hash of that
-file and a corrected row. So copy the column as:
-
-```sql
-INSERT INTO book_files_new (id, book_id, file_path, file_size, modified_at, added_at)
-SELECT id, book_id, file_path, file_size, '', added_at FROM book_files;
-```
-
-— i.e. deliberately blank `modified_at`, letting the next sweep re-stat
-every file and write it in the new format. The one-time cost is a full
-re-hash of the library on the first scan after upgrading; the benefit is
-that no timestamp is silently shifted by an hour or two. Say so in the
-migration file's comment.
-
-This requires `modified_at` to tolerate `''` for the gap between the
-migration and the next sweep. It is `NOT NULL` with no default, and `''`
-satisfies that. `scanBookFile` scanning `''` into a `time.Time` will fail,
-so `FindFileByPath` must handle it — scan `modified_at` into a
-`sql.NullString`-like intermediate and treat unparseable as "no known
-mtime", which the cheap check already handles correctly (mismatch → re-hash).
-Add a small helper rather than spreading the parse:
-
-```go
-func parseTime(s string) time.Time { t, _ := time.Parse(sqliteTimeLayout, s); return t }
-```
-
-A zero `time.Time` never `.Equal`s a real mtime, so the cheap check falls
-through to hashing on its own, with no extra branch in the scanner.
-
 ## `internal/storage` changes
 
-- `formatTime` / `parseTime` / `sqliteTimeLayout` as above.
-- `UpsertBookFile`, `UpdateBookFileStat`: bind formatted strings.
-- `scanBookFile` and any `SELECT`-into-`BookFile` path: read `modified_at`
-  as TEXT and run it through `parseTime`, so a blank or legacy-format value
-  degrades to the zero time instead of erroring the whole query. `added_at`
-  likewise, for rows written before this step.
+- `sqliteTimeLayout` and `formatTime` as above.
+- `UpsertBookFile` and `UpdateBookFileStat` bind `formatTime(mtime)` rather
+  than the raw `time.Time`.
+- **Reads are unchanged.** `scanBookFile` keeps scanning straight into
+  `time.Time`; the driver parses the new format. The earlier draft needed a
+  `parseTime` helper that degraded unparseable values to the zero time, so
+  that rows left mid-migration with a blank `modified_at` wouldn't error a
+  whole query. With no migration and no legacy rows, every stored value is
+  written by `formatTime` and that tolerance is dead code — leave it out
+  rather than carrying a defensive branch nothing can reach.
 
 ## Tests
 
-- `UpsertBookFile` → `FindFileByPath` returns the same instant, and the raw
-  stored text matches `sqliteTimeLayout` (assert on
-  `CAST(modified_at AS TEXT)`, not just the round-trip — the round-trip
-  passes today with the broken format, which is why this went unnoticed).
-- `SELECT datetime(modified_at) IS NOT NULL` is true for a written row.
-- A row with `modified_at = ''` reads back as a zero `time.Time` rather
-  than erroring, and a scan over that file re-hashes and rewrites it.
+- `UpsertBookFile` → `FindFileByPath` returns the same instant, **and** the
+  raw stored text matches `sqliteTimeLayout`. Assert on
+  `CAST(modified_at AS TEXT)`, not just the round-trip: the round-trip
+  passes today with the broken format, which is exactly why this went
+  unnoticed.
+- `SELECT datetime(modified_at) IS NOT NULL` is true for a written row, and
+  for a row's defaulted `added_at`.
 - Deleting a book removes its `book_files` and `book_authors` rows and
-  leaves the `authors` rows alone (cascade reaches the join table, not the
-  author).
+  leaves the `authors` row alone. Verified as achievable with this schema:
+  inline `ON DELETE CASCADE` under the project's DSN cascades to both child
+  tables and leaves `authors` intact.
+- Deleting a book with a plain-`REFERENCES` child would fail — no test for
+  this, since after this step no such child exists; it is recorded in the
+  Context above as the reason the step is needed.
 - Inserting two authors with the same name violates the unique index.
-- `TestOpenIsIdempotent` already covers migrations re-applying cleanly;
-  make sure it still passes against a DB created *before* this batch (open
-  an old-schema fixture, migrate, assert the rows survived) — that is the
-  only test that would catch a rebuild dropping data.
+- `TestOpenIsIdempotent` must still pass. The earlier draft also asked for
+  an old-schema fixture to prove a rebuild didn't drop rows; there is no
+  rebuild and no old schema, so that test is dropped.
 
 ## CLAUDE.md
 
@@ -211,8 +222,10 @@ UTC RFC 3339 text so SQLite's date functions and text ordering both work.
 ## Verification
 
 - `go build ./...`, `go vet ./...`, `go test ./...` clean.
-- Manual: run against a copy of a real pre-migration `library.db`, confirm
-  `PRAGMA foreign_key_check` is empty, row counts in `book_files` and
-  `book_authors` are unchanged, and the first sweep afterwards reports every
-  file as `New`/`Moved`-free but re-hashed (blank mtimes), with the second
-  sweep reporting them all `Unchanged`.
+- Delete any local `data/library.db` first — see the premise section.
+- Manual: start the server against a small library, then confirm the schema
+  is what was intended rather than what was inherited:
+  `sqlite3 data/library.db '.schema book_files'` shows the cascade,
+  `PRAGMA foreign_key_check` is empty, and
+  `SELECT datetime(modified_at), datetime(added_at) FROM book_files` returns
+  non-NULL for both columns.
