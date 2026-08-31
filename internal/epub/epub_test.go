@@ -198,8 +198,8 @@ func TestReadMetadata(t *testing.T) {
 	if got.Language != "en" {
 		t.Errorf("Language = %q, want %q", got.Language, "en")
 	}
-	if got.ISBN != "978-3-16-148410-0" {
-		t.Errorf("ISBN = %q, want %q", got.ISBN, "978-3-16-148410-0")
+	if got.ISBN != "9783161484100" {
+		t.Errorf("ISBN = %q, want %q", got.ISBN, "9783161484100")
 	}
 	if got.Description != "A book about examples." {
 		t.Errorf("Description = %q, want %q", got.Description, "A book about examples.")
@@ -209,7 +209,7 @@ func TestReadMetadata(t *testing.T) {
 	}
 }
 
-func TestReadMetadataNoScemeISBN(t *testing.T) {
+func TestReadMetadataIgnoresNonISBNIdentifier(t *testing.T) {
 	opfXML := `<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -225,7 +225,137 @@ func TestReadMetadataNoScemeISBN(t *testing.T) {
 		t.Fatalf("ReadMetadata: %v", err)
 	}
 	if got.ISBN != "" {
-		t.Errorf("ISBN = %q, want empty (no scheme-tagged identifier)", got.ISBN)
+		t.Errorf("ISBN = %q, want empty (a urn:uuid: identifier matches none of the ISBN rules)", got.ISBN)
+	}
+}
+
+func TestReadMetadataISBNFromURN(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>URN ISBN</dc:title>
+    <dc:identifier id="pub-id">urn:isbn:9780306406157</dc:identifier>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.ISBN != "9780306406157" {
+		t.Errorf("ISBN = %q, want %q", got.ISBN, "9780306406157")
+	}
+}
+
+func TestReadMetadataISBNFromBareHyphenated(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Bare Hyphenated ISBN</dc:title>
+    <dc:identifier id="pub-id">978-0-306-40615-7</dc:identifier>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.ISBN != "9780306406157" {
+		t.Errorf("ISBN = %q, want %q", got.ISBN, "9780306406157")
+	}
+}
+
+func TestReadMetadataPublisherAndDate(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Publisher And Date</dc:title>
+    <dc:publisher>Acme Books</dc:publisher>
+    <dc:date>2011-05-01</dc:date>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.Publisher != "Acme Books" {
+		t.Errorf("Publisher = %q, want %q", got.Publisher, "Acme Books")
+	}
+	if got.PublishedDate != "2011-05-01" {
+		t.Errorf("PublishedDate = %q, want %q", got.PublishedDate, "2011-05-01")
+	}
+}
+
+func TestReadMetadataDatePublicationEventWins(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>Event Precedence</dc:title>
+    <dc:date opf:event="modification">2020-01-01</dc:date>
+    <dc:date opf:event="publication">2011-05-01</dc:date>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.PublishedDate != "2011-05-01" {
+		t.Errorf("PublishedDate = %q, want %q (publication event beats modification)", got.PublishedDate, "2011-05-01")
+	}
+}
+
+func TestReadMetadataDateModificationOnlyYieldsEmpty(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>Modification Only</dc:title>
+    <dc:date opf:event="modification">2020-01-01</dc:date>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.PublishedDate != "" {
+		t.Errorf("PublishedDate = %q, want empty (only a modification-event date is present)", got.PublishedDate)
+	}
+}
+
+func TestReadMetadataCoverPercentEncodedHref(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Percent Encoded Cover</dc:title>
+  </metadata>
+  <manifest>
+    <item id="cover-img" href="cover%20art.jpg" media-type="image/jpeg" properties="cover-image"/>
+  </manifest>
+</package>`
+	want := []byte("percent-encoded-cover-bytes")
+
+	path := buildTestEPUBWithExtra(t, opfXML, map[string][]byte{
+		"OEBPS/cover art.jpg": want,
+	})
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if !bytes.Equal(got.Cover, want) {
+		t.Errorf("Cover = %q, want %q", got.Cover, want)
 	}
 }
 

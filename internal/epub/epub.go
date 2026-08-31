@@ -8,18 +8,22 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/url"
 	"path"
 	"strings"
 )
 
 // Metadata is what's extracted from an EPUB's embedded OPF package.
 type Metadata struct {
-	Title       string
-	Authors     []string
-	Language    string
-	ISBN        string
-	Description string
-	Cover       []byte
+	Title         string
+	Authors       []string
+	Language      string
+	ISBN          string
+	Description   string
+	Publisher     string
+	PublishedDate string
+	Cover         []byte
 }
 
 type container struct {
@@ -36,10 +40,19 @@ type opfPackage struct {
 		Creator     []string `xml:"creator"`
 		Language    []string `xml:"language"`
 		Description []string `xml:"description"`
+		Publisher   []string `xml:"publisher"`
 		Identifier  []struct {
 			Scheme string `xml:"scheme,attr"`
 			Value  string `xml:",chardata"`
 		} `xml:"identifier"`
+		// Date carries its EPUB2 opf:event attribute (publication,
+		// modification, creation) because dc:date can repeat with
+		// different meanings; EPUB3 drops the attribute entirely, which
+		// findPublishedDate treats as the publication date.
+		Date []struct {
+			Event string `xml:"event,attr"`
+			Value string `xml:",chardata"`
+		} `xml:"date"`
 		Meta []struct {
 			Name    string `xml:"name,attr"`
 			Content string `xml:"content,attr"`
@@ -74,12 +87,14 @@ func ReadMetadata(path string) (Metadata, error) {
 	}
 
 	return Metadata{
-		Title:       first(pkg.Metadata.Title),
-		Authors:     trimAll(pkg.Metadata.Creator),
-		Language:    first(pkg.Metadata.Language),
-		ISBN:        findISBN(pkg),
-		Description: first(pkg.Metadata.Description),
-		Cover:       readCover(&zr.Reader, opfPath, pkg),
+		Title:         first(pkg.Metadata.Title),
+		Authors:       trimAll(pkg.Metadata.Creator),
+		Language:      first(pkg.Metadata.Language),
+		ISBN:          findISBN(pkg),
+		Description:   first(pkg.Metadata.Description),
+		Publisher:     first(pkg.Metadata.Publisher),
+		PublishedDate: findPublishedDate(pkg),
+		Cover:         readCover(&zr.Reader, opfPath, pkg),
 	}, nil
 }
 
@@ -94,15 +109,30 @@ func readCover(zr *zip.Reader, opfPath string, pkg opfPackage) []byte {
 		return nil
 	}
 
-	coverPath := path.Join(path.Dir(opfPath), href)
+	// href is a URI reference, so a name like "cover art.jpg" is declared
+	// as "cover%20art.jpg"; decode it before treating it as a zip path.
+	decoded, err := url.PathUnescape(href)
+	if err != nil {
+		// Not a valid escape sequence — a literal "%" in a filename is
+		// legal in a zip, so fall back to the raw href rather than
+		// giving up on the cover entirely.
+		decoded = href
+	}
+	if i := strings.IndexByte(decoded, '#'); i >= 0 {
+		decoded = decoded[:i]
+	}
+
+	coverPath := path.Join(path.Dir(opfPath), decoded)
 	f, err := zr.Open(coverPath)
 	if err != nil {
+		slog.Debug("cover declared but unreadable", "href", href, "path", coverPath, "error", err)
 		return nil
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(f)
 	if err != nil {
+		slog.Debug("cover declared but unreadable", "href", href, "path", coverPath, "error", err)
 		return nil
 	}
 	return data
@@ -174,10 +204,97 @@ func readOPFPackage(zr *zip.Reader, opfPath string) (opfPackage, error) {
 	return pkg, nil
 }
 
+// findISBN tries, in order, an EPUB2 opf:scheme="ISBN" identifier, an EPUB3
+// urn:isbn: identifier, and a bare ISBN-shaped identifier — a publisher who
+// marks an identifier as an ISBN at all almost always uses one of the first
+// two forms, so the refines-based EPUB3 form isn't worth the extra
+// resolution logic. The check digit is never validated: a malformed ISBN in
+// the file is still the best identifier it offers.
 func findISBN(pkg opfPackage) string {
 	for _, id := range pkg.Metadata.Identifier {
 		if strings.EqualFold(id.Scheme, "ISBN") {
-			return strings.TrimSpace(id.Value)
+			if isbn := normalizeISBN(id.Value); isbn != "" {
+				return isbn
+			}
+		}
+	}
+	for _, id := range pkg.Metadata.Identifier {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(id.Value)), "urn:isbn:") {
+			if isbn := normalizeISBN(id.Value); isbn != "" {
+				return isbn
+			}
+		}
+	}
+	for _, id := range pkg.Metadata.Identifier {
+		if isBareISBN(id.Value) {
+			return normalizeISBN(id.Value)
+		}
+	}
+	return ""
+}
+
+// isBareISBN reports whether raw, with no scheme or urn:isbn: marker, is
+// still shaped like an ISBN-10 or ISBN-13: digits, hyphens and spaces, with
+// a trailing X permitted only where an ISBN-10 check digit allows one. This
+// is what keeps an unrelated identifier (a UUID, say) from being mistaken
+// for an unmarked ISBN.
+func isBareISBN(raw string) bool {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return false
+	}
+	runes := []rune(v)
+	for i, r := range runes {
+		switch {
+		case r >= '0' && r <= '9':
+		case r == '-' || r == ' ':
+		case (r == 'x' || r == 'X') && i == len(runes)-1:
+		default:
+			return false
+		}
+	}
+	switch normalized := normalizeISBN(v); len(normalized) {
+	case 10:
+		return true
+	case 13:
+		return !strings.HasSuffix(normalized, "X")
+	default:
+		return false
+	}
+}
+
+// normalizeISBN strips a urn:isbn: prefix and any hyphens or spaces, and
+// upper-cases a trailing check-digit X.
+func normalizeISBN(raw string) string {
+	v := strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(v), "urn:isbn:") {
+		v = v[len("urn:isbn:"):]
+	}
+	v = strings.NewReplacer("-", "", " ", "").Replace(v)
+	if v == "" {
+		return ""
+	}
+	if last := v[len(v)-1]; last == 'x' {
+		v = v[:len(v)-1] + "X"
+	}
+	return v
+}
+
+// findPublishedDate picks the publication date among possibly-repeated
+// dc:date elements: EPUB2 tags each with an opf:event attribute, so the one
+// marked "publication" wins; EPUB3 drops the attribute and just gives the
+// publication date directly, so the first event-less element is the
+// fallback. creation and modification are never used — a file's last-edited
+// date is worse in a column called published_date than leaving it empty.
+func findPublishedDate(pkg opfPackage) string {
+	for _, d := range pkg.Metadata.Date {
+		if strings.EqualFold(d.Event, "publication") {
+			return strings.TrimSpace(d.Value)
+		}
+	}
+	for _, d := range pkg.Metadata.Date {
+		if d.Event == "" {
+			return strings.TrimSpace(d.Value)
 		}
 	}
 	return ""

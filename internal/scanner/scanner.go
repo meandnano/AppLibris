@@ -394,27 +394,31 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 	}
 
 	book := storage.Book{
-		ContentHash: hash,
-		Title:       meta.Title,
-		SortTitle:   sortTitle(meta.Title),
-		Language:    meta.Language,
-		ISBN:        meta.ISBN,
-		Description: meta.Description,
-		CoverPath:   coverPath,
-		CoverRetry:  coverRetry,
-		Format:      strings.TrimPrefix(ext, "."),
+		ContentHash:   hash,
+		Title:         meta.Title,
+		SortTitle:     sortTitle(meta.Title),
+		Publisher:     meta.Publisher,
+		PublishedDate: meta.PublishedDate,
+		Language:      meta.Language,
+		ISBN:          meta.ISBN,
+		Description:   meta.Description,
+		CoverPath:     coverPath,
+		CoverRetry:    coverRetry,
+		Format:        strings.TrimPrefix(ext, "."),
 	}
 	_, orphanedID, orphanedTitle, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
 	return orphanedID, orphanedTitle, err
 }
 
 type bookMeta struct {
-	Title       string
-	Authors     []string
-	Language    string
-	ISBN        string
-	Description string
-	Cover       []byte
+	Title         string
+	Authors       []string
+	Language      string
+	ISBN          string
+	Description   string
+	Publisher     string
+	PublishedDate string
+	Cover         []byte
 }
 
 // extractMetadata pulls embedded metadata for supported formats (currently
@@ -439,12 +443,14 @@ func extractMetadata(path, ext string) bookMeta {
 	}
 
 	return bookMeta{
-		Title:       title,
-		Authors:     m.Authors,
-		Language:    m.Language,
-		ISBN:        m.ISBN,
-		Description: m.Description,
-		Cover:       m.Cover,
+		Title:         title,
+		Authors:       m.Authors,
+		Language:      m.Language,
+		ISBN:          m.ISBN,
+		Description:   m.Description,
+		Publisher:     m.Publisher,
+		PublishedDate: m.PublishedDate,
+		Cover:         m.Cover,
 	}
 }
 
