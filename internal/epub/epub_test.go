@@ -359,6 +359,62 @@ func TestReadMetadataCoverPercentEncodedHref(t *testing.T) {
 	}
 }
 
+func TestReadMetadataCoverHrefWithEncodedHash(t *testing.T) {
+	// "%23" is an escaped literal "#" in the filename, not a fragment
+	// delimiter — it must survive decoding rather than being truncated
+	// as if the raw href were "cover.jpg#1.jpg".
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Cover With Encoded Hash</dc:title>
+  </metadata>
+  <manifest>
+    <item id="cover-img" href="cover%231.jpg" media-type="image/jpeg" properties="cover-image"/>
+  </manifest>
+</package>`
+	want := []byte("encoded-hash-cover-bytes")
+
+	path := buildTestEPUBWithExtra(t, opfXML, map[string][]byte{
+		"OEBPS/cover#1.jpg": want,
+	})
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if !bytes.Equal(got.Cover, want) {
+		t.Errorf("Cover = %q, want %q", got.Cover, want)
+	}
+}
+
+func TestReadMetadataCoverHrefWithLiteralFragment(t *testing.T) {
+	// A malformed manifest href shouldn't carry a fragment, but if one
+	// shows up as a literal "#" it must be stripped before the zip
+	// lookup rather than failing for an unguessable reason.
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Cover With Literal Fragment</dc:title>
+  </metadata>
+  <manifest>
+    <item id="cover-img" href="cover.jpg#page1" media-type="image/jpeg" properties="cover-image"/>
+  </manifest>
+</package>`
+	want := []byte("literal-fragment-cover-bytes")
+
+	path := buildTestEPUBWithExtra(t, opfXML, map[string][]byte{
+		"OEBPS/cover.jpg": want,
+	})
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if !bytes.Equal(got.Cover, want) {
+		t.Errorf("Cover = %q, want %q", got.Cover, want)
+	}
+}
+
 func TestReadMetadataNotAZip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "not-a-book.epub")
 	if err := os.WriteFile(path, []byte("this is not a zip file"), 0o644); err != nil {

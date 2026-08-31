@@ -109,17 +109,22 @@ func readCover(zr *zip.Reader, opfPath string, pkg opfPackage) []byte {
 		return nil
 	}
 
+	// Strip any fragment before decoding, not after: a literal "#" in the
+	// raw href is a fragment delimiter, but a percent-encoded one ("%23")
+	// is an escaped filename character and must survive decoding intact.
+	raw := href
+	if i := strings.IndexByte(raw, '#'); i >= 0 {
+		raw = raw[:i]
+	}
+
 	// href is a URI reference, so a name like "cover art.jpg" is declared
 	// as "cover%20art.jpg"; decode it before treating it as a zip path.
-	decoded, err := url.PathUnescape(href)
+	decoded, err := url.PathUnescape(raw)
 	if err != nil {
 		// Not a valid escape sequence — a literal "%" in a filename is
 		// legal in a zip, so fall back to the raw href rather than
 		// giving up on the cover entirely.
-		decoded = href
-	}
-	if i := strings.IndexByte(decoded, '#'); i >= 0 {
-		decoded = decoded[:i]
+		decoded = raw
 	}
 
 	coverPath := path.Join(path.Dir(opfPath), decoded)
