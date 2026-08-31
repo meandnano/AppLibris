@@ -25,6 +25,12 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
 - `internal/cover` — turns a raw cover image into the stored thumbnail:
   resized to ~400px on the long edge (never upscaling), JPEG, written to a
   derived directory keyed by content hash.
+- `internal/resend` — `Client.Send` POSTs one attachment to Resend's API
+  (DESIGN.md's send-to-Kindle transport), enforcing the ~28MB size limit
+  DESIGN.md derives before attempting a send. Nothing calls it yet — no
+  `recipients`/`send_log` schema, job queue, or `RESEND_API_KEY`/
+  `RESEND_FROM` wiring into `cmd/server` exists, both separate
+  prerequisites for send-to-Kindle per DESIGN.md.
 - `internal/scanner` — walks the library directory and syncs it into
   `internal/storage`. Cheap path+size+mtime check (against `book_files`)
   skips unchanged files; content hash (SHA-256) is a book's identity, so
