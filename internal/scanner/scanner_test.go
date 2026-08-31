@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"library/internal/storage"
@@ -111,18 +112,19 @@ func openTestDB(t *testing.T) *storage.DB {
 	return db
 }
 
-// bookByPath resolves a scanned file's path all the way to its book row,
-// via the book_files -> books join the storage package doesn't expose as a
-// single call.
-func bookByPath(t *testing.T, ctx context.Context, db *storage.DB, path string) *storage.Book {
+// bookByPath resolves a scanned file's path — relative to the library
+// root, the form it's stored under — all the way to its book row, via the
+// book_files -> books join the storage package doesn't expose as a single
+// call.
+func bookByPath(t *testing.T, ctx context.Context, db *storage.DB, relPath string) *storage.Book {
 	t.Helper()
 
-	f, err := db.FindFileByPath(ctx, path)
+	f, err := db.FindFileByPath(ctx, relPath)
 	if err != nil {
-		t.Fatalf("FindFileByPath %s: %v", path, err)
+		t.Fatalf("FindFileByPath %s: %v", relPath, err)
 	}
 	if f == nil {
-		t.Fatalf("FindFileByPath %s: no such file", path)
+		t.Fatalf("FindFileByPath %s: no such file", relPath)
 	}
 
 	var b storage.Book
@@ -164,7 +166,7 @@ func TestScanBasic(t *testing.T) {
 		t.Errorf("Errors = %d, want 0", result.Errors)
 	}
 
-	book1 := bookByPath(t, ctx, db, filepath.Join(libDir, "book1.epub"))
+	book1 := bookByPath(t, ctx, db, "book1.epub")
 	if book1.Title != "Book One" {
 		t.Errorf("book1 Title = %q, want %q", book1.Title, "Book One")
 	}
@@ -172,7 +174,7 @@ func TestScanBasic(t *testing.T) {
 		t.Errorf("book1 CoverPath = %q, want empty (fixture declares no cover)", book1.CoverPath)
 	}
 
-	fb2Book := bookByPath(t, ctx, db, filepath.Join(libDir, "book3.fb2"))
+	fb2Book := bookByPath(t, ctx, db, "book3.fb2")
 	if fb2Book.Title != "book3" {
 		t.Errorf("fb2 Title = %q, want filename-derived %q", fb2Book.Title, "book3")
 	}
@@ -197,7 +199,7 @@ func TestScanExtractsCover(t *testing.T) {
 		t.Fatalf("scan = %+v, want New=1 Errors=0", result)
 	}
 
-	book := bookByPath(t, ctx, db, filepath.Join(libDir, "book1.epub"))
+	book := bookByPath(t, ctx, db, "book1.epub")
 	if book.CoverPath == "" {
 		t.Fatal("CoverPath is empty, want a stored cover path")
 	}
@@ -246,7 +248,8 @@ func TestScanDetectsMove(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	oldPath := filepath.Join(libDir, "book1.epub")
+	oldRel := "book1.epub"
+	oldPath := filepath.Join(libDir, oldRel)
 	writeTestEPUB(t, oldPath, "Book One", "Author A", nil)
 
 	first, err := Scan(ctx, db, libDir, coversDir)
@@ -257,12 +260,13 @@ func TestScanDetectsMove(t *testing.T) {
 		t.Fatalf("first scan New = %d, want 1", first.New)
 	}
 
-	originalFile, err := db.FindFileByPath(ctx, oldPath)
+	originalFile, err := db.FindFileByPath(ctx, oldRel)
 	if err != nil || originalFile == nil {
-		t.Fatalf("FindFileByPath oldPath: %v", err)
+		t.Fatalf("FindFileByPath oldRel: %v", err)
 	}
 
-	newPath := filepath.Join(libDir, "renamed.epub")
+	newRel := "renamed.epub"
+	newPath := filepath.Join(libDir, newRel)
 	if err := os.Rename(oldPath, newPath); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -275,9 +279,9 @@ func TestScanDetectsMove(t *testing.T) {
 		t.Errorf("second scan = %+v, want Moved=1 New=0", second)
 	}
 
-	movedFile, err := db.FindFileByPath(ctx, newPath)
+	movedFile, err := db.FindFileByPath(ctx, newRel)
 	if err != nil || movedFile == nil {
-		t.Fatalf("FindFileByPath newPath: %v", err)
+		t.Fatalf("FindFileByPath newRel: %v", err)
 	}
 	if movedFile.BookID != originalFile.BookID {
 		t.Errorf("moved file's book id = %d, want %d (should be the same book)", movedFile.BookID, originalFile.BookID)
@@ -286,9 +290,9 @@ func TestScanDetectsMove(t *testing.T) {
 	// the old path's book_files row is deliberately left stale, not
 	// deleted or repointed — missing-file handling is separately deferred,
 	// and WalkDir never revisits a path once the file there is gone
-	staleFile, err := db.FindFileByPath(ctx, oldPath)
+	staleFile, err := db.FindFileByPath(ctx, oldRel)
 	if err != nil {
-		t.Fatalf("FindFileByPath oldPath after move: %v", err)
+		t.Fatalf("FindFileByPath oldRel after move: %v", err)
 	}
 	if staleFile == nil {
 		t.Error("old path's book_files row was removed, want it left stale")
@@ -310,8 +314,10 @@ func TestScanTracksMultipleLocations(t *testing.T) {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	pathA := filepath.Join(libDir, "copy-a.epub")
-	pathB := filepath.Join(libDir, "copy-b.epub")
+	relA := "copy-a.epub"
+	relB := "copy-b.epub"
+	pathA := filepath.Join(libDir, relA)
+	pathB := filepath.Join(libDir, relB)
 	if err := os.WriteFile(pathA, content, 0o644); err != nil {
 		t.Fatalf("write copy-a: %v", err)
 	}
@@ -327,11 +333,11 @@ func TestScanTracksMultipleLocations(t *testing.T) {
 		t.Fatalf("scan = %+v, want New=1 Moved=1 (one book, one extra location)", result)
 	}
 
-	fileA, err := db.FindFileByPath(ctx, pathA)
+	fileA, err := db.FindFileByPath(ctx, relA)
 	if err != nil || fileA == nil {
 		t.Fatalf("FindFileByPath copy-a: %v", err)
 	}
-	fileB, err := db.FindFileByPath(ctx, pathB)
+	fileB, err := db.FindFileByPath(ctx, relB)
 	if err != nil || fileB == nil {
 		t.Fatalf("FindFileByPath copy-b: %v", err)
 	}
@@ -357,11 +363,11 @@ func TestScanTracksMultipleLocations(t *testing.T) {
 		t.Errorf("rescan = %+v, want Unchanged=2 New=0 Moved=0", rescan)
 	}
 
-	fileA2, err := db.FindFileByPath(ctx, pathA)
+	fileA2, err := db.FindFileByPath(ctx, relA)
 	if err != nil || fileA2 == nil || fileA2.ID != fileA.ID {
 		t.Errorf("copy-a row changed across rescans: before=%+v after=%+v (%v)", fileA, fileA2, err)
 	}
-	fileB2, err := db.FindFileByPath(ctx, pathB)
+	fileB2, err := db.FindFileByPath(ctx, relB)
 	if err != nil || fileB2 == nil || fileB2.ID != fileB.ID {
 		t.Errorf("copy-b row changed across rescans: before=%+v after=%+v (%v)", fileB, fileB2, err)
 	}
@@ -379,7 +385,8 @@ func TestScanPrunesOrphanWhenPathContentReplaced(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	path := filepath.Join(libDir, "book.epub")
+	rel := "book.epub"
+	path := filepath.Join(libDir, rel)
 	writeTestEPUB(t, path, "Book A", "Author A", nil)
 
 	first, err := Scan(ctx, db, libDir, coversDir)
@@ -412,7 +419,7 @@ func TestScanPrunesOrphanWhenPathContentReplaced(t *testing.T) {
 		t.Errorf("books count = %d, want 1 (Book A's orphaned row must be gone)", bookCount)
 	}
 
-	book := bookByPath(t, ctx, db, path)
+	book := bookByPath(t, ctx, db, rel)
 	if book.Title != "Book B" {
 		t.Errorf("book at path = %q, want %q", book.Title, "Book B")
 	}
@@ -430,9 +437,11 @@ func TestScanPrunesOrphanWhenPathReassignedToKnownContent(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	pathA := filepath.Join(libDir, "a.epub")
+	relA := "a.epub"
+	pathA := filepath.Join(libDir, relA)
 	writeTestEPUB(t, pathA, "Book A", "Author A", nil)
-	pathB := filepath.Join(libDir, "b.epub")
+	relB := "b.epub"
+	pathB := filepath.Join(libDir, relB)
 	writeTestEPUB(t, pathB, "Book B", "Author B", nil)
 
 	first, err := Scan(ctx, db, libDir, coversDir)
@@ -469,13 +478,163 @@ func TestScanPrunesOrphanWhenPathReassignedToKnownContent(t *testing.T) {
 		t.Errorf("books count = %d, want 1 (Book A's orphaned row must be gone)", bookCount)
 	}
 
-	bookAtA := bookByPath(t, ctx, db, pathA)
+	bookAtA := bookByPath(t, ctx, db, relA)
 	if bookAtA.Title != "Book B" {
 		t.Errorf("book at pathA = %q, want %q", bookAtA.Title, "Book B")
 	}
-	bookAtB := bookByPath(t, ctx, db, pathB)
+	bookAtB := bookByPath(t, ctx, db, relB)
 	if bookAtB.ID != bookAtA.ID {
 		t.Errorf("pathA and pathB resolve to different books (%d, %d); want the same Book B", bookAtA.ID, bookAtB.ID)
+	}
+}
+
+// A directory WalkDir can't read must cost its own subtree, not the sweep:
+// files in sibling directories still get indexed, and the unreadable
+// directory counts as one error rather than aborting everything after it
+// in walk order.
+func TestScanSkipsUnreadableDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory mode bits aren't enforced")
+	}
+
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author A", nil)
+
+	restrictedDir := filepath.Join(libDir, "restricted")
+	if err := os.Mkdir(restrictedDir, 0o755); err != nil {
+		t.Fatalf("mkdir restricted: %v", err)
+	}
+	writeTestEPUB(t, filepath.Join(restrictedDir, "hidden.epub"), "Hidden Book", "Author B", nil)
+	if err := os.Chmod(restrictedDir, 0o000); err != nil {
+		t.Fatalf("chmod restricted: %v", err)
+	}
+	// Restore before TempDir's own cleanup tries to remove it.
+	t.Cleanup(func() { os.Chmod(restrictedDir, 0o755) })
+
+	result, err := Scan(ctx, db, libDir, coversDir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.New != 1 {
+		t.Errorf("New = %d, want 1 (the sibling file)", result.New)
+	}
+	if result.Errors != 1 {
+		t.Errorf("Errors = %d, want 1 (the unreadable directory)", result.Errors)
+	}
+
+	sibling := bookByPath(t, ctx, db, "sibling.epub")
+	if sibling.Title != "Sibling Book" {
+		t.Errorf("sibling Title = %q, want %q", sibling.Title, "Sibling Book")
+	}
+}
+
+// Unlike an unreadable subdirectory, a missing library root is a
+// configuration error (the volume didn't mount), not a partial result —
+// it must not look like an empty, successful sweep.
+func TestScanMissingLibraryDirReturnsError(t *testing.T) {
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	result, err := Scan(ctx, db, missingDir, coversDir)
+	if err == nil {
+		t.Fatal("Scan with a missing library dir: want an error, got nil")
+	}
+	if result.Scanned != 0 {
+		t.Errorf("Scanned = %d, want 0", result.Scanned)
+	}
+}
+
+// The assertion that actually pins the relative-path fix: the existing
+// scanner tests all use a flat library, so they'd pass either way.
+func TestScanStoresRelativePaths(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	nestedDir := filepath.Join(libDir, "sub", "dir")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	writeTestEPUB(t, filepath.Join(nestedDir, "book.epub"), "Nested Book", "Author A", nil)
+
+	if _, err := Scan(ctx, db, libDir, coversDir); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	f, err := db.FindFileByPath(ctx, "sub/dir/book.epub")
+	if err != nil || f == nil {
+		t.Fatalf("FindFileByPath sub/dir/book.epub: %+v, %v; want it found", f, err)
+	}
+
+	rows, err := db.Read().QueryContext(ctx, `SELECT file_path FROM book_files`)
+	if err != nil {
+		t.Fatalf("query file_path: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			t.Fatalf("scan file_path: %v", err)
+		}
+		if strings.Contains(p, libDir) {
+			t.Errorf("stored file_path %q contains the temp-directory prefix %q, want a relative path", p, libDir)
+		}
+	}
+}
+
+// The bug this half of the step fixes: the same library scanned through
+// two different absolute roots (dev's ./library versus the container's
+// /library, say) used to look like two different files, giving one book a
+// false second location on its first day in production.
+func TestScanSameLibraryThroughDifferentRootsYieldsOneLocation(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(rootA, "book.epub"), "Book One", "Author A", nil)
+
+	first, err := Scan(ctx, db, rootA, coversDir)
+	if err != nil {
+		t.Fatalf("first Scan (rootA): %v", err)
+	}
+	if first.New != 1 {
+		t.Fatalf("first scan New = %d, want 1", first.New)
+	}
+
+	// The exact same content, at the same relative path, mounted under a
+	// different absolute root.
+	content, err := os.ReadFile(filepath.Join(rootA, "book.epub"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootB, "book.epub"), content, 0o644); err != nil {
+		t.Fatalf("write copy under rootB: %v", err)
+	}
+
+	second, err := Scan(ctx, db, rootB, coversDir)
+	if err != nil {
+		t.Fatalf("second Scan (rootB): %v", err)
+	}
+	if second.New != 0 || second.Moved != 0 {
+		t.Errorf("second scan through a different root = %+v, want New=0 Moved=0 (recognised as the same location)", second)
+	}
+
+	var fileCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM book_files`).Scan(&fileCount); err != nil {
+		t.Fatalf("count book_files: %v", err)
+	}
+	if fileCount != 1 {
+		t.Errorf("book_files rows = %d, want 1 (same relative path both times, not a second location)", fileCount)
 	}
 }
 
