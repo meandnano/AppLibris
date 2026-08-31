@@ -131,37 +131,43 @@ func (db *DB) FindFileByPath(ctx context.Context, path string) (*BookFile, error
 	return scanBookFile(row)
 }
 
+// createBookTx inserts a book and its authors, find-or-creating each author
+// by name and linking it via book_authors. It must be called from inside a
+// DB.Write callback — see DB.Write's contract.
+func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string) (int64, error) {
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO books (content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, format)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		b.ContentHash, b.Title, b.SortTitle, b.Publisher, b.PublishedDate, b.Language,
+		b.ISBN, b.Description, b.CoverPath, b.Format)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+
+	for _, name := range authorNames {
+		authorID, err := findOrCreateAuthor(ctx, tx, name)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO book_authors (book_id, author_id) VALUES (?, ?)`, id, authorID); err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
+}
+
 // CreateBook inserts a new book row along with its authors, find-or-creating
 // each author by name and linking it via book_authors. Runs as one write
 // transaction. Callers attach the book's first file location separately via
 // UpsertBookFile.
-func (db *DB) CreateBook(ctx context.Context, b Book, authorNames []string) (int64, error) {
-	var id int64
-	err := db.Write(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
-			INSERT INTO books (content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, format)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			b.ContentHash, b.Title, b.SortTitle, b.Publisher, b.PublishedDate, b.Language,
-			b.ISBN, b.Description, b.CoverPath, b.Format)
-		if err != nil {
-			return err
-		}
-		bookID, err := res.LastInsertId()
-		if err != nil {
-			return err
-		}
-		id = bookID
-
-		for _, name := range authorNames {
-			authorID, err := findOrCreateAuthor(ctx, tx, name)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO book_authors (book_id, author_id) VALUES (?, ?)`, id, authorID); err != nil {
-				return err
-			}
-		}
-		return nil
+func (db *DB) CreateBook(ctx context.Context, b Book, authorNames []string) (id int64, err error) {
+	err = db.Write(ctx, func(tx *sql.Tx) error {
+		id, err = createBookTx(ctx, tx, b, authorNames)
+		return err
 	})
 	return id, err
 }
@@ -183,35 +189,52 @@ func findOrCreateAuthor(ctx context.Context, tx *sql.Tx, name string) (int64, er
 	return res.LastInsertId()
 }
 
-// UpsertBookFile records that bookID's content is known to live at path,
+// upsertBookFileTx records that bookID's content is known to live at path,
 // with the given size/mtime. If path already has a book_files row (because
 // it used to point at different content, or simply needs a stat refresh),
 // that row is updated in place rather than erroring on the unique file_path
 // constraint — this single operation covers a brand-new location, a
 // moved/renamed file, an additional location for already-known duplicate
 // content, and a path whose content changed to match different already-known
-// content.
-func (db *DB) UpsertBookFile(ctx context.Context, bookID int64, path string, size int64, mtime time.Time) (int64, error) {
+// content. It must be called from inside a DB.Write callback — see
+// DB.Write's contract.
+func upsertBookFileTx(ctx context.Context, tx *sql.Tx, bookID int64, path string, size int64, mtime time.Time) (int64, error) {
 	var id int64
-	err := db.Write(ctx, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			INSERT INTO book_files (book_id, file_path, file_size, modified_at)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(file_path) DO UPDATE SET
-				book_id = excluded.book_id,
-				file_size = excluded.file_size,
-				modified_at = excluded.modified_at
-			RETURNING id`,
-			bookID, path, size, formatTime(mtime)).Scan(&id)
+	err := tx.QueryRowContext(ctx, `
+		INSERT INTO book_files (book_id, file_path, file_size, modified_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			book_id = excluded.book_id,
+			file_size = excluded.file_size,
+			modified_at = excluded.modified_at
+		RETURNING id`,
+		bookID, path, size, formatTime(mtime)).Scan(&id)
+	return id, err
+}
+
+// UpsertBookFile is upsertBookFileTx run as its own write transaction. See
+// upsertBookFileTx for what it does.
+func (db *DB) UpsertBookFile(ctx context.Context, bookID int64, path string, size int64, mtime time.Time) (id int64, err error) {
+	err = db.Write(ctx, func(tx *sql.Tx) error {
+		id, err = upsertBookFileTx(ctx, tx, bookID, path, size, mtime)
+		return err
 	})
 	return id, err
 }
 
-// UpdateBookFileStat refreshes the cheap-check fields (size, mtime) for a
-// book_files row whose content hash is unchanged but whose file was touched.
+// updateBookFileStatTx refreshes the cheap-check fields (size, mtime) for a
+// book_files row whose content hash is unchanged but whose file was
+// touched. It must be called from inside a DB.Write callback — see
+// DB.Write's contract.
+func updateBookFileStatTx(ctx context.Context, tx *sql.Tx, fileID int64, size int64, mtime time.Time) error {
+	_, err := tx.ExecContext(ctx, `UPDATE book_files SET file_size = ?, modified_at = ? WHERE id = ?`, size, formatTime(mtime), fileID)
+	return err
+}
+
+// UpdateBookFileStat is updateBookFileStatTx run as its own write
+// transaction. See updateBookFileStatTx for what it does.
 func (db *DB) UpdateBookFileStat(ctx context.Context, fileID int64, size int64, mtime time.Time) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE book_files SET file_size = ?, modified_at = ? WHERE id = ?`, size, formatTime(mtime), fileID)
-		return err
+		return updateBookFileStatTx(ctx, tx, fileID, size, mtime)
 	})
 }

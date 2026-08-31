@@ -8,7 +8,14 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
 - `internal/storage` — SQLite storage layer (`modernc.org/sqlite`). WAL mode,
   foreign keys on. A read pool (`DB.Read()`) and a single-connection write
   pool (`DB.Write(ctx, fn)`) serialize writes without a hand-rolled
-  goroutine/channel. Migrations are embedded SQL files under
+  goroutine/channel. Each exported write method owns one transaction; a
+  multi-step atomic write composes the package-internal `…Tx` helpers (e.g.
+  `createBookTx`) inside a single `DB.Write` call instead of calling two
+  exported methods — a `Write` callback must never call an exported `*DB`
+  method, since the pool's one connection is already held by the outer
+  call, and nesting deadlocks until the context expires. A directly nested
+  `Write` call is instead caught and returns `ErrNestedWrite`. Migrations
+  are embedded SQL files under
   `internal/storage/migrations/`, one statement per file, named
   `YYYYMMDDNN_description.sql`, applied in filename order inside individual
   transactions and tracked in a `schema_migrations` table. `storage.Open` is

@@ -1,9 +1,13 @@
 package storage
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"io/fs"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestOpen(t *testing.T) {
@@ -74,5 +78,23 @@ func TestOpenIsIdempotent(t *testing.T) {
 	}
 	if secondCount != firstCount {
 		t.Errorf("schema_migrations rows after reopen = %d, want %d (no new migrations applied)", secondCount, firstCount)
+	}
+}
+
+// Before the nested-write guard, this deadlocked: the inner Write's BeginTx
+// blocked forever waiting for the single connection the outer Write already
+// holds. A short timeout means a regression fails in two seconds instead of
+// hanging the whole suite until go test's ten-minute panic.
+func TestNestedWriteReturnsErrNestedWrite(t *testing.T) {
+	db := openTestDB(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		return db.Write(ctx, func(tx *sql.Tx) error { return nil })
+	})
+	if !errors.Is(err, ErrNestedWrite) {
+		t.Fatalf("nested Write error = %v, want ErrNestedWrite", err)
 	}
 }
