@@ -90,26 +90,29 @@ join the root back on whenever a path is used to touch the filesystem.
   caller yet, which is exactly why this is the moment to change the
   convention: today it costs one function, later it costs every reader.
 
-**Migration.** Existing rows hold absolute-or-`./`-prefixed paths and will
-all miss the cheap check on the first sweep after this lands, producing a
-duplicate row per book at the relative path — the very failure this step
-exists to prevent, just once, at upgrade time. Handle it in SQL:
+**No migration is needed.** The service has never been deployed and no
+database exists, so there are no rows holding absolute paths to convert —
+the scanner simply stores relative paths from its first sweep onwards.
 
-`2026083115_relativise_book_file_paths.sql` cannot work — the library root
-isn't known to a static SQL file. So do it in the scanner instead, as a
-one-shot at the top of `Scan`: any `book_files` row whose `file_path` is
-absolute, or begins with `./`, gets rewritten to its form relative to
-`libraryDir` *if it is under it*, and is left alone otherwise (a row from a
-different root is genuinely stale and belongs to
-`2026083110-missing-file-reconciliation`). Guard the whole thing so it is a
-single `UPDATE … WHERE file_path LIKE '/%' OR file_path LIKE './%'` that
-no-ops on every subsequent sweep. Add a storage method
-`RelativiseFilePaths(ctx, root string) (int, error)` and log at Info when it
-rewrites anything.
+> An earlier draft of this plan specified a one-shot
+> `RelativiseFilePaths(ctx, root string) (int, error)` storage method run
+> at the top of every `Scan`, rewriting absolute or `./`-prefixed rows to
+> their form relative to the library root, guarded by a
+> `WHERE file_path LIKE '/%' OR file_path LIKE './%'` so it no-opped on
+> later sweeps. With no rows to convert that method is dead code on its
+> first execution and forever after — a permanent query at the top of every
+> sweep to fix a condition that can never arise. Leave it out.
+>
+> The same reversal was applied to
+> `docs/plans/2026083105-storage-schema-hardening.md` and
+> `docs/plans/completed/2026083106-sort-title-normalisation.md`; the latter
+> records the reasoning, and the limits of it, in full.
 
-An alternative — bump a schema version and let the paths re-derive
-naturally — costs a full re-hash and leaves the duplicate rows behind, so
-it is strictly worse.
+Anyone holding a local `data/library.db` from an earlier run should delete
+it. Nothing will convert its absolute paths, so every file would miss the
+cheap check, get re-hashed, and gain a *second* `book_files` row at the
+relative path — which is precisely the duplicate-locations failure this
+step exists to prevent.
 
 ## Tests
 
@@ -130,8 +133,6 @@ it is strictly worse.
 - Scanning the same library through two different absolute roots (copy the
   fixture, or bind the same directory via a symlink) yields one
   `book_files` row per book, not two.
-- `RelativiseFilePaths` rewrites an absolute row under the root, leaves a
-  row outside the root untouched, and is a no-op on a second call.
 
 ## CLAUDE.md
 
