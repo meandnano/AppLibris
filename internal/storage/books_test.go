@@ -890,3 +890,48 @@ func TestPruneMissingFilesDeletesBookOnlyWhenLastLocationGoes(t *testing.T) {
 		t.Errorf("book survived losing its last location = %d rows, want 0", bookCount)
 	}
 }
+
+// A single DELETE ... IN (...) statement can't take an unbounded number of
+// bound parameters (SQLite's SQLITE_MAX_VARIABLE_NUMBER), so a large overdue
+// batch must be chunked internally rather than handed to SQL as one list.
+// This exercises well past pruneMissingFilesChunkSize to prove chunking
+// doesn't drop or double-count rows at a chunk boundary.
+func TestPruneMissingFilesHandlesMoreIDsThanOneSQLChunk(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	const total = pruneMissingFilesChunkSize + 200
+	var fileIDs []int64
+	for i := 0; i < total; i++ {
+		path := fmt.Sprintf("book-%d.epub", i)
+		if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: fmt.Sprintf("hash-%d", i), Title: path, Format: "epub"}, nil, path, 100, mtime); err != nil {
+			t.Fatalf("CreateBookWithFile %s: %v", path, err)
+		}
+		f, err := db.FindFileByPath(ctx, path)
+		if err != nil || f == nil {
+			t.Fatalf("FindFileByPath %s: %+v, %v", path, f, err)
+		}
+		fileIDs = append(fileIDs, f.ID)
+	}
+	if err := db.SetFilesMissing(ctx, fileIDs, old); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+
+	files, books, err := db.PruneMissingFiles(ctx, fileIDs)
+	if err != nil {
+		t.Fatalf("PruneMissingFiles: %v", err)
+	}
+	if files != total || books != total {
+		t.Errorf("PruneMissingFiles = files=%d books=%d, want files=%d books=%d", files, books, total, total)
+	}
+
+	var remaining int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM book_files`).Scan(&remaining); err != nil {
+		t.Fatalf("count book_files: %v", err)
+	}
+	if remaining != 0 {
+		t.Errorf("book_files rows remaining = %d, want 0", remaining)
+	}
+}

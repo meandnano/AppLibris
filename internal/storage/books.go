@@ -437,39 +437,51 @@ func (db *DB) ClearFilesMissing(ctx context.Context, fileIDs []int64) error {
 // their grace period. A row merely aged past grace, or under a directory
 // the sweep couldn't re-read, must never appear here — only a
 // currently-reconfirmed absence earns deletion.
+// pruneMissingFilesChunkSize bounds how many IDs go into a single DELETE ...
+// IN (...) statement. SQLite's per-statement bound-parameter limit
+// (SQLITE_MAX_VARIABLE_NUMBER) is 999 pre-3.32 and 32766 since — this stays
+// well under either so a large overdue batch can never overflow it.
+const pruneMissingFilesChunkSize = 500
+
 func (db *DB) PruneMissingFiles(ctx context.Context, fileIDs []int64) (files int, books int, err error) {
 	if len(fileIDs) == 0 {
 		return 0, 0, nil
 	}
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		placeholders := make([]string, len(fileIDs))
-		args := make([]any, len(fileIDs))
-		for i, id := range fileIDs {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-
-		rows, qErr := tx.QueryContext(ctx,
-			`DELETE FROM book_files WHERE id IN (`+strings.Join(placeholders, ",")+`) RETURNING book_id`,
-			args...)
-		if qErr != nil {
-			return qErr
-		}
 		affectedBooks := map[int64]bool{}
-		for rows.Next() {
-			var bookID int64
-			if err := rows.Scan(&bookID); err != nil {
+
+		for start := 0; start < len(fileIDs); start += pruneMissingFilesChunkSize {
+			end := min(start+pruneMissingFilesChunkSize, len(fileIDs))
+			chunk := fileIDs[start:end]
+
+			placeholders := make([]string, len(chunk))
+			args := make([]any, len(chunk))
+			for i, id := range chunk {
+				placeholders[i] = "?"
+				args[i] = id
+			}
+
+			rows, qErr := tx.QueryContext(ctx,
+				`DELETE FROM book_files WHERE id IN (`+strings.Join(placeholders, ",")+`) RETURNING book_id`,
+				args...)
+			if qErr != nil {
+				return qErr
+			}
+			for rows.Next() {
+				var bookID int64
+				if err := rows.Scan(&bookID); err != nil {
+					rows.Close()
+					return err
+				}
+				affectedBooks[bookID] = true
+				files++
+			}
+			if err := rows.Err(); err != nil {
 				rows.Close()
 				return err
 			}
-			affectedBooks[bookID] = true
-			files++
-		}
-		if err := rows.Err(); err != nil {
 			rows.Close()
-			return err
 		}
-		rows.Close()
 
 		for bookID := range affectedBooks {
 			deleted, _, err := pruneOrphanedBookTx(ctx, tx, bookID)

@@ -1163,3 +1163,79 @@ func TestScanDoesNotPruneWhenCurrentSweepCannotReconfirmAbsence(t *testing.T) {
 		t.Fatalf("FindFileByPath: %+v, %v (want it to survive — this sweep could not reconfirm absence)", f, err)
 	}
 }
+
+// underAny's skippedDirs check must protect a book_files row whose path is
+// exactly a skipped directory's own path, not just its descendants — a
+// prefix-only match ("dir/%") would miss this case, since the row's
+// file_path is identical to the directory's relative path, no trailing
+// segment at all. This is the exact-equality half of the guard that
+// TestScanUnreadableSubdirectoryPrunesNothingUnderIt (a descendant,
+// restricted/hidden.epub) doesn't exercise.
+func TestScanDoesNotPruneOverdueRowAtExactlyAnUnreadableDirectorysPath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory mode bits aren't enforced")
+	}
+
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	targetPath := filepath.Join(libDir, "target.epub")
+	writeTestEPUB(t, targetPath, "Target Book", "Author A", nil)
+	// A readable sibling keeps Scanned > 0 throughout.
+	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author B", nil)
+
+	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	} else if first.New != 2 {
+		t.Fatalf("first scan = %+v, want New=2", first)
+	}
+
+	// Remove target.epub — a genuine ErrNotExist — so it gets marked missing
+	// legitimately.
+	if err := os.Remove(targetPath); err != nil {
+		t.Fatalf("remove target.epub: %v", err)
+	}
+	if second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("second Scan: %v", err)
+	} else if second.Missing != 1 {
+		t.Fatalf("second scan = %+v, want Missing=1", second)
+	}
+
+	// Back-date it well past grace.
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE book_files SET missing_since = ? WHERE file_path = ?`,
+			"2020-01-01T00:00:00.000000000Z", "target.epub")
+		return err
+	}); err != nil {
+		t.Fatalf("backdate missing_since: %v", err)
+	}
+
+	// Now something occupies exactly that path: an unreadable directory
+	// named "target.epub" — not a subdirectory containing a file of that
+	// name, the literal path itself.
+	if err := os.Mkdir(targetPath, 0o755); err != nil {
+		t.Fatalf("mkdir target.epub: %v", err)
+	}
+	if err := os.Chmod(targetPath, 0o000); err != nil {
+		t.Fatalf("chmod target.epub: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(targetPath, 0o755) })
+
+	third, err := Scan(ctx, db, libDir, coversDir, time.Hour)
+	if err != nil {
+		t.Fatalf("third Scan: %v", err)
+	}
+	if third.Scanned == 0 {
+		t.Fatal("Scanned = 0, want the sibling file still visited")
+	}
+	if third.Pruned != 0 {
+		t.Errorf("third scan = %+v, want Pruned=0 (the row's path exactly matches an unreadable directory, not just a descendant)", third)
+	}
+
+	f, err := db.FindFileByPath(ctx, "target.epub")
+	if err != nil || f == nil {
+		t.Fatalf("FindFileByPath: %+v, %v (want it to survive — exact-path match with a skipped directory)", f, err)
+	}
+}
