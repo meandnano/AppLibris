@@ -46,7 +46,7 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
-	mux.Handle("/", web.Routes(svc))
+	mux.Handle("/", web.Routes(svc, coversDir))
 
 	log.Printf("listening on %s (db: %s)", addr, dbPath)
 	if err := http.ListenAndServe(addr, mux); err != nil {

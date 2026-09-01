@@ -1,0 +1,39 @@
+{{define "document-head"}}
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · Bookshelf</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,300..600&display=swap">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script>
+    // Applied before first paint so a dark-mode reader never gets a light flash.
+    (function () {
+      try {
+        var stored = localStorage.getItem("theme");
+        if (stored) document.documentElement.setAttribute("data-theme", stored);
+      } catch (e) {}
+    })();
+  </script>
+</head>
+{{end}}
+
+{{define "site-header"}}
+<header class="masthead">
+  <div class="masthead__left">
+    <span class="masthead__brand">Bookshelf</span>
+    <nav class="masthead__nav">
+      <span class="masthead__link masthead__link--current" aria-current="page">Library</span>
+    </nav>
+  </div>
+  <div class="masthead__right">
+    <span class="masthead__count">{{.Count}} {{if eq .Count 1}}book{{else}}books{{end}}</span>
+    <button class="masthead__theme" type="button" data-theme-toggle>Dark mode</button>
+  </div>
+</header>
+{{end}}
+
+{{define "site-scripts"}}
+<script src="/static/js/theme.js" defer></script>
+{{end}}

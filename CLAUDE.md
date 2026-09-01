@@ -43,13 +43,17 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   `ListBooks`, assembling `internal/storage`'s books and authors into a
   `BookSummary` per book.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
-  `internal/service`, `html/template` templates and CSS embedded via
+  `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
-  step. Currently just `GET /` rendering a placeholder `library.html` (a
-  bare list, no real markup or styling yet) and `GET /static/` serving the
-  embedded CSS — the plumbing is real, the design isn't; real templates
-  land once Claude Design's mockups (see `UI.md`, kept on the `init`
-  branch/worktree, not on `master`) are translated into Go templates.
+  step. `GET /` renders the library grid — the first real page, translated
+  from Claude Design's mockups (see `UI.md`, kept on the `init`
+  branch/worktree, not on `master`); `GET /static/` serves the embedded
+  stylesheet and theme script; `GET /covers/` serves the scanner's stored
+  cover thumbnails out of `COVERS_DIR` (runtime data, so it's passed into
+  `Routes` rather than embedded). Handlers map `service.BookSummary` onto a
+  small per-page view model so templates stay logic-free. Book detail,
+  search, inline metadata editing and send-to-Kindle are designed but not
+  built — each needs backing features that don't exist yet.
 - `cmd/server` — entrypoint. Opens the database (`DB_PATH` env var, default
   `./data/library.db`), runs a synchronous full scan of `LIBRARY_DIR`
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
@@ -57,11 +61,11 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   in the background. Serves `/healthz` and mounts `internal/web`'s routes
   at `/`, on `ADDR` (default `:8080`).
 
-Still missing from DESIGN.md: the real web UI templates/CSS (only
-plumbing exists so far), FB2 cover/metadata extraction, metadata provider
-enrichment (Open Library / Google Books), the filesystem watcher (the
-periodic rescan is the only live-update mechanism so far), search,
-near-duplicate detection, format conversion, and send-to-Kindle.
+Still missing from DESIGN.md: the book detail page, search, inline metadata
+editing and send-to-Kindle (designed, not built), FB2 cover/metadata
+extraction, metadata provider enrichment (Open Library / Google Books), the
+filesystem watcher (the periodic rescan is the only live-update mechanism so
+far), near-duplicate detection, and format conversion.
 
 ## Planning
 
