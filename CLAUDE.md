@@ -34,3 +34,16 @@ Still missing from DESIGN.md: EPUB/FB2 cover extraction, metadata provider
 enrichment (Open Library / Google Books), the filesystem watcher (the
 periodic rescan is the only live-update mechanism so far), near-duplicate
 detection, format conversion, send-to-Kindle, and the web UI.
+
+## Planning
+
+Each implementation step is planned in its own file under
+`docs/plans/<YYYYMMDDNN-description>.md` (e.g.
+`docs/plans/2026083001-covers.md`) — `NN` a same-day sequence number, same
+scheme as the migration filenames. Once a plan's step has been implemented,
+move its file into `docs/plans/completed/`.
+
+Plans in `docs/plans/completed/` are immutable: never edit one after it's
+moved there, even to fix a mistake found later. If a problem is discovered
+in a completed plan, write a new plan for the fix instead of rewriting the
+old one.
