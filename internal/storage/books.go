@@ -72,6 +72,51 @@ func (db *DB) FindBookByContentHash(ctx context.Context, hash string) (*Book, er
 	return scanBook(row)
 }
 
+// ListBooks returns every book, ordered by sort_title.
+func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
+	rows, err := db.read.QueryContext(ctx, `SELECT `+bookColumns+` FROM books ORDER BY sort_title`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var books []Book
+	for rows.Next() {
+		var b Book
+		if err := rows.Scan(&b.ID, &b.ContentHash, &b.Title, &b.SortTitle, &b.Publisher, &b.PublishedDate,
+			&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.Format,
+			&b.AddedAt, &b.ModifiedAt, &b.DerivedFrom); err != nil {
+			return nil, err
+		}
+		books = append(books, b)
+	}
+	return books, rows.Err()
+}
+
+// ListBookAuthors returns every book's author names, keyed by book id.
+func (db *DB) ListBookAuthors(ctx context.Context) (map[int64][]string, error) {
+	rows, err := db.read.QueryContext(ctx, `
+		SELECT book_authors.book_id, authors.name
+		FROM book_authors
+		JOIN authors ON authors.id = book_authors.author_id
+		ORDER BY book_authors.book_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	authorsByBook := make(map[int64][]string)
+	for rows.Next() {
+		var bookID int64
+		var name string
+		if err := rows.Scan(&bookID, &name); err != nil {
+			return nil, err
+		}
+		authorsByBook[bookID] = append(authorsByBook[bookID], name)
+	}
+	return authorsByBook, rows.Err()
+}
+
 // FindFileByPath returns the book_files row at the given path, or nil if none exists.
 func (db *DB) FindFileByPath(ctx context.Context, path string) (*BookFile, error) {
 	row := db.read.QueryRowContext(ctx, `SELECT `+bookFileColumns+` FROM book_files WHERE file_path = ?`, path)

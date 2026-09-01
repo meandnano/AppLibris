@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"library/internal/scanner"
+	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/web"
 )
 
 func main() {
@@ -38,10 +40,13 @@ func main() {
 	runScan(db, libraryDir, coversDir)
 	go periodicScan(db, libraryDir, coversDir, scanInterval)
 
+	svc := service.New(db)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
+	mux.Handle("/", web.Routes(svc))
 
 	log.Printf("listening on %s (db: %s)", addr, dbPath)
 	if err := http.ListenAndServe(addr, mux); err != nil {

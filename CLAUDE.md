@@ -37,17 +37,31 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   metadata or covers parsed yet. Missing-file handling (a `book_files` row
   whose path no longer exists on disk) is not implemented — such a row is
   simply left stale.
+- `internal/service` — the layer beneath HTTP handlers DESIGN.md's
+  "Layering for a future API" calls for, so a future `/api/v1` can reuse it
+  as a second thin transport alongside `internal/web`. One method so far:
+  `ListBooks`, assembling `internal/storage`'s books and authors into a
+  `BookSummary` per book.
+- `internal/web` — the browser UI's HTTP transport: thin handlers over
+  `internal/service`, `html/template` templates and CSS embedded via
+  `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
+  step. Currently just `GET /` rendering a placeholder `library.html` (a
+  bare list, no real markup or styling yet) and `GET /static/` serving the
+  embedded CSS — the plumbing is real, the design isn't; real templates
+  land once Claude Design's mockups (see `UI.md`, kept on the `init`
+  branch/worktree, not on `master`) are translated into Go templates.
 - `cmd/server` — entrypoint. Opens the database (`DB_PATH` env var, default
   `./data/library.db`), runs a synchronous full scan of `LIBRARY_DIR`
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
   before serving, then reruns it on a `SCAN_INTERVAL` timer (default `15m`)
-  in the background. Serves one route, `/healthz`, on `ADDR` (default
-  `:8080`).
+  in the background. Serves `/healthz` and mounts `internal/web`'s routes
+  at `/`, on `ADDR` (default `:8080`).
 
-Still missing from DESIGN.md: FB2 cover/metadata extraction, metadata
-provider enrichment (Open Library / Google Books), the filesystem watcher
-(the periodic rescan is the only live-update mechanism so far),
-near-duplicate detection, format conversion, send-to-Kindle, and the web UI.
+Still missing from DESIGN.md: the real web UI templates/CSS (only
+plumbing exists so far), FB2 cover/metadata extraction, metadata provider
+enrichment (Open Library / Google Books), the filesystem watcher (the
+periodic rescan is the only live-update mechanism so far), search,
+near-duplicate detection, format conversion, and send-to-Kindle.
 
 ## Planning
 

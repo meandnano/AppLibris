@@ -1,0 +1,10 @@
+<!doctype html>
+<title>Library</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<ul>
+{{range .}}
+  <li>{{.Title}}</li>
+{{else}}
+  <li>No books yet.</li>
+{{end}}
+</ul>
