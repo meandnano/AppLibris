@@ -48,17 +48,21 @@ method be a one-line wrapper.
 
 ```go
 // createBookTx inserts a book and its authors. It must be called from
-// inside a DB.Write callback — see DB.Write's contract.
+// inside a DB.Write callback, using the ctx that callback is handed — see
+// DB.Write's contract.
 func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string) (int64, error)
 
 func (db *DB) CreateBook(ctx context.Context, b Book, authorNames []string) (id int64, err error) {
-	err = db.Write(ctx, func(tx *sql.Tx) error {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		id, err = createBookTx(ctx, tx, b, authorNames)
 		return err
 	})
 	return id, err
 }
 ```
+
+(`fn`'s `ctx context.Context` parameter is what carries the nesting guard's
+marker — see the revision note under **Guarding the deadlock** below.)
 
 Same for `upsertBookFileTx` / `UpsertBookFile` and
 `updateBookFileStatTx` / `UpdateBookFileStat`. `findOrCreateAuthor` is
@@ -90,17 +94,42 @@ nesting anyway a year from now. Two cheap guards, in order of preference:
    expires rather than returning an error.
 
 2. **Make it fail loudly instead of hanging.** Optional, and worth doing
-   only if it stays small: track "a write transaction is in flight" in a
-   `sync/atomic` bool on `DB`, set for the duration of the `Write`
-   callback, and have `Write` return a plain error (`errors.New("storage:
-   nested DB.Write")`) instead of blocking when it is already set. This is
-   safe precisely *because* writes are serialised — if the flag is set, the
-   caller is by definition on the same goroutine chain that holds the
-   connection, since no second writer can be in flight. Sixteen lines and it
-   converts an unfalsifiable hang into a stack trace.
+   only if it stays small: have `Write` return a plain error
+   (`ErrNestedWrite`) instead of blocking when it detects nesting.
 
 Do both. The comment is the real fix; the flag is what makes a mistake
 survivable at 2am.
+
+> **Revised during review.** The first cut of guard 2 tracked "a write is
+> in flight" as a single `sync/atomic` bool on `*DB`, reasoning that this
+> was safe *because* writes are serialised — if the flag is set, the caller
+> must be on the same goroutine chain that holds the connection, since no
+> second writer can be in flight.
+>
+> That reasoning only holds if nothing ever calls `Write` from a second,
+> genuinely concurrent goroutine — true of every caller *today*, but not a
+> property `Write` itself enforces or should assume. A DB-wide flag can't
+> tell a directly nested call apart from an unrelated concurrent one; both
+> just see "a write is in flight" and both would get `ErrNestedWrite`,
+> including the concurrent one that should have simply blocked on `BeginTx`
+> and succeeded once the first transaction committed. That silently breaks
+> `Write`'s serialisation contract for any future concurrent caller (a web
+> handler alongside the scanner, say) depending on scheduling — exactly the
+> kind of bug this step exists to prevent, reintroduced by the guard meant
+> to catch it.
+>
+> Fixed by scoping the marker to the call chain instead of the `DB`: `Write`
+> hands its callback a `ctx` carrying an in-progress marker
+> (`context.WithValue`), and checks incoming calls for that marker rather
+> than a shared flag. A nested call — one made with the `ctx` `Write` handed
+> its own callback — carries the marker and is caught. A concurrent call
+> from an unrelated `ctx` carries no marker, so it is unaffected: it blocks
+> on `BeginTx` and succeeds once the first transaction commits, exactly as
+> it did before guard 2 existed. This does mean `fn`'s signature grows a
+> `ctx context.Context` parameter (`func(ctx context.Context, tx *sql.Tx)
+> error`), and every `…Tx` call inside a `Write` callback must use *that*
+> `ctx`, not the one closed over from the callback's own caller — the
+> `internal/storage` changes and tests below reflect this shape.
 
 ## Tests
 
@@ -118,6 +147,12 @@ survivable at 2am.
   rather than blocking. Give the test a short `context.WithTimeout` anyway,
   so a regression fails in two seconds instead of hanging the suite until
   `go test`'s ten-minute panic.
+- New, added during review: two independent goroutines both calling `Write`
+  — the second must block behind the first (proved by asserting it hasn't
+  returned within a short window) and then succeed once the first commits,
+  never returning `ErrNestedWrite`. This is what the review-round fix to
+  guard 2 above is for, and it is exactly the case a DB-wide flag gets
+  wrong.
 
 ## CLAUDE.md
 
