@@ -60,6 +60,10 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   before serving, then reruns it on a `SCAN_INTERVAL` timer (default `15m`)
   in the background. Serves `/healthz` and mounts `internal/web`'s routes
   at `/`, on `ADDR` (default `:8080`).
+- Logging goes through `log/slog` (a text handler on stderr), leveled via
+  the `LOG_LEVEL` env var (default `INFO`) set once in `cmd/server` and
+  used everywhere else via `slog`'s package-level functions against that
+  default logger.
 
 Still missing from DESIGN.md: the book detail page, search, inline metadata
 editing and send-to-Kindle (designed, not built), FB2 cover/metadata
