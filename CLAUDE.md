@@ -123,9 +123,15 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   model so templates stay logic-free. `render` executes into a buffer
   before writing anything to the response, so a template error is a clean
   500 rather than a truncated page, and sets `Content-Type` explicitly
-  rather than relying on sniffing. Book detail, search, inline metadata
-  editing and send-to-Kindle are designed but not built — each needs
-  backing features that don't exist yet.
+  rather than relying on sniffing. Only the pre-write `ExecuteTemplate`
+  error is ever returned to the handler: once `Content-Type` is set and the
+  buffer starts writing to the response, the response is committed, so a
+  write failure past that point (almost always the client disconnecting)
+  is logged inside `render` rather than returned — a handler reacting to
+  it with `http.Error` would double-write onto an already-committed
+  response. Book detail, search, inline metadata editing and
+  send-to-Kindle are designed but not built — each needs backing features
+  that don't exist yet.
 - `cmd/server` — entrypoint. Opens the database (`DB_PATH` env var, default
   `./data/library.db`), runs a synchronous full scan of `LIBRARY_DIR`
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
