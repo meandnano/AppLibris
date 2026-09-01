@@ -16,9 +16,15 @@ import (
 // scanner writes stored cover thumbnails into; it is served read-only under
 // /covers/ so the library grid can reference a cover by URL rather than by
 // the absolute on-disk path storage keeps.
+//
+// This mux owns 404s for everything under /: cmd/server mounts it behind its
+// own outer catch-all so /healthz can live alongside the UI, but every
+// pattern below matches an exact path or a specific prefix, so a request
+// that matches none of them falls through to ServeMux's own 404 rather than
+// being narrowed on the outer mount.
 func Routes(svc *service.Service, coversDir string) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", libraryHandler(svc))
+	mux.HandleFunc("GET /{$}", libraryHandler(svc))
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	mux.Handle("GET /covers/", http.StripPrefix("/covers/", http.FileServer(http.Dir(coversDir))))
 	return mux
@@ -66,6 +72,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 		page := libraryPage{Title: "Library", Count: len(cards), Books: cards}
 		if err := render(w, "library.html", page); err != nil {
 			slog.Error("render template failed", "template", "library.html", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
 	}
 }
