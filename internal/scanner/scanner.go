@@ -46,12 +46,23 @@ var supportedExtensions = map[string]bool{
 // deleted as an orphan; genuinely new content becomes a new book, created
 // together with its first file location in one transaction, with its cover
 // (if any) extracted and stored under coversDir. A per-file error is
-// logged and counted rather than aborting the sweep.
+// logged and counted rather than aborting the sweep — and so is a
+// directory WalkDir can't read: its subtree is skipped, not the rest of
+// the library. Only a failure on libraryDir itself (missing, unmounted) is
+// fatal, since that must not look like an empty library.
 func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Result, error) {
 	var result Result
 
 	err := filepath.WalkDir(libraryDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// a directory we can't read costs us its subtree, not the sweep —
+			// anything else (including an error on the root itself) is fatal;
+			// d is nil when the error comes from os.Lstat on the root itself
+			if d != nil && d.IsDir() && path != libraryDir {
+				slog.Warn("skipping unreadable directory", "path", path, "error", err)
+				result.Errors++
+				return fs.SkipDir
+			}
 			return err
 		}
 		if d.IsDir() || !supportedExtensions[strings.ToLower(filepath.Ext(d.Name()))] {
@@ -59,7 +70,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Re
 		}
 
 		result.Scanned++
-		if err := scanFile(ctx, db, path, coversDir, &result); err != nil {
+		if err := scanFile(ctx, db, libraryDir, path, coversDir, &result); err != nil {
 			slog.Warn("scan file failed", "path", path, "error", err)
 			result.Errors++
 		}
@@ -71,7 +82,17 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Re
 	return result, nil
 }
 
-func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, result *Result) error {
+func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) error {
+	// stored relative to libraryDir (slash-separated) so the index survives
+	// the library being mounted at a different absolute path — dev's
+	// ./library versus the container's /library, say; anything that needs
+	// to touch the filesystem below still uses the absolute path
+	rel, err := filepath.Rel(libraryDir, path)
+	if err != nil {
+		return fmt.Errorf("relativize: %w", err)
+	}
+	rel = filepath.ToSlash(rel)
+
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("stat: %w", err)
@@ -79,7 +100,7 @@ func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, resul
 	size := info.Size()
 	mtime := info.ModTime()
 
-	bf, err := db.FindFileByPath(ctx, path)
+	bf, err := db.FindFileByPath(ctx, rel)
 	if err != nil {
 		return fmt.Errorf("find file by path: %w", err)
 	}
@@ -108,7 +129,7 @@ func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, resul
 	}
 
 	if book == nil {
-		orphanedID, orphanedTitle, err := createBook(ctx, db, path, hash, coversDir, size, mtime)
+		orphanedID, orphanedTitle, err := createBook(ctx, db, path, rel, hash, coversDir, size, mtime)
 		if err != nil {
 			return fmt.Errorf("create book: %w", err)
 		}
@@ -119,7 +140,7 @@ func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, resul
 
 	// known content at a path with no (or a stale) book_files row: a move,
 	// a rename, or an additional location for byte-identical content
-	_, orphanedID, orphanedTitle, err := db.ReassignFileAndPruneOrphan(ctx, book.ID, path, size, mtime)
+	_, orphanedID, orphanedTitle, err := db.ReassignFileAndPruneOrphan(ctx, book.ID, rel, size, mtime)
 	if err != nil {
 		return fmt.Errorf("attach file location: %w", err)
 	}
@@ -142,7 +163,9 @@ func logOrphan(path string, orphanedID int64, orphanedTitle string, result *Resu
 	result.Orphaned++
 }
 
-func createBook(ctx context.Context, db *storage.DB, path, hash, coversDir string, size int64, mtime time.Time) (orphanedID int64, orphanedTitle string, err error) {
+// createBook reads metadata from the file at the absolute path and stores
+// the book under rel, its path relative to the library root.
+func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir string, size int64, mtime time.Time) (orphanedID int64, orphanedTitle string, err error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	meta := extractMetadata(path, ext)
 
@@ -166,7 +189,7 @@ func createBook(ctx context.Context, db *storage.DB, path, hash, coversDir strin
 		CoverPath:   coverPath,
 		Format:      strings.TrimPrefix(ext, "."),
 	}
-	_, orphanedID, orphanedTitle, err = db.CreateBookWithFile(ctx, book, meta.Authors, path, size, mtime)
+	_, orphanedID, orphanedTitle, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
 	return orphanedID, orphanedTitle, err
 }
 
