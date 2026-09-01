@@ -1,8 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -235,6 +238,14 @@ func TestStaticFileServed(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /static/css/app.css status = %d, want 200", rec.Code)
 	}
+
+	want, err := staticFS.ReadFile("static/css/app.css")
+	if err != nil {
+		t.Fatalf("read embedded static/css/app.css: %v", err)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), want) {
+		t.Errorf("GET /static/css/app.css body does not match the embedded file content (got %d bytes, want %d)", rec.Body.Len(), len(want))
+	}
 }
 
 func TestCoverServedFromCoversDir(t *testing.T) {
@@ -245,7 +256,8 @@ func TestCoverServedFromCoversDir(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	coversDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("not-really-a-jpeg"), 0o644); err != nil {
+	coverBytes := []byte("not-really-a-jpeg")
+	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), coverBytes, 0o644); err != nil {
 		t.Fatalf("write cover: %v", err)
 	}
 
@@ -257,6 +269,145 @@ func TestCoverServedFromCoversDir(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /covers/hash-1.jpg status = %d, want 200", rec.Code)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), coverBytes) {
+		t.Errorf("GET /covers/hash-1.jpg body = %q, want %q", rec.Body.String(), coverBytes)
+	}
+}
+
+func TestStaticAndCoversDoNotListDirectories(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	coversDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("cover-bytes"), 0o644); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
+
+	handler := Routes(service.New(db), coversDir)
+
+	for _, path := range []string{"/static/", "/static/css/", "/covers/"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want 404 (no directory listing)", path, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "<a href=") {
+			t.Errorf("GET %s body contains a directory listing: %q", path, rec.Body.String())
+		}
+	}
+}
+
+func TestStaticAssetETagIsContentDerived(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	handler := Routes(service.New(db), t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/static/css/app.css", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /static/css/app.css status = %d, want 200", rec.Code)
+	}
+	if got, want := rec.Header().Get("Cache-Control"), "public, max-age=300"; got != want {
+		t.Errorf("GET /static/css/app.css Cache-Control = %q, want %q", got, want)
+	}
+
+	// A constant ETag would pass a weaker "non-empty, echoes back to a 304"
+	// check but would keep returning 304 after the served content actually
+	// changed, leaving clients stale indefinitely — so pin the documented
+	// derivation (sha256 of the served body, truncated to 8 bytes, quoted)
+	// rather than just its shape.
+	sum := sha256.Sum256(rec.Body.Bytes())
+	wantETag := fmt.Sprintf(`"%x"`, sum[:8])
+	if got := rec.Header().Get("ETag"); got != wantETag {
+		t.Errorf("GET /static/css/app.css ETag = %q, want %q (sha256 of the served body)", got, wantETag)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/static/css/app.css", nil)
+	req2.Header.Set("If-None-Match", wantETag)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusNotModified {
+		t.Errorf("GET /static/css/app.css with If-None-Match status = %d, want 304", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Errorf("GET /static/css/app.css with If-None-Match body = %q, want empty", rec2.Body.String())
+	}
+}
+
+func TestCoverCacheControlIsBoundedNotImmutable(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	coversDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("cover-bytes"), 0o644); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
+
+	handler := Routes(service.New(db), coversDir)
+
+	req := httptest.NewRequest(http.MethodGet, "/covers/hash-1.jpg", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// cover.Store keys a cover's URL on the book's content hash, not on a
+	// hash of the resized/JPEG-encoded bytes actually served there, so a
+	// future change to that pipeline (or a regeneration under a changed
+	// one) can overwrite different bytes at an unchanged URL. immutable
+	// would misrepresent that; the header must stay a bounded max-age.
+	got := rec.Header().Get("Cache-Control")
+	if strings.Contains(got, "immutable") {
+		t.Errorf("GET /covers/hash-1.jpg Cache-Control = %q, contains immutable — the URL is not provably stable, see cover.Store's naming", got)
+	}
+	if want := "public, max-age=86400"; got != want {
+		t.Errorf("GET /covers/hash-1.jpg Cache-Control = %q, want %q", got, want)
+	}
+}
+
+func TestCoversPathTraversalDoesNotEscapeCoversDir(t *testing.T) {
+	// Exercises coversHandler directly rather than through Routes: a
+	// literal ".." reaching http.ServeMux gets redirected to its cleaned
+	// path one layer above this handler, which would make the same
+	// request through Routes pass regardless of whether this handler's
+	// own protection (inherited from http.Dir) still works.
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret"), []byte("do not serve me"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	coversDir := filepath.Join(outsideDir, "covers")
+	if err := os.Mkdir(coversDir, 0o755); err != nil {
+		t.Fatalf("mkdir covers: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("cover-bytes"), 0o644); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
+
+	handler := coversHandler(coversDir)
+
+	req := httptest.NewRequest(http.MethodGet, "/covers/../secret", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("GET /covers/../secret status = 200 body = %q, want the traversal to fail", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "do not serve me") {
+		t.Errorf("GET /covers/../secret leaked the outside file: %q", rec.Body.String())
 	}
 }
 

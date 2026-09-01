@@ -25,8 +25,8 @@ import (
 func Routes(svc *service.Service, coversDir string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", libraryHandler(svc))
-	mux.Handle("GET /static/", http.FileServerFS(staticFS))
-	mux.Handle("GET /covers/", http.StripPrefix("/covers/", http.FileServer(http.Dir(coversDir))))
+	mux.Handle("GET /static/", staticHandler())
+	mux.Handle("GET /covers/", coversHandler(coversDir))
 	return mux
 }
 

@@ -159,11 +159,28 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   `/books/{id}`; `GET /static/` serves the embedded stylesheet and theme
   script; `GET /covers/` serves the scanner's stored cover thumbnails out of
   `COVERS_DIR` (runtime data, so it's passed into `Routes` rather than
-  embedded). Handlers map `service.BookSummary` onto a small per-page view
-  model so templates stay logic-free. `render` executes into a buffer
-  before writing anything to the response, so a template error is a clean
-  500 rather than a truncated page, and sets `Content-Type` explicitly
-  rather than relying on sniffing. Only the pre-write `ExecuteTemplate`
+  embedded). Both mounts wrap their filesystem in `noDirFS` so a directory
+  with no `index.html` 404s instead of `http.FileServer` generating a
+  browsable listing. Neither gets `Cache-Control: immutable`: `cover.Store`
+  names each file by the *book's* content hash, not a hash of the
+  resized/JPEG-encoded thumbnail bytes actually served at that path, so a
+  future change to the resize/encode pipeline (or a regeneration under a
+  changed pipeline) can overwrite different bytes at an unchanged URL —
+  `immutable` would promise the opposite. Covers instead get a day-long
+  `max-age`, bounding how stale a legitimately changed thumbnail can get
+  while still eliminating the redundant per-visit revalidation round trip
+  the header exists to avoid; `http.FileServer`'s own `Last-Modified`
+  (from the file's mtime) is what lets a client revalidate once that
+  window elapses. The embedded static assets get a content-derived `ETag`
+  (computed once at startup, since `embed.FS` reports a zero `ModTime` and
+  `http.FileServer` would otherwise emit no validator at all) paired with
+  a short, five-minute `max-age` — that bounds how long a client can serve
+  a stale file after a deploy without consulting the `ETag`, rather than
+  eliminating the risk outright. Handlers map `service.BookSummary` onto a
+  small per-page view model so templates stay logic-free. `render` executes
+  into a buffer before writing anything to the response, so a template
+  error is a clean 500 rather than a truncated page, and sets `Content-Type`
+  explicitly rather than relying on sniffing. Only the pre-write `ExecuteTemplate`
   error is ever returned to the handler: once `Content-Type` is set and the
   buffer starts writing to the response, the response is committed, so a
   write failure past that point (almost always the client disconnecting)
