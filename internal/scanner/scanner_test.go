@@ -93,6 +93,40 @@ func writeTestEPUB(t *testing.T, path, title, author string, coverImage []byte) 
 	}
 }
 
+// writeTestEPUBWithOPF is like writeTestEPUB but takes the OPF package body
+// verbatim, for tests exercising metadata fields the fixed template doesn't
+// carry.
+func writeTestEPUBWithOPF(t *testing.T, path, opfXML string) {
+	t.Helper()
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer f.Close()
+
+	zw := zip.NewWriter(f)
+
+	files := map[string]string{
+		"mimetype":               "application/epub+zip",
+		"META-INF/container.xml": testContainerXML,
+		"OEBPS/content.opf":      opfXML,
+	}
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create %s in zip: %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("write %s in zip: %v", name, err)
+		}
+	}
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+}
+
 // testCoverImage returns a small valid PNG, suitable as a fixture cover.
 func testCoverImage(t *testing.T) []byte {
 	t.Helper()
@@ -137,8 +171,8 @@ func bookByPath(t *testing.T, ctx context.Context, db *storage.DB, relPath strin
 	}
 
 	var b storage.Book
-	err = db.Read().QueryRowContext(ctx, `SELECT title, format, cover_path, cover_retry FROM books WHERE id = ?`, f.BookID).
-		Scan(&b.Title, &b.Format, &b.CoverPath, &b.CoverRetry)
+	err = db.Read().QueryRowContext(ctx, `SELECT title, format, cover_path, cover_retry, publisher, published_date FROM books WHERE id = ?`, f.BookID).
+		Scan(&b.Title, &b.Format, &b.CoverPath, &b.CoverRetry, &b.Publisher, &b.PublishedDate)
 	if err != nil {
 		t.Fatalf("look up book %d: %v", f.BookID, err)
 	}
@@ -189,6 +223,37 @@ func TestScanBasic(t *testing.T) {
 	}
 	if fb2Book.Format != "fb2" {
 		t.Errorf("fb2 Format = %q, want %q", fb2Book.Format, "fb2")
+	}
+}
+
+const testOPFWithPublisherAndDate = `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Book With Publisher</dc:title>
+    <dc:creator>Author A</dc:creator>
+    <dc:publisher>Acme Books</dc:publisher>
+    <dc:date>2011-05-01</dc:date>
+  </metadata>
+</package>`
+
+func TestScanExtractsPublisherAndPublishedDate(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUBWithOPF(t, filepath.Join(libDir, "book.epub"), testOPFWithPublisherAndDate)
+
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	book := bookByPath(t, ctx, db, "book.epub")
+	if book.Publisher != "Acme Books" {
+		t.Errorf("Publisher = %q, want %q", book.Publisher, "Acme Books")
+	}
+	if book.PublishedDate != "2011-05-01" {
+		t.Errorf("PublishedDate = %q, want %q", book.PublishedDate, "2011-05-01")
 	}
 }
 

@@ -35,9 +35,19 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   (`sqliteTimeLayout`/`formatTime` in `internal/storage`), so SQLite's own
   date functions and a plain `ORDER BY` both work on it.
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
-  ISBN, description) from the OPF package inside the zip, and extracts the
-  declared cover image (EPUB3 `properties="cover-image"`, falling back to
-  EPUB2's `<meta name="cover">`) as raw bytes.
+  ISBN, description, publisher, publication date) from the OPF package
+  inside the zip, and extracts the declared cover image (EPUB3
+  `properties="cover-image"`, falling back to EPUB2's `<meta name="cover">`)
+  as raw bytes. Publication date prefers a `dc:date` tagged
+  `opf:event="publication"` among repeated elements, falling back to the
+  first event-less one (EPUB3's form); `creation`/`modification` dates are
+  never used. ISBN is recognised via `opf:scheme="ISBN"`, a `urn:isbn:`
+  identifier, or a bare ISBN-shaped one, in that order, and returned
+  normalised (hyphens/spaces stripped, prefix stripped, trailing check
+  digit upper-cased) rather than as found — it's the lookup key a future
+  provider chain needs. Cover hrefs are percent-decoded (and any fragment
+  stripped) before the zip lookup, since a manifest href is a URI
+  reference.
 - `internal/cover` — turns a raw cover image into the stored thumbnail:
   resized to ~400px on the long edge (never upscaling), JPEG, written to a
   derived directory keyed by content hash. `Store` creates that directory
