@@ -28,14 +28,14 @@ note says which. **Not built** — designed here, no code yet.
 | Area | Status |
 |---|---|
 | SQLite storage, WAL, single writer, migrations | Built |
-| FTS5 index | Not built — the reason SQLite was chosen over Bolt, still unexercised |
+| FTS5 index | Not built — planned, see `docs/plans/2026090106-full-text-search.md` |
 | Library directory, covers directory | Built |
 | Scanner: startup sweep, periodic rescan, cheap check, hash identity | Built |
 | Scanner: filesystem watcher | Not built — the periodic rescan is the only live-update mechanism |
-| Scanner: missing-file handling | Not built |
+| Scanner: missing-file handling | Built — mark, grace period, then prune |
 | Duplicate detection (byte-identical) | Partial — the data model holds multiple locations; the UI doesn't flag them |
-| Embedded metadata | Partial — EPUB only, and no publisher or publication date |
-| Covers | Partial — extraction and storage work; a deleted cover is never regenerated |
+| Embedded metadata | Built — EPUB and FB2 (including `.fb2.zip`), all schema columns populated |
+| Covers | Built — extracted, stored atomically, regenerated when missing |
 | Metadata providers, chain, provenance | Not built |
 | Books / authors / book_files schema | Built |
 | Recipients, send log, field sources schema | Not built |
@@ -43,13 +43,15 @@ note says which. **Not built** — designed here, no code yet.
 | Send to Kindle: job model, recipient picker | Not built |
 | Web UI: server-side templates, embedded CSS, service layer | Built |
 | Web UI: library grid | Built |
-| Web UI: htmx, search, book detail, inline editing, send control | Not built |
+| Web UI: htmx, search, book detail, inline editing, send control | Not built — search planned (`docs/plans/2026090106`) |
 | Format conversion, near-duplicate detection, programmatic API | Not built — deferred by design |
 | Authentication | Not built, by design |
 
 Known defects in what *is* built are tracked as step plans under
 `docs/plans/`, and lower-priority ones under `docs/backlog/`. Where a
 section below says a piece is built but flawed, the plan is named.
+Completed plans move to `docs/plans/completed/` and are referenced by
+that path where a status note cites one as history.
 
 ## Storage engine
 
@@ -70,17 +72,22 @@ irrelevant here: writes come in scan bursts, reads dominate.
 **Status: Built, except FTS5.** `internal/storage` opens the database in WAL
 mode with foreign keys on, and serialises writes through a write pool
 pinned to a single connection rather than a hand-rolled goroutine and
-channel — same guarantee, less machinery. Schema changes are embedded SQL
-migration files applied in filename order, each in its own transaction.
+channel — same guarantee, less machinery. The read pool is bounded (8
+connections) so read concurrency reuses pooled connections instead of
+churning fresh ones. Schema changes are embedded SQL migration files
+applied in filename order, each in its own transaction.
 
-The FTS5 index does not exist. Since full-text search is the stated reason
-for choosing SQLite over Bolt, the storage engine is currently carrying its
-justification on credit.
+The FTS5 index does not exist yet, but is now planned
+(`docs/plans/2026090106-full-text-search.md`) — FTS5 support in the
+pure-Go driver has been verified, so the reason SQLite was chosen over
+Bolt is about to stop running on credit.
 
-`CGO_ENABLED=0` holds and the image is a single static binary, but the
-"scratch-based" part is being revisited: a scratch image ships no CA
-certificates, which breaks the outbound HTTPS call to Resend. The fix keeps
-the static-binary property — see the Send to Kindle status below.
+`CGO_ENABLED=0` holds and the image is a single static binary. The image
+base is `distroless/static-debian12:nonroot` rather than literal
+`scratch`: it adds exactly what scratch lacks for this app — CA
+certificates (the outbound HTTPS call to Resend needs a root store),
+tzdata, a writable `/tmp`, and a non-root uid — while still shipping no
+shell and no package manager, so the static-binary property survives.
 
 ## Filesystem layout
 
@@ -102,14 +109,12 @@ the source file, so this directory is fully disposable.
 The library is a flat, unorganised pile of files. No folder conventions, no
 directory-as-metadata heuristics. Current contents are EPUB (some FB2).
 
-**Status: Built, with one claim not yet true.** The library and covers
-directories work as described, and covers are keyed by content hash with
-only the path in the database.
-
-But the covers directory is **not** in fact disposable. Cover extraction
-runs only when a book is first indexed, so deleting the directory loses
-every cover permanently rather than regenerating them on the next sweep.
-See `docs/plans/2026083111-cover-regeneration.md`.
+**Status: Built.** The library and covers directories work as described,
+covers are keyed by content hash with only the path in the database, and
+the disposability claim is now true: a sweep re-extracts any recorded
+cover whose file is missing or truncated, so deleting the covers
+directory costs one rescan, not the covers
+(`docs/plans/completed/2026083111-cover-regeneration.md`).
 
 The "writes only ever create new paths" rule is not yet exercised: nothing
 writes into the library directory, because conversion doesn't exist.
@@ -133,26 +138,29 @@ re-parse metadata. This keeps rescans of a large library fast.
 means reorganising folders does not look like a mass delete plus mass add, and
 enriched metadata survives a move.
 
-**Status: Partial.** The startup sweep, the periodic rescan, the cheap
-path+size+mtime check and content-hash identity are all built and working.
+**Status: Built, except the watcher.** The full sweep, the periodic
+rescan, the cheap path+size+mtime check and content-hash identity all
+work as described. One refinement over the description above: the startup
+sweep no longer blocks serving — the server comes up immediately and the
+first sweep runs in the background, so a large library delays its own
+completeness rather than the health check.
 
-Not built:
+Missing-file handling is built, and errs deliberately toward keeping
+rows: a file that disappears is first *marked* missing, then deleted only
+after it has stayed missing past a grace period (`MISSING_GRACE`, default
+24h), with its book pruned if that was its last location. The
+deleted-file-versus-unmounted-volume problem is handled by layered
+guards — only a fresh per-sweep `ENOENT` counts as "gone", a sweep that
+sees zero files reconciles nothing, and an unreadable subtree exempts its
+rows — see `docs/plans/completed/2026083110-missing-file-reconciliation.md`.
+Paths are stored relative to the library root, so the index survives the
+library mounting at a different absolute path; an unreadable directory
+costs its subtree, not the sweep.
 
-- **The filesystem watcher.** The periodic rescan — described here as the
-  safety net — is currently the only live-update mechanism. This is the
-  right order to build them in, but it means a new file takes up to
-  `SCAN_INTERVAL` to appear.
-- **Missing-file handling.** A file that disappears leaves its row behind
-  forever, so the library shows books that no longer exist. The hard part
-  is distinguishing a deleted file from an unmounted volume; see
-  `docs/plans/2026083110-missing-file-reconciliation.md`.
-
-The scanner is also additive in a way that bites: replacing the content at
-a known path reassigns that path to the new book and leaves the previous
-book with no file locations at all
-(`docs/plans/2026083108-scanner-orphan-books.md`), and a single unreadable
-directory aborts the entire sweep rather than skipping that subtree
-(`docs/plans/2026083109-scanner-sweep-resilience.md`).
+Not built: **the filesystem watcher.** The periodic rescan — described
+here as the safety net — is the only live-update mechanism, so a new file
+takes up to `SCAN_INTERVAL` (default 15m) to appear. This remains the
+right order to have built them in.
 
 ## Duplicate detection
 
@@ -169,10 +177,10 @@ are annoying to undo.
 one `book_files` row per location. The UI does not flag it; the library grid
 has no multi-location indicator yet.
 
-The flag is deliberately blocked on the scanner fixes above: until missing
-files are reconciled and paths are stored relative to the library root, the
-location count includes stale rows, and the badge would fire on books that
-simply moved.
+The flag was deliberately blocked on scanner correctness: stale rows and
+absolute paths would have made the location count lie. Both blockers are
+now fixed — missing files are reconciled and paths are stored relative —
+so the badge is buildable whenever a UI step picks it up.
 
 ## Metadata
 
@@ -186,16 +194,17 @@ Enrichment is **optional and never blocks a book from appearing in the library.*
 The scanner and index are the source of truth; enrichment is a background job
 queue running against existing records.
 
-**Status: Embedded is partial; providers are not built.**
+**Status: Embedded is built; providers are not.**
 
-`internal/epub` reads title, authors, language, ISBN and description from
-the OPF package, and extracts the declared cover. Three gaps: `dc:publisher`
-and `dc:date` are never read, so those two columns are always empty despite
-being in the schema and on the book detail design; ISBN is only recognised
-in its EPUB 2 `opf:scheme` form, missing the `urn:isbn:` form most EPUB 3
-files use; and FB2 files get nothing but a filename-derived title. See
-`docs/plans/2026083114-epub-metadata-completeness.md` and
-`docs/backlog/2026083119-fb2-metadata.md`.
+`internal/epub` reads title, authors, language, ISBN, description,
+publisher and publication date from the OPF package, and extracts the
+declared cover. ISBN is recognised in its EPUB 2 `opf:scheme` form, the
+`urn:isbn:` form EPUB 3 favours, and bare ISBN-shaped identifiers, and is
+normalised on the way in — it's the lookup key a future provider chain
+needs. `internal/fb2` mirrors the same field set for FB2 documents,
+including covers, `.fb2.zip` archives, and declared-but-wrong XML
+encodings. Author order as the source file lists it is preserved through
+to display.
 
 Everything below in this section — the provider chain, the provider
 interface, compile-time registration, the resolver, and field provenance —
@@ -279,14 +288,22 @@ a recipient never orphans or rewrites history.
 
 **Status: books and authors are built; the rest is not.**
 
-`books`, `authors` and the `book_authors` join table exist as described.
+`books`, `authors` and the `book_authors` join table exist as described,
+with two columns the table above doesn't show: `books.cover_retry` (a
+transient initial cover-store failure, retried by later sweeps, kept
+distinct from "this book has no cover") and a `position` on
+`book_authors`, so a book's authors keep the order its source file
+credited them in. Every column in the Book table is populated by the
+scanner for both supported formats.
 
 **`file_path` and `file_size` are no longer columns on Book.** They moved to
 a separate `book_files` table, one row per physical location, keyed by
 `book_id` — which is what makes the v1 duplicate rule above ("one entry with
 multiple file locations") representable at all. A single mutable
 `file_path` column could only ever hold one of them. The table carries
-`file_path`, `file_size`, `modified_at` and `added_at` per location.
+`file_path` (relative to the library root), `file_size`, `modified_at`,
+`added_at` and `missing_since` — the mark half of the scanner's two-phase
+missing-file handling — per location.
 
 `derived_from` exists as a column but is unused, since conversion doesn't
 exist yet.
@@ -310,14 +327,14 @@ Storing thumbnails rather than originals keeps each around 30–60KB instead of
 500KB–2MB. Full-resolution covers, if ever wanted, are extracted from the source
 file on demand — nothing is lost by not storing them.
 
-**Status: Built, but not regenerable.** `internal/cover` resizes to ~400px
-on the long edge (never upscaling), encodes JPEG, and writes to the derived
-directory keyed by content hash, exactly as described.
-
-The "regenerable from the source file" property this design leans on is the
-part that is missing — see the Filesystem layout status above. Cover writes
-are also non-atomic, so an interrupted write leaves a truncated file that,
-for the same reason, is never repaired.
+**Status: Built.** `internal/cover` resizes to ~400px on the long edge
+(never upscaling), encodes JPEG, and writes to the derived directory
+keyed by content hash, exactly as described — and, since the design
+leans on it, the "regenerable from the source file" property now holds:
+writes go through a same-directory temp file and atomic rename, so no
+reader ever sees a truncated cover, and a sweep re-extracts any recorded
+cover whose file has gone missing or zero-byte. FB2 covers are extracted
+too.
 
 ## Conversion
 
@@ -381,10 +398,9 @@ they are independent of each other: the `recipients`/`send_log` schema, the
 queued-job model with its `queued → sending → delivered | failed` states,
 and the recipient-picker UI.
 
-One packaging detail will break the first real send regardless of the
-above: the container is built `FROM scratch` and therefore has no CA
-certificate bundle, so the HTTPS call to Resend cannot verify its
-certificate. See `docs/plans/2026083113-runtime-hardening.md`.
+The packaging blocker is gone: the image moved from `scratch` to
+`distroless/static`, which carries the CA bundle the HTTPS call to Resend
+needs (`docs/plans/completed/2026083113-runtime-hardening.md`).
 
 ## Web UI
 
@@ -404,18 +420,24 @@ are not.**
 Built: `internal/web` serves the library grid at `GET /`, with templates,
 CSS and a theme script embedded via `go:embed` and no build step, translated
 from the mockups in `UI.md`. Cover thumbnails are served from the covers
-directory.
+directory; both the covers and static mounts refuse to generate directory
+listings and carry cache validators. Templates render into a buffer
+before anything is written, so a template error is a clean 500 rather
+than a truncated page.
+
+The catch-all caveat this section used to carry is fixed: the library
+page matches only `/` exactly and the mux owns its 404s, so a
+`/books/{id}` route can exist without a stale link silently rendering
+the whole library
+(`docs/plans/completed/2026083112-web-transport-correctness.md`).
 
 Not built: **htmx itself is not vendored** — none of the three interactions
-above exists, and each is blocked on something else anyway (search on FTS5,
-the send control on the job model, inline editing on field provenance).
-Book detail, search, and the multi-location badge are likewise unbuilt.
-
-One caveat on what is built: the library page is currently registered as a
-catch-all, so *every* unknown URL renders it with a 200 instead of a 404.
-That needs fixing before a `/books/{id}` route exists, or a stale book link
-will silently show the whole library
-(`docs/plans/2026083112-web-transport-correctness.md`).
+above exists. Search is the first with no unbuilt prerequisite and is
+planned, htmx vendoring included
+(`docs/plans/2026090106-full-text-search.md`); the send control remains
+blocked on the job model and inline editing on field provenance. Book
+detail and the multi-location badge are likewise unbuilt, though nothing
+blocks either any more.
 
 ### Layering for a future API
 
@@ -439,11 +461,14 @@ None. Internal network only. Bind it and trust the network.
 **Status: as designed** — there is no auth, and nothing to build.
 
 Worth stating explicitly, since it is the assumption several other
-decisions rest on: the covers and static routes serve browsable directory
-listings, and there is no rate limiting or request logging. All of that is
-acceptable *only* under this assumption. If this server is ever exposed
-beyond a trusted network, this section is the first thing that has to
-change, and several others follow it.
+decisions rest on: there is no rate limiting and no request logging, and
+that is acceptable *only* under this assumption. (Directory listings on
+the covers and static routes, which earlier revisions of this note also
+leaned on the trusted network to excuse, are now suppressed outright —
+not because of a threat model change, but because a listing of every
+content hash in the library was surface nobody asked for.) If this
+server is ever exposed beyond a trusted network, this section is the
+first thing that has to change, and several others follow it.
 
 ## Deferred list
 
