@@ -53,6 +53,24 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   provider chain needs. Cover hrefs are percent-decoded (and any fragment
   stripped) before the zip lookup, since a manifest href is a URI
   reference.
+- `internal/fb2` — reads embedded metadata from an FB2 document, mirroring
+  `internal/epub`'s `Metadata` field set and surface exactly so the scanner
+  can fill it from either source with the same code shape. `PublishedDate`
+  prefers `publish-info/year` (when this *edition* was published, what
+  `books.published_date` means) over `title-info/date` (when the work was
+  *written*, per the FB2 spec), falling back to `date`'s `value` attribute
+  then its text. Authors are given as structured `first-name`/`middle-
+  name`/`last-name` elements, joined with a single space into the one
+  display name the `authors` table stores — the one place FB2 offers more
+  structure than the schema keeps. The cover is whichever `<binary>` the
+  coverpage's namespaced `l:href="#id"` points at, base64-decoded. A
+  document's declared XML encoding is never trusted: `ReadMetadata` sets an
+  `xml.Decoder.CharsetReader` that passes every charset through unchanged,
+  since the library's FB2 files are UTF-8 regardless of what they declare
+  and a bare decoder fails outright (not gracefully) on any declared
+  encoding it doesn't otherwise recognise. A `.fb2.zip` archive is parsed
+  the same way after opening it and locating its one `.fb2` entry; zero or
+  more than one is an error rather than a guess at which book it contains.
 - `internal/cover` — turns a raw cover image into the stored thumbnail:
   resized to ~400px on the long edge (never upscaling), JPEG, written to a
   derived directory keyed by content hash. `Store` creates that directory
@@ -72,15 +90,19 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   file and a genuine duplicate location alike, since the two are
   indistinguishable from a single path's perspective. New EPUB files get
   embedded metadata and a stored cover via `internal/epub`/`internal/cover`;
-  for known content, a sweep re-extracts a recorded cover whose file is
-  missing or zero bytes and refreshes its stored path, making `COVERS_DIR`
-  disposable. An empty stored cover path records that no embedded cover
-  was found and is not retried on every sweep; a separate `cover_retry`
-  marker records a transient initial store failure and retries it later.
-  Cover inspection regenerates only on a missing or zero-byte file; other
-  stat failures warn without re-parsing the source. FB2 files are indexed
-  (format, filename as title) but don't get embedded metadata or covers
-  parsed yet. A new book is created together with its
+  FB2 files (plain `.fb2` and `.fb2.zip` archives alike) get the same
+  treatment via `internal/fb2`, both recording `format` as `fb2` regardless
+  of which — how a book is packaged on disk isn't something the format
+  badge in the UI should surface. Supported files are matched on filename
+  *suffix* rather than `filepath.Ext`, since a `.fb2.zip` archive is two
+  extensions and `Ext` would only ever see the last one. For known content,
+  a sweep re-extracts a recorded cover whose file is missing or zero bytes
+  and refreshes its stored path, making `COVERS_DIR` disposable. An empty
+  stored cover path records that no embedded cover was found and is not
+  retried on every sweep; a separate `cover_retry` marker records a
+  transient initial store failure and retries it later. Cover inspection
+  regenerates only on a missing or zero-byte file; other stat failures warn
+  without re-parsing the source. A new book is created together with its
   first file location in one transaction (`storage.CreateBookWithFile`).
   Content replacing a known path's previous content reassigns that
   `book_files` row and, in the same transaction, deletes whatever book it
@@ -182,10 +204,10 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   default logger.
 
 Still missing from DESIGN.md: the book detail page, search, inline metadata
-editing and send-to-Kindle (designed, not built), FB2 cover/metadata
-extraction, metadata provider enrichment (Open Library / Google Books), the
-filesystem watcher (the periodic rescan is the only live-update mechanism so
-far), near-duplicate detection, and format conversion.
+editing and send-to-Kindle (designed, not built), metadata provider
+enrichment (Open Library / Google Books), the filesystem watcher (the
+periodic rescan is the only live-update mechanism so far), near-duplicate
+detection, and format conversion.
 
 ## Planning
 

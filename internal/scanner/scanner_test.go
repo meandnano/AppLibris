@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"image"
@@ -122,6 +123,75 @@ func writeTestEPUBWithOPF(t *testing.T, path, opfXML string) {
 		}
 	}
 
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+}
+
+const testFB2Template = `<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+  <description>
+    <title-info>
+      <book-title>%s</book-title>
+      <author>
+        <first-name>%s</first-name>
+      </author>%s
+    </title-info>
+  </description>
+  <body></body>%s
+</FictionBook>`
+
+const testFB2CoverpageTemplate = `
+      <coverpage>
+        <image l:href="#cover.jpg"/>
+      </coverpage>`
+
+// writeTestFB2 writes a minimal FB2 document to path. When coverImage is
+// non-nil, it's declared via title-info/coverpage and embedded as a
+// base64-encoded <binary id="cover.jpg">.
+func writeTestFB2(t *testing.T, path, title, author string, coverImage []byte) {
+	t.Helper()
+
+	var coverpage, binary string
+	if coverImage != nil {
+		coverpage = testFB2CoverpageTemplate
+		binary = fmt.Sprintf("\n  <binary id=\"cover.jpg\" content-type=\"image/jpeg\">%s</binary>",
+			base64.StdEncoding.EncodeToString(coverImage))
+	}
+
+	body := fmt.Sprintf(testFB2Template, title, author, coverpage, binary)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// writeTestFB2Zip writes a .fb2.zip archive containing exactly one entry,
+// "book.fb2", built the same way writeTestFB2 builds a plain file.
+func writeTestFB2Zip(t *testing.T, path, title, author string, coverImage []byte) {
+	t.Helper()
+
+	var coverpage, binary string
+	if coverImage != nil {
+		coverpage = testFB2CoverpageTemplate
+		binary = fmt.Sprintf("\n  <binary id=\"cover.jpg\" content-type=\"image/jpeg\">%s</binary>",
+			base64.StdEncoding.EncodeToString(coverImage))
+	}
+	body := fmt.Sprintf(testFB2Template, title, author, coverpage, binary)
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer f.Close()
+
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("book.fb2")
+	if err != nil {
+		t.Fatalf("create book.fb2 in zip: %v", err)
+	}
+	if _, err := w.Write([]byte(body)); err != nil {
+		t.Fatalf("write book.fb2 in zip: %v", err)
+	}
 	if err := zw.Close(); err != nil {
 		t.Fatalf("close zip writer: %v", err)
 	}
@@ -970,6 +1040,27 @@ func TestScanSameLibraryThroughDifferentRootsYieldsOneLocation(t *testing.T) {
 	}
 }
 
+func TestFilenameTitleStripsWholeMatchedSuffix(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"epub", "/library/book.epub", "book"},
+		{"plain fb2", "/library/book.fb2", "book"},
+		{"fb2.zip strips the whole suffix, not just .zip", "/library/book.fb2.zip", "book"},
+		{"mixed case suffix", "/library/Book.FB2.ZIP", "Book"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			suffix := matchedSuffix(tt.path)
+			if got := filenameTitle(tt.path, suffix); got != tt.want {
+				t.Errorf("filenameTitle(%q, %q) = %q, want %q", tt.path, suffix, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSortTitle(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1588,5 +1679,110 @@ func TestScanStopsOnCancellationMidSweep(t *testing.T) {
 	}
 	if result.Scanned >= total {
 		t.Errorf("Scanned = %d, want fewer than %d — cancellation should have stopped the walk early", result.Scanned, total)
+	}
+}
+
+// The end-to-end regression for the whole step: on master an FB2 book is a
+// card with the filename as its title, no author, and no cover — this
+// proves real embedded metadata reaches the book row instead.
+func TestScanExtractsFB2Metadata(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestFB2(t, filepath.Join(libDir, "kniga.fb2"), "Real Title", "Real Author", testCoverImage(t))
+
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.New != 1 || result.Errors != 0 {
+		t.Fatalf("scan = %+v, want New=1 Errors=0", result)
+	}
+
+	book := bookByPath(t, ctx, db, "kniga.fb2")
+	if book.Title != "Real Title" {
+		t.Errorf("Title = %q, want %q (not the filename)", book.Title, "Real Title")
+	}
+	if book.Format != "fb2" {
+		t.Errorf("Format = %q, want %q", book.Format, "fb2")
+	}
+	if book.CoverPath == "" {
+		t.Error("CoverPath is empty, want a stored cover path")
+	}
+
+	authors, err := db.ListBookAuthors(ctx)
+	if err != nil {
+		t.Fatalf("ListBookAuthors: %v", err)
+	}
+	if got := authors[book.ID]; len(got) != 1 || got[0] != "Real Author" {
+		t.Errorf("authors = %v, want [Real Author]", got)
+	}
+}
+
+// On master a .fb2.zip file is invisible to the scanner entirely — the walk
+// filter's filepath.Ext only ever sees ".zip", which isn't a supported
+// extension, so the file is never even reported as skipped. This asserts
+// the book count, not just its fields, since "not indexed at all" wouldn't
+// otherwise show up as a field-level assertion failure.
+func TestScanIndexesFB2Zip(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestFB2Zip(t, filepath.Join(libDir, "kniga.fb2.zip"), "Zipped Title", "Zipped Author", nil)
+
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.New != 1 || result.Errors != 0 {
+		t.Fatalf("scan = %+v, want New=1 Errors=0", result)
+	}
+
+	var bookCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books`).Scan(&bookCount); err != nil {
+		t.Fatalf("count books: %v", err)
+	}
+	if bookCount != 1 {
+		t.Fatalf("books count = %d, want 1 (a .fb2.zip file must be indexed)", bookCount)
+	}
+
+	book := bookByPath(t, ctx, db, "kniga.fb2.zip")
+	if book.Title != "Zipped Title" {
+		t.Errorf("Title = %q, want %q", book.Title, "Zipped Title")
+	}
+	if book.Format != "fb2" {
+		t.Errorf("Format = %q, want %q (how the book is packaged on disk isn't the format badge)", book.Format, "fb2")
+	}
+}
+
+// An unparseable FB2 file degrades to the filename title, the same way a
+// bad EPUB does — it must not count as a scan error, and it must not stop
+// the book from appearing in the library at all.
+func TestScanFallsBackToFilenameTitleOnUnparseableFB2(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	path := filepath.Join(libDir, "broken.fb2")
+	if err := os.WriteFile(path, []byte("this is not xml at all"), 0o644); err != nil {
+		t.Fatalf("write broken fb2: %v", err)
+	}
+
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.New != 1 || result.Errors != 0 {
+		t.Fatalf("scan = %+v, want New=1 Errors=0 (an unparseable file degrades, it doesn't fail the sweep)", result)
+	}
+
+	book := bookByPath(t, ctx, db, "broken.fb2")
+	if book.Title != "broken" {
+		t.Errorf("Title = %q, want %q (the filename fallback)", book.Title, "broken")
 	}
 }
