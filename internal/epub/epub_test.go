@@ -249,6 +249,52 @@ func TestReadMetadataISBNFromURN(t *testing.T) {
 	}
 }
 
+// A numeric identifier explicitly tagged with a non-ISBN scheme (an LCCN,
+// say) must not be reclassified as a bare ISBN just because it happens to
+// be 10 or 13 digits — the declared scheme is evidence it isn't one.
+func TestReadMetadataIgnoresShapeMatchingNonISBNScheme(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>LCCN Only</dc:title>
+    <dc:identifier opf:scheme="LCCN">2001000002</dc:identifier>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.ISBN != "" {
+		t.Errorf("ISBN = %q, want empty (an LCCN-scheme'd identifier must not be read as a bare ISBN)", got.ISBN)
+	}
+}
+
+// A non-ISBN-scheme'd identifier that happens to be ISBN-shaped must not
+// shadow a genuine scheme-less ISBN listed elsewhere in the same file.
+func TestReadMetadataNonISBNSchemeDoesNotHideALaterBareISBN(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>LCCN And Bare ISBN</dc:title>
+    <dc:identifier opf:scheme="LCCN">2001000002</dc:identifier>
+    <dc:identifier>9780306406157</dc:identifier>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.ISBN != "9780306406157" {
+		t.Errorf("ISBN = %q, want %q (the scheme-less ISBN, not the LCCN)", got.ISBN, "9780306406157")
+	}
+}
+
 func TestReadMetadataISBNFromBareHyphenated(t *testing.T) {
 	opfXML := `<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">

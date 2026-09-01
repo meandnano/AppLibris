@@ -231,6 +231,15 @@ func findISBN(pkg opfPackage) string {
 		}
 	}
 	for _, id := range pkg.Metadata.Identifier {
+		// An identifier carrying any declared scheme has already had its
+		// say: scheme="ISBN" was handled above, and any other scheme
+		// (LCCN, DOI, …) is explicit evidence this isn't an unmarked
+		// ISBN — a shape match alone (e.g. a 10-digit LCCN) must not
+		// override that. Only a genuinely scheme-less identifier reaches
+		// the shape heuristic below.
+		if strings.TrimSpace(id.Scheme) != "" {
+			continue
+		}
 		if isBareISBN(id.Value) {
 			return normalizeISBN(id.Value)
 		}
