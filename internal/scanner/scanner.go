@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"library/internal/cover"
 	"library/internal/epub"
 	"library/internal/storage"
 )
@@ -35,9 +36,10 @@ var supportedExtensions = map[string]bool{
 // Scan walks libraryDir and, for every supported book file, brings the
 // index up to date: unchanged files are skipped via the path+size+mtime
 // cheap check, moved/renamed files update their existing row's location,
-// and genuinely new content becomes a new book. A per-file error is logged
-// and counted rather than aborting the sweep.
-func Scan(ctx context.Context, db *storage.DB, libraryDir string) (Result, error) {
+// and genuinely new content becomes a new book, with its cover (if any)
+// extracted and stored under coversDir. A per-file error is logged and
+// counted rather than aborting the sweep.
+func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Result, error) {
 	var result Result
 
 	err := filepath.WalkDir(libraryDir, func(path string, d fs.DirEntry, err error) error {
@@ -49,7 +51,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir string) (Result, error
 		}
 
 		result.Scanned++
-		if err := scanFile(ctx, db, path, &result); err != nil {
+		if err := scanFile(ctx, db, path, coversDir, &result); err != nil {
 			log.Printf("scanner: %s: %v", path, err)
 			result.Errors++
 		}
@@ -61,7 +63,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir string) (Result, error
 	return result, nil
 }
 
-func scanFile(ctx context.Context, db *storage.DB, path string, result *Result) error {
+func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, result *Result) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("stat: %w", err)
@@ -106,6 +108,16 @@ func scanFile(ctx context.Context, db *storage.DB, path string, result *Result) 
 	ext := strings.ToLower(filepath.Ext(path))
 	meta := extractMetadata(path, ext)
 
+	var coverPath string
+	if len(meta.Cover) > 0 {
+		p, err := cover.Store(coversDir, hash, meta.Cover)
+		if err != nil {
+			log.Printf("scanner: %s: storing cover: %v", path, err)
+		} else {
+			coverPath = p
+		}
+	}
+
 	book := storage.Book{
 		ContentHash: hash,
 		Title:       meta.Title,
@@ -113,6 +125,7 @@ func scanFile(ctx context.Context, db *storage.DB, path string, result *Result) 
 		Language:    meta.Language,
 		ISBN:        meta.ISBN,
 		Description: meta.Description,
+		CoverPath:   coverPath,
 		FilePath:    path,
 		Format:      strings.TrimPrefix(ext, "."),
 		FileSize:    size,
@@ -131,6 +144,7 @@ type bookMeta struct {
 	Language    string
 	ISBN        string
 	Description string
+	Cover       []byte
 }
 
 // extractMetadata pulls embedded metadata for supported formats (currently
@@ -160,6 +174,7 @@ func extractMetadata(path, ext string) bookMeta {
 		Language:    m.Language,
 		ISBN:        m.ISBN,
 		Description: m.Description,
+		Cover:       m.Cover,
 	}
 }
 
