@@ -143,16 +143,24 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
   runs in the background alongside the `SCAN_INTERVAL`-timed (default
   `15m`) periodic rescan, with missing-file grace period `MISSING_GRACE`
-  (default `24h`). Both scan loops take the signal-aware context, so a
-  sweep in progress gets a bounded window (part of the same 10s shutdown
-  budget) to unwind on cancellation rather than being cut off by process
-  exit mid-write. On SIGINT/SIGTERM, `run` shuts the HTTP server down
-  first, then waits out that window, and only then closes the database —
-  order matters, so no request or in-flight scan write is torn down by the
-  database closing under it. The image is built on
-  `distroless/static-debian12:nonroot` (CA certificates, tzdata, `/tmp`,
-  and a non-root uid, none of which `scratch` provides), so mounted
-  volumes must be writable by that uid.
+  (default `24h`). The scan loops run on their own `scanCtx`, a child of
+  the signal-aware context but independently cancellable — a shared
+  `waitForScan` helper cancels it and waits out a bounded 10s window
+  before the database closes, on *both* the SIGINT/SIGTERM path (`run`
+  shuts the HTTP server down first, then waits, then closes the database
+  — order matters, so no request or in-flight scan write is torn down by
+  the database closing under it) and a serving failure (e.g. `ADDR`
+  already in use), which used to close the database immediately and race
+  the still-running scan. `internal/scanner.Scan` itself checks
+  `ctx.Err()` before the walk starts and on every entry it visits, so
+  cancellation stops the walk outright (and skips reconciliation) rather
+  than just failing each remaining file's own DB calls one at a time. The
+  image is built on `distroless/static-debian12:nonroot` (CA
+  certificates, tzdata, `/tmp`, and a non-root uid, none of which
+  `scratch` provides) with an explicit `WORKDIR /` — the base image's own
+  default, `/home/nonroot`, would otherwise silently resolve `LIBRARY_DIR`
+  et al.'s relative defaults to the wrong place — so mounted volumes must
+  be writable by that uid.
 - Logging goes through `log/slog` (a text handler on stderr), leveled via
   the `LOG_LEVEL` env var (default `INFO`) set once in `cmd/server` and
   used everywhere else via `slog`'s package-level functions against that

@@ -53,7 +53,12 @@ var supportedExtensions = map[string]bool{
 // logged and counted rather than aborting the sweep — and so is a
 // directory WalkDir can't read: its subtree is skipped, not the rest of
 // the library. Only a failure on libraryDir itself (missing, unmounted) is
-// fatal, since that must not look like an empty library.
+// fatal, since that must not look like an empty library. ctx cancellation
+// is checked before the walk starts and on every entry the walk visits;
+// either stops Scan immediately and returns ctx.Err() (wrapped), visiting
+// no further entries and skipping reconciliation entirely — a cancelled
+// sweep must never be read as "here is what the library currently looks
+// like."
 //
 // After a clean walk, Scan reconciles book_files rows that weren't seen:
 // under a subtree that was itself walked cleanly, a row not seen this
@@ -66,10 +71,23 @@ var supportedExtensions = map[string]bool{
 // confirmation from ever being read as "this file is gone."
 func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, missingGrace time.Duration) (Result, error) {
 	var result Result
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+
 	seen := make(map[string]bool)
 	var skippedDirs []string
 
 	err := filepath.WalkDir(libraryDir, func(walkPath string, d fs.DirEntry, err error) error {
+		// Checked first, ahead of everything below: a per-file error (this
+		// callback's own err parameter) is worth a Warn and a continued
+		// walk, but cancellation must stop the walk outright — WalkDir
+		// only does that for a non-nil, non-SkipDir/SkipAll return, so
+		// ctx.Err() has to be surfaced as the callback's return value
+		// itself, not folded into the per-file error counting below.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			// a directory we can't read costs us its subtree, not the sweep —
 			// anything else (including an error on the root itself) is fatal;

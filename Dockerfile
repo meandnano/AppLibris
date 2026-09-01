@@ -12,6 +12,11 @@ RUN CGO_ENABLED=0 go build -o /server ./cmd/server
 # package manager. DB_PATH, COVERS_DIR and LIBRARY_DIR must be writable by
 # uid 65532 on whatever volumes are mounted over them.
 FROM gcr.io/distroless/static-debian12:nonroot
+# The nonroot image sets WORKDIR /home/nonroot; cmd/server's defaults
+# (./library, ./data/library.db, ./data/covers) are relative paths that
+# must resolve from / to match CLAUDE.md's documented dev-vs-container
+# convention (dev's ./library, a container's /library) — override it back.
+WORKDIR /
 COPY --from=build /server /server
 EXPOSE 8080
 ENTRYPOINT ["/server"]

@@ -100,20 +100,35 @@ func run(ctx context.Context) error {
 		serveErr <- nil
 	}()
 
-	// The health endpoint must answer the moment the process is up, so the
-	// first sweep runs in the background alongside the periodic one rather
-	// than blocking startup — a large library's first scan is minutes of
-	// hashing, during which an orchestrator's readiness probe would
-	// otherwise conclude the container is dead and restart it.
+	// The scan goroutine gets its own cancellable context, derived from ctx
+	// but stoppable independently of it: a serving failure (the address is
+	// already in use, say) needs to cancel and wait for the scan just as
+	// reliably as a signal does, rather than closing the database out from
+	// under whatever the scan is doing. The health endpoint must answer the
+	// moment the process is up, so the first sweep runs in the background
+	// alongside the periodic one rather than blocking startup — a large
+	// library's first scan is minutes of hashing, during which an
+	// orchestrator's readiness probe would otherwise conclude the container
+	// is dead and restart it.
+	scanCtx, cancelScan := context.WithCancel(ctx)
+	defer cancelScan()
+
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
-		runScan(ctx, db, libraryDir, coversDir, missingGrace)
-		periodicScan(ctx, db, libraryDir, coversDir, scanInterval, missingGrace)
+		runScan(scanCtx, db, libraryDir, coversDir, missingGrace)
+		periodicScan(scanCtx, db, libraryDir, coversDir, scanInterval, missingGrace)
 	}()
 
 	select {
 	case err := <-serveErr:
+		// A serving failure isn't a signal, so ctx (and scanCtx, derived
+		// from it) is still live — cancel scanCtx explicitly and wait out
+		// the same bounded budget the signal path uses below, so the scan
+		// can't still be using db when it's closed a few lines down.
+		deadline, cancelDeadline := context.WithTimeout(context.Background(), 10*time.Second)
+		waitForScan(cancelScan, scanDone, deadline.Done())
+		cancelDeadline()
 		if closeErr := db.Close(); closeErr != nil {
 			slog.Error("close database", "error", closeErr)
 		}
@@ -129,18 +144,29 @@ func run(ctx context.Context) error {
 	<-serveErr
 
 	// Give the scan goroutine the rest of the shutdown budget to notice
-	// ctx.Done() and unwind cleanly (its in-flight DB call returns on
+	// cancellation and unwind cleanly (its in-flight DB call returns on
 	// cancellation, rolling back rather than committing a partial write)
-	// before the database closes out from under it. A sweep stuck outside
-	// any context-aware call — mid-hash on a large file, say — can still
-	// miss this window; the bound exists so that doesn't hang shutdown.
-	select {
-	case <-scanDone:
-	case <-shutdownCtx.Done():
-		slog.Warn("scan did not exit before shutdown deadline")
-	}
+	// before the database closes out from under it. cancelScan is already
+	// implied by ctx.Done() here (scanCtx is derived from ctx), but calling
+	// it explicitly costs nothing and keeps this path symmetric with the
+	// serveErr one above. A sweep stuck outside any context-aware call —
+	// mid-hash on a large file, say — can still miss this window; the
+	// bound exists so that doesn't hang shutdown.
+	waitForScan(cancelScan, scanDone, shutdownCtx.Done())
 
 	return db.Close()
+}
+
+// waitForScan cancels the scan and waits for it to unwind, up to deadline.
+// The caller must not close the database until this returns, or a scan
+// that missed the deadline could still write onto a closed connection.
+func waitForScan(cancelScan context.CancelFunc, scanDone <-chan struct{}, deadline <-chan struct{}) {
+	cancelScan()
+	select {
+	case <-scanDone:
+	case <-deadline:
+		slog.Warn("scan did not exit before shutdown deadline")
+	}
 }
 
 func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration) {
