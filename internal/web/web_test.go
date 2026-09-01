@@ -343,12 +343,11 @@ func TestCoverCacheControlIsImmutable(t *testing.T) {
 }
 
 func TestCoversPathTraversalDoesNotEscapeCoversDir(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
+	// Exercises coversHandler directly rather than through Routes: a
+	// literal ".." reaching http.ServeMux gets redirected to its cleaned
+	// path one layer above this handler, which would make the same
+	// request through Routes pass regardless of whether this handler's
+	// own protection (inherited from http.Dir) still works.
 	outsideDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outsideDir, "secret"), []byte("do not serve me"), 0o644); err != nil {
 		t.Fatalf("write secret: %v", err)
@@ -357,8 +356,11 @@ func TestCoversPathTraversalDoesNotEscapeCoversDir(t *testing.T) {
 	if err := os.Mkdir(coversDir, 0o755); err != nil {
 		t.Fatalf("mkdir covers: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("cover-bytes"), 0o644); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
 
-	handler := Routes(service.New(db), coversDir)
+	handler := coversHandler(coversDir)
 
 	req := httptest.NewRequest(http.MethodGet, "/covers/../secret", nil)
 	rec := httptest.NewRecorder()

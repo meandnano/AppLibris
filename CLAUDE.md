@@ -170,10 +170,10 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   would otherwise emit no validator at all) paired with a short `max-age`
   that avoids a revalidation round trip within a session without risking a
   stale file surviving a deploy. Handlers map `service.BookSummary` onto a
-  small per-page view model so templates stay logic-free. `render` executes into a buffer
-  before writing anything to the response, so a template error is a clean
-  500 rather than a truncated page, and sets `Content-Type` explicitly
-  rather than relying on sniffing. Only the pre-write `ExecuteTemplate`
+  small per-page view model so templates stay logic-free. `render` executes
+  into a buffer before writing anything to the response, so a template
+  error is a clean 500 rather than a truncated page, and sets `Content-Type`
+  explicitly rather than relying on sniffing. Only the pre-write `ExecuteTemplate`
   error is ever returned to the handler: once `Content-Type` is set and the
   buffer starts writing to the response, the response is committed, so a
   write failure past that point (almost always the client disconnecting)
