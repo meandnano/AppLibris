@@ -28,6 +28,18 @@ The detail page wins on three grounds:
 No schema change, no migration. Everything displayed already exists in
 `books`, `authors`/`book_authors` and `book_files`.
 
+**Design is settled, not open.** The Claude Design handoff now lives at
+`ui-handoff/` on the `init` branch (checked out at the
+`/Users/mike/dev/library-init` worktree; note the remote `init` doesn't
+have the handoff commit at the time of writing — push it before relying
+on the remote). Plates 03 (read state) and 04 (sparse metadata) of
+`ui-handoff/mockups/Bookshelf Mockups.dc.html` are this page, drawn in
+both themes; `ui-handoff/SCREENS.md` sections 03/04 carry the build
+notes and `ui-handoff/TOKENS.md` the values. Everything visual in this
+plan follows those, and where an earlier draft of this plan guessed
+differently (dropped empty rows, inline location paths), the mockup
+wins — the specifics are called out below.
+
 ## Scope
 
 In scope: a `GET /books/{id}` page — larger cover, full metadata, file
@@ -50,12 +62,12 @@ Out of scope, with reasons:
   concern; note that this page listing a book's locations delivers most
   of that item's value anyway (the badge is just its grid-level echo).
 
-Pattern choice UI.md leaves open ("expanded card, row, or side panel —
-your call"): a **dedicated page**. A side panel or expanded card needs
-client-side behaviour, and htmx isn't vendored until the search step
-(`2026090106`) lands — a plain server-rendered page matches the current
-no-JS state, gives every book a shareable URL, and nothing prevents a
-later htmx enhancement from loading the same fragment into a panel.
+Pattern: a **dedicated page with a back link**. UI.md left this open
+("expanded card, row, or side panel — your call"), and the mockups have
+since made the call — SCREENS.md 03 opens with "Its own page with a back
+link, not a panel or modal" — which also happens to be the only pattern
+buildable in the current no-JS state (htmx arrives with the search step,
+`2026090106`). Every book gets a shareable URL.
 
 ## Storage
 
@@ -126,10 +138,19 @@ rather than erroring.
   unknown id are both plain 404s (`http.NotFound`), indistinguishable on
   purpose — neither is a client error worth a distinct page.
 - Template: `book.html` alongside `library.html`, reusing the
-  `document-head`, `site-header` and `site-scripts` partials. New CSS
-  extends the embedded `app.css`; consult the detail mockups on the
-  `init` branch (`UI.md` and the Claude Design canvas) for look and
-  spacing, as the grid page did.
+  `document-head`, `site-header` and `site-scripts` partials, translated
+  from plates 03/04 the way the grid page was translated from plate 01
+  (the handoff's `library-ui.patch` is the reference for that
+  translation style). New CSS extends the embedded `app.css` using the
+  existing token variables only — `app.css` already embodies
+  `tokens.css`, and TOKENS.md is explicit that literals break dark mode.
+  Layout per SCREENS.md 03: a two-column grid (`300px` cover rail,
+  `minmax(0, 1fr)` content, gap `44px`), cover at `aspect-ratio: 0.66`
+  with the mono file-facts list (format, size, locations) beneath it;
+  right column ordered title/author → send slot → description →
+  metadata table. The metadata table is hairline rows, mono label /
+  sans value, ISBN in mono; title serif at `max-width: 26ch`,
+  description serif at `max-width: 62ch`.
 - View model (`bookPage`), shaped in the handler so the template stays
   logic-free:
   - Authors joined for display in full — the grid's "and N others"
@@ -140,21 +161,33 @@ rather than erroring.
     stored** — it's free-text from embedded metadata (sometimes a year,
     sometimes a full date), and pretending to parse it would lie
     confidently.
-  - Empty optional fields (publisher, ISBN, description, language) drop
-    their rows entirely rather than rendering "—" filler; UI.md is
-    explicit that sparse metadata is the case to design for. Zero authors
-    renders the same "Author unknown" treatment the card uses; no cover
-    renders the placeholder block at detail size.
-- Metadata rendered as a definition list (or equivalent) with one
-  element per field — this is the structure inline editing will later
-  swap per-field, per UI.md's "distinct piece of markup for each state"
-  instruction, so getting field-granular markup now costs nothing and
-  saves a redesign. Likewise leave one clearly-bounded container where
-  the send control and status area will go — empty today, not mocked.
-- Locations: shown as a list of relative paths (storage stores them
-  relative to the library root, which is exactly the right display
-  form — the absolute mount point is deployment detail). A missing-marked
-  location gets a subdued "missing" annotation.
+  - Empty optional fields (publisher, ISBN, language, description)
+    render as **visible rows with an em dash**, not dropped — plate 04's
+    rule, reversing this plan's earlier draft: "a hidden field can't be
+    filled in", and sparse metadata is the common FB2 case, drawn as a
+    first-class state. One deviation until inline editing exists: the
+    mockup's italic "click to add" invitations promise an interaction
+    this step doesn't build, so render the same italic `--fg-faint`
+    treatment with just "Author unknown" / "No description" — the
+    "click to add" wording arrives with the editing step. No cover
+    renders the dashed "no cover" box at the same footprint as a real
+    cover, per the plate.
+- Field-granular markup: one element per metadata field, since plate 05
+  swaps read view for edit view in place, per field — getting the
+  granularity now means wiring editing later is connecting markup, not
+  redesigning it. The send slot keeps its plate-03 position in source
+  order (above the description — "it is the reason the page gets
+  opened") as a bounded container, but stays empty and collapsed rather
+  than mocking plate 06's `min-height: 148px` states; that height rule
+  applies when the control exists to swap.
+- Locations: per SCREENS.md 03, the rail shows a location **count** with
+  the dotted-underline accent affordance, paths "revealed on demand, not
+  listed inline". No JS exists yet, so the reveal is a native
+  `<details>`/`<summary>` styled to the token set — the summary is the
+  count, the expansion lists relative paths (storage stores them
+  relative to the library root, which is the right display form — the
+  absolute mount point is deployment detail), each missing-marked
+  location carrying a subdued "missing" annotation.
 - Grid cards in `library.html` become links: wrap the card content in
   `<a href="/books/{{.ID}}">`. Card markup only — no handler change on
   the grid side.
@@ -187,11 +220,16 @@ intact. No ordering requirement.
 `internal/web`:
 
 - `GET /books/{id}` for a real book: 200, title/author/format/size
-  present in the body; description absent from the body when the field is
-  empty (asserting the dropped-row rule, not just happy path).
+  present in the body, and a back link to `/`.
+- Sparse book: the empty field's row is still present with its em dash
+  (asserting plate 04's visible-row rule, not just happy path), and no
+  "click to add" text appears — that wording belongs to the editing
+  step.
 - Non-numeric id and unknown numeric id both 404.
 - The grid page's cards carry `href="/books/{id}"`.
-- A book whose location is marked missing shows the annotation.
+- A two-location book renders the count in the summary and both paths in
+  the `<details>` expansion; a missing-marked location shows the
+  annotation.
 
 ## CLAUDE.md
 
@@ -211,6 +249,10 @@ intact. No ordering requirement.
 - Manual, against the real library: click through from the grid to
   several books — one EPUB with full metadata, one FB2, one with sparse
   metadata (no description/ISBN), one with no cover, and one with
-  multiple locations if the library has a duplicate. Confirm the back
-  button returns to the grid, a mistyped `/books/99999` 404s, and long
-  descriptions/titles don't break the layout.
+  multiple locations if the library has a duplicate. Compare each
+  against plates 03/04 in `ui-handoff/mockups/Bookshelf Mockups.dc.html`
+  side by side, **in both themes** (the mockup header toggles dark
+  mode). Confirm the back link returns to the grid, a mistyped
+  `/books/99999` 404s, the `<details>` reveal works without JS, and long
+  descriptions/titles — including non-Latin titles, which plate 04 calls
+  out — don't break the layout.

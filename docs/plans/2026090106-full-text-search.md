@@ -231,7 +231,11 @@ section describes. Load it with `<script defer>` from the existing
   (`htmx-request` class), results (filtered grid + count), no results (a
   distinct block — **not** the "No books yet" empty-library block, which
   means something else; "no matches for `<query>`" with the query echoed,
-  auto-escaped by `html/template`).
+  auto-escaped by `html/template`). All four are drawn as plate 02 of
+  the Claude Design handoff (`ui-handoff/` on the `init` branch, with
+  build notes in `ui-handoff/SCREENS.md` and values in
+  `ui-handoff/TOKENS.md`) — translate from there rather than improvising
+  the treatments, as the grid page did from plate 01.
 
 ### Handler
 
