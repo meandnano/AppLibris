@@ -159,8 +159,18 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   `/books/{id}`; `GET /static/` serves the embedded stylesheet and theme
   script; `GET /covers/` serves the scanner's stored cover thumbnails out of
   `COVERS_DIR` (runtime data, so it's passed into `Routes` rather than
-  embedded). Handlers map `service.BookSummary` onto a small per-page view
-  model so templates stay logic-free. `render` executes into a buffer
+  embedded). Both mounts wrap their filesystem in `noDirFS` so a directory
+  with no `index.html` 404s instead of `http.FileServer` generating a
+  browsable listing. They're cached differently because only one of the two
+  is named by content: covers get `Cache-Control: immutable` for a year,
+  safe only because `cover.Store` names each file by content hash so the
+  bytes at a URL can never change; the embedded assets have no such
+  property, so they get a content-derived `ETag` (computed once at
+  startup, since `embed.FS` reports a zero `ModTime` and `http.FileServer`
+  would otherwise emit no validator at all) paired with a short `max-age`
+  that avoids a revalidation round trip within a session without risking a
+  stale file surviving a deploy. Handlers map `service.BookSummary` onto a
+  small per-page view model so templates stay logic-free. `render` executes into a buffer
   before writing anything to the response, so a template error is a clean
   500 rather than a truncated page, and sets `Content-Type` explicitly
   rather than relying on sniffing. Only the pre-write `ExecuteTemplate`

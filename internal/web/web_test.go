@@ -260,6 +260,118 @@ func TestCoverServedFromCoversDir(t *testing.T) {
 	}
 }
 
+func TestStaticAndCoversDoNotListDirectories(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	coversDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("cover-bytes"), 0o644); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
+
+	handler := Routes(service.New(db), coversDir)
+
+	for _, path := range []string{"/static/", "/static/css/", "/covers/"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want 404 (no directory listing)", path, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "<a href=") {
+			t.Errorf("GET %s body contains a directory listing: %q", path, rec.Body.String())
+		}
+	}
+}
+
+func TestStaticAssetETagEnablesConditionalRequest(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	handler := Routes(service.New(db), t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/static/css/app.css", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("GET /static/css/app.css: no ETag header, want a non-empty one")
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/static/css/app.css", nil)
+	req2.Header.Set("If-None-Match", etag)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusNotModified {
+		t.Errorf("GET /static/css/app.css with If-None-Match status = %d, want 304", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Errorf("GET /static/css/app.css with If-None-Match body = %q, want empty", rec2.Body.String())
+	}
+}
+
+func TestCoverCacheControlIsImmutable(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	coversDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("cover-bytes"), 0o644); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
+
+	handler := Routes(service.New(db), coversDir)
+
+	req := httptest.NewRequest(http.MethodGet, "/covers/hash-1.jpg", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
+		t.Errorf("GET /covers/hash-1.jpg Cache-Control = %q, want it to contain %q", got, "immutable")
+	}
+}
+
+func TestCoversPathTraversalDoesNotEscapeCoversDir(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret"), []byte("do not serve me"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	coversDir := filepath.Join(outsideDir, "covers")
+	if err := os.Mkdir(coversDir, 0o755); err != nil {
+		t.Fatalf("mkdir covers: %v", err)
+	}
+
+	handler := Routes(service.New(db), coversDir)
+
+	req := httptest.NewRequest(http.MethodGet, "/covers/../secret", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("GET /covers/../secret status = 200 body = %q, want the traversal to fail", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "do not serve me") {
+		t.Errorf("GET /covers/../secret leaked the outside file: %q", rec.Body.String())
+	}
+}
+
 func TestCoverURL(t *testing.T) {
 	if got := coverURL("/data/covers/abc123.jpg"); got != "/covers/abc123.jpg" {
 		t.Errorf("coverURL = %q, want /covers/abc123.jpg", got)
