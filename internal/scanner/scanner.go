@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"library/internal/cover"
 	"library/internal/epub"
@@ -25,6 +26,7 @@ type Result struct {
 	New       int
 	Moved     int
 	Unchanged int
+	Orphaned  int
 	Errors    int
 }
 
@@ -39,9 +41,12 @@ var supportedExtensions = map[string]bool{
 // gets one attached (covering a moved/renamed file and an additional
 // location for byte-identical content alike — the two are indistinguishable
 // from a single path's perspective, and both are recorded as extra
-// locations rather than picked apart); genuinely new content becomes a new
-// book, with its cover (if any) extracted and stored under coversDir. A
-// per-file error is logged and counted rather than aborting the sweep.
+// locations rather than picked apart) — if that reassignment leaves the
+// path's previous owner with no locations of its own, that book row is
+// deleted as an orphan; genuinely new content becomes a new book, created
+// together with its first file location in one transaction, with its cover
+// (if any) extracted and stored under coversDir. A per-file error is
+// logged and counted rather than aborting the sweep.
 func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Result, error) {
 	var result Result
 
@@ -103,27 +108,41 @@ func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, resul
 	}
 
 	if book == nil {
-		bookID, err := createBook(ctx, db, path, hash, coversDir)
+		orphanedID, orphanedTitle, err := createBook(ctx, db, path, hash, coversDir, size, mtime)
 		if err != nil {
 			return fmt.Errorf("create book: %w", err)
 		}
-		if _, err := db.UpsertBookFile(ctx, bookID, path, size, mtime); err != nil {
-			return fmt.Errorf("attach file location: %w", err)
-		}
+		logOrphan(path, orphanedID, orphanedTitle, result)
 		result.New++
 		return nil
 	}
 
 	// known content at a path with no (or a stale) book_files row: a move,
 	// a rename, or an additional location for byte-identical content
-	if _, err := db.UpsertBookFile(ctx, book.ID, path, size, mtime); err != nil {
+	_, orphanedID, orphanedTitle, err := db.ReassignFileAndPruneOrphan(ctx, book.ID, path, size, mtime)
+	if err != nil {
 		return fmt.Errorf("attach file location: %w", err)
 	}
+	logOrphan(path, orphanedID, orphanedTitle, result)
 	result.Moved++
 	return nil
 }
 
-func createBook(ctx context.Context, db *storage.DB, path, hash, coversDir string) (int64, error) {
+// logOrphan records a book deleted because a path reassignment left it
+// with zero locations — reachable both when the path's new content
+// matches an existing book (ReassignFileAndPruneOrphan) and when it
+// doesn't (CreateBookWithFile): upsertBookFileTx reassigns a path
+// unconditionally either way, so either path can orphan whoever owned it
+// before. orphanedID is 0 when nothing was orphaned.
+func logOrphan(path string, orphanedID int64, orphanedTitle string, result *Result) {
+	if orphanedID == 0 {
+		return
+	}
+	slog.Info("book orphaned", "path", path, "orphaned_book_id", orphanedID, "orphaned_title", orphanedTitle)
+	result.Orphaned++
+}
+
+func createBook(ctx context.Context, db *storage.DB, path, hash, coversDir string, size int64, mtime time.Time) (orphanedID int64, orphanedTitle string, err error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	meta := extractMetadata(path, ext)
 
@@ -147,7 +166,8 @@ func createBook(ctx context.Context, db *storage.DB, path, hash, coversDir strin
 		CoverPath:   coverPath,
 		Format:      strings.TrimPrefix(ext, "."),
 	}
-	return db.CreateBook(ctx, book, meta.Authors)
+	_, orphanedID, orphanedTitle, err = db.CreateBookWithFile(ctx, book, meta.Authors, path, size, mtime)
+	return orphanedID, orphanedTitle, err
 }
 
 type bookMeta struct {

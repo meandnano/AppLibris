@@ -56,9 +56,15 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   indistinguishable from a single path's perspective. New EPUB files get
   embedded metadata and a stored cover via `internal/epub`/`internal/cover`;
   FB2 files are indexed (format, filename as title) but don't get embedded
-  metadata or covers parsed yet. Missing-file handling (a `book_files` row
-  whose path no longer exists on disk) is not implemented — such a row is
-  simply left stale.
+  metadata or covers parsed yet. A new book is created together with its
+  first file location in one transaction (`storage.CreateBookWithFile`).
+  Content replacing a known path's previous content reassigns that
+  `book_files` row and, in the same transaction, deletes whatever book it
+  left with zero locations (`storage.ReassignFileAndPruneOrphan` /
+  `CreateBookWithFile` — either can orphan a path's previous owner, since
+  both reassign it unconditionally), logging the deletion at Info.
+  Missing-file handling (a `book_files` row whose path no longer exists on
+  disk) is not implemented — such a row is simply left stale.
 - `internal/service` — the layer beneath HTTP handlers DESIGN.md's
   "Layering for a future API" calls for, so a future `/api/v1` can reuse it
   as a second thin transport alongside `internal/web`. One method so far:

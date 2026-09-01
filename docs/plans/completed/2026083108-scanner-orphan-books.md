@@ -48,31 +48,69 @@ now belongs to different content).
 
 Two new exported methods, each one `Write` wrapping existing `…Tx` helpers.
 
-**`CreateBookWithFile(ctx, b Book, authorNames []string, path string, size int64, mtime time.Time) (int64, error)`**
+**`CreateBookWithFile(ctx, b Book, authorNames []string, path string, size int64, mtime time.Time) (id int64, orphanedID int64, orphanedTitle string, err error)`**
 
 `createBookTx` + `upsertBookFileTx` in one transaction. Replaces the
 `CreateBook` + `UpsertBookFile` pair in `scanFile`. `CreateBook` stays
 exported — the tests use it, and it is the right primitive for a future
 conversion step that creates a derived book before writing its file.
 
-**`ReassignFileAndPruneOrphan(ctx, bookID int64, path string, size int64, mtime time.Time) (fileID int64, orphanedID int64, err error)`**
+> **Revised during implementation.** The signature above was originally
+> `(int64, error)` — just the book+file insert, no orphan handling, on the
+> theory that only `ReassignFileAndPruneOrphan`'s branch (known content
+> landing on an already-occupied path) could orphan a book.
+>
+> That's wrong: `upsertBookFileTx`'s `ON CONFLICT(file_path) DO UPDATE`
+> reassigns a path unconditionally, regardless of whether the *new* owner
+> is a brand-new book (`CreateBookWithFile`) or an existing one
+> (`ReassignFileAndPruneOrphan`) — the two are indistinguishable to that
+> SQL statement. An end-to-end scanner test built exactly as the Tests
+> section below describes (write file A, overwrite the same path with
+> different, never-seen content, scan again) caught this directly: the
+> overwrite's content doesn't match any existing book, so the scanner
+> takes the *create* branch, and the old code left Book A's row behind
+> with zero locations — the very bug this step exists to fix, just via the
+> other branch than originally assumed.
+>
+> Fixed by giving `CreateBookWithFile` the same prune step, sharing it with
+> `ReassignFileAndPruneOrphan` via two unexported helpers:
+> `previousFileOwnerTx` (read the path's current owner, before the upsert
+> overwrites it) and `pruneOrphanIfEmptyTx` (the "still has rows, and is it
+> even a different book" check and delete, after it). Both storage methods
+> now return `(orphanedID, orphanedTitle)` on the same terms — see the
+> revision under `ReassignFileAndPruneOrphan` below for why the title has
+> to travel with the id rather than being looked up afterward.
+
+**`ReassignFileAndPruneOrphan(ctx, bookID int64, path string, size int64, mtime time.Time) (fileID int64, orphanedID int64, orphanedTitle string, err error)`**
 
 In one transaction:
 
 1. Read the current owner of `path`, if any (`SELECT book_id FROM
-   book_files WHERE file_path = ?`).
+   book_files WHERE file_path = ?`) — `previousFileOwnerTx`.
 2. `upsertBookFileTx` as today.
 3. If there was a previous owner and it differs from `bookID`, and it now
-   has no `book_files` rows, delete it. The cascade from step
-   `2026083105` takes `book_authors` with it; `authors` rows are left
-   alone, which is correct — an author with no books is not itself wrong,
-   and reference-counting authors is a separate concern.
-4. Return the id of any book deleted, so the scanner can log and count it.
+   has no `book_files` rows, delete it — `pruneOrphanIfEmptyTx`, shared
+   with `CreateBookWithFile` (see its revision note above). The cascade
+   from step `2026083105` takes `book_authors` with it; `authors` rows are
+   left alone, which is correct — an author with no books is not itself
+   wrong, and reference-counting authors is a separate concern.
+4. Return the id **and title** of any book deleted, so the scanner can log
+   and count it.
 
 The "now has no rows" check must be `NOT EXISTS (SELECT 1 FROM book_files
 WHERE book_id = ?)` evaluated *after* the upsert, not a count taken before.
 A book with two known locations that loses one is not an orphan, and this
 is the case a before-check gets wrong.
+
+> **Revised during implementation.** The signature above originally
+> returned only `(fileID, orphanedID, error)` — the Storage section said
+> "return the id," full stop. But the `internal/scanner` section (unchanged
+> below) always specified logging the orphan's *title* too, and by the
+> time a caller has `orphanedID` back, the row is already deleted — a
+> second lookup can't find it. Fetching the title before the `DELETE`,
+> inside the same transaction, and returning it alongside the id was the
+> only way to satisfy both sections; the exact 3-value signature quoted
+> above didn't leave room for it and has been corrected to 4.
 
 **Do not delete the cover file.** The book row is going away but the
 thumbnail on disk is keyed by content hash, and that content may well still
@@ -87,24 +125,34 @@ covers is a separate maintenance step, if it is ever worth writing.
   location. It belongs in the sweep summary: silently deleting a book row
   is exactly the kind of thing that should be visible in the logs when
   someone asks "where did that book go".
-- `scanFile`'s new-book branch calls `CreateBookWithFile`.
-- `scanFile`'s known-content branch calls `ReassignFileAndPruneOrphan`, and
-  when it reports a deleted book, increments `result.Orphaned` and logs at
-  **Info** with `path`, `orphaned_book_id` and the orphan's title. Info, not
-  Warn: this is correct, expected behaviour when a file is replaced, not a
-  problem — but it is a destructive act on the user's index and should be
-  greppable after the fact.
+- `scanFile`'s new-book branch calls `CreateBookWithFile`; its known-content
+  branch calls `ReassignFileAndPruneOrphan`. Both can now report an orphan
+  (see the revision note above), so both route through one shared
+  `logOrphan` helper: when `orphanedID != 0`, it increments
+  `result.Orphaned` and logs at **Info** with `path`, `orphaned_book_id`
+  and the orphan's title. Info, not Warn: this is correct, expected
+  behaviour when a file is replaced, not a problem — but it is a
+  destructive act on the user's index and should be greppable after the
+  fact.
 - `runScan` in `cmd/server` adds `orphaned` to its summary attrs.
 
 ## Tests
 
 `internal/storage`:
 
-- `CreateBookWithFile` creates both rows; a forced failure on the file
-  insert leaves **no** `books` row (the atomicity property — assert the
-  table is empty, not just that an error came back).
+- `CreateBookWithFile` creates both rows; a forced failure leaves **no**
+  `books` row (the atomicity property — assert the table is empty, not
+  just that an error came back). In practice this can't be forced at the
+  file insert specifically: `upsertBookFileTx`'s only real per-row
+  constraint (`file_path` uniqueness) is absorbed by its own
+  `ON CONFLICT DO UPDATE`, so no schema-legal input makes it fail. A
+  duplicate author name forces a real failure instead (both occurrences
+  resolve to the same author id, so the second `book_authors` insert hits
+  its primary key) — inside `createBookTx`, before the file insert even
+  runs, which still proves the property that matters: the whole operation
+  is one transaction, not "insert the book, then maybe the file."
 - `ReassignFileAndPruneOrphan` deletes a previous owner that had exactly
-  one location, and returns its id.
+  one location, and returns its id **and title**.
 - It does **not** delete a previous owner that had two locations — assert
   the book survives with one remaining `book_files` row. This is the case a
   naive implementation gets wrong.
@@ -114,10 +162,18 @@ covers is a separate maintenance step, if it is ever worth writing.
   `authors` row (cascade behaviour, worth pinning here rather than only in
   the schema step's tests, since this is the first caller that relies on it).
 
-`internal/scanner`, as an end-to-end regression for the reported bug: write
+`internal/scanner`, as end-to-end regressions for the reported bug: write
 file A, scan, overwrite the same path with different content, scan again,
 assert exactly one book exists, that it is B, and that `Result.Orphaned` is
 1. Today that assertion fails with two books.
+
+Two variants, added during implementation once it turned out both scanner
+branches can orphan a book (see the revision note under
+`CreateBookWithFile` above): one where the overwrite's content is
+never-before-seen (takes the create-a-book branch), one where it matches
+an already-existing third book elsewhere in the library (takes the
+known-content branch). Both assert the same shape — one book left, the
+orphan's row gone.
 
 ## CLAUDE.md
 
