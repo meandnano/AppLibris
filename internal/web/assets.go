@@ -78,16 +78,24 @@ func staticHandler() http.Handler {
 }
 
 // coversHandler serves stored cover thumbnails with directory listings
-// suppressed and marked immutable for a year. Safe only because
-// cover.Store names each file dir/<contentHash>.jpg: the bytes at a given
-// URL can never change, since different bytes hash to a different name.
-// If cover naming ever stops being content-addressed, this header starts
-// serving a stale thumbnail for a year — the name-scheme dependency is why
-// this comment lives here rather than being assumed obvious.
+// suppressed and a bounded, non-immutable max-age. cover.Store names each
+// file dir/<bookContentHash>.jpg — the *book's* hash, not a hash of the
+// resized/JPEG-encoded thumbnail bytes actually served at that path. So the
+// URL is stable only as long as the extraction/resize/encode pipeline in
+// internal/cover doesn't change: a future resize-quality or encoder change,
+// or a regeneration of an existing cover under that pipeline, can overwrite
+// different bytes at the same URL. That rules out Cache-Control: immutable,
+// which promises the opposite. A day-long max-age still eliminates the
+// redundant per-visit revalidation round trip this handler exists to avoid
+// (measured at 500 conditional requests per full scroll on a 500-book
+// library) while bounding how long a legitimately changed thumbnail can be
+// stale, rather than promising it away for a year; http.FileServer's own
+// Last-Modified handling (from the file's mtime, untouched by this
+// wrapper) is what lets a client revalidate once that window elapses.
 func coversHandler(coversDir string) http.Handler {
 	fileServer := http.FileServer(noDirFS{http.Dir(coversDir)})
 	return http.StripPrefix("/covers/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
 		fileServer.ServeHTTP(w, r)
 	}))
 }

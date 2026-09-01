@@ -161,15 +161,22 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   `COVERS_DIR` (runtime data, so it's passed into `Routes` rather than
   embedded). Both mounts wrap their filesystem in `noDirFS` so a directory
   with no `index.html` 404s instead of `http.FileServer` generating a
-  browsable listing. They're cached differently because only one of the two
-  is named by content: covers get `Cache-Control: immutable` for a year,
-  safe only because `cover.Store` names each file by content hash so the
-  bytes at a URL can never change; the embedded assets have no such
-  property, so they get a content-derived `ETag` (computed once at
-  startup, since `embed.FS` reports a zero `ModTime` and `http.FileServer`
-  would otherwise emit no validator at all) paired with a short `max-age`
-  that avoids a revalidation round trip within a session without risking a
-  stale file surviving a deploy. Handlers map `service.BookSummary` onto a
+  browsable listing. Neither gets `Cache-Control: immutable`: `cover.Store`
+  names each file by the *book's* content hash, not a hash of the
+  resized/JPEG-encoded thumbnail bytes actually served at that path, so a
+  future change to the resize/encode pipeline (or a regeneration under a
+  changed pipeline) can overwrite different bytes at an unchanged URL —
+  `immutable` would promise the opposite. Covers instead get a day-long
+  `max-age`, bounding how stale a legitimately changed thumbnail can get
+  while still eliminating the redundant per-visit revalidation round trip
+  the header exists to avoid; `http.FileServer`'s own `Last-Modified`
+  (from the file's mtime) is what lets a client revalidate once that
+  window elapses. The embedded static assets get a content-derived `ETag`
+  (computed once at startup, since `embed.FS` reports a zero `ModTime` and
+  `http.FileServer` would otherwise emit no validator at all) paired with
+  a short, five-minute `max-age` — that bounds how long a client can serve
+  a stale file after a deploy without consulting the `ETag`, rather than
+  eliminating the risk outright. Handlers map `service.BookSummary` onto a
   small per-page view model so templates stay logic-free. `render` executes
   into a buffer before writing anything to the response, so a template
   error is a clean 500 rather than a truncated page, and sets `Content-Type`
