@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -1424,5 +1425,67 @@ func TestScanDoesNotPruneOverdueRowAtExactlyAnUnreadableDirectorysPath(t *testin
 	f, err := db.FindFileByPath(ctx, "target.epub")
 	if err != nil || f == nil {
 		t.Fatalf("FindFileByPath: %+v, %v (want it to survive — exact-path match with a skipped directory)", f, err)
+	}
+}
+
+// A pre-cancelled context must not walk anything at all — not even the
+// cheap-path check on a single file — since a caller cancelling before
+// calling Scan is indistinguishable from one cancelling an instant later,
+// and the latter must stop the walk (see the next test).
+func TestScanReturnsErrorOnPreCancelledContext(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Scan error = %v, want context.Canceled", err)
+	}
+	if result.Scanned != 0 {
+		t.Errorf("Scanned = %d, want 0 (a pre-cancelled context must not walk anything)", result.Scanned)
+	}
+}
+
+// Cancelling mid-sweep must stop the walk from visiting further entries,
+// not just make each remaining file's own DB calls fail one at a time —
+// the latter would still cost a full directory traversal, a stat, and a
+// warning per remaining file on every shutdown of a large library.
+func TestScanStopsOnCancellationMidSweep(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	const total = 20
+	for i := 0; i < total; i++ {
+		writeTestEPUB(t, filepath.Join(libDir, fmt.Sprintf("book-%d.epub", i)), fmt.Sprintf("Book %d", i), "Author", nil)
+	}
+
+	scanCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		// Cancel as soon as the walk has demonstrably started (the first
+		// book has been committed), leaving most of the 20 files
+		// unprocessed — deterministic, unlike a fixed sleep.
+		for {
+			var count int
+			if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books`).Scan(&count); err == nil && count > 0 {
+				cancel()
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	result, err := Scan(scanCtx, db, libDir, coversDir, testMissingGrace)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Scan error = %v, want context.Canceled", err)
+	}
+	if result.Scanned >= total {
+		t.Errorf("Scanned = %d, want fewer than %d — cancellation should have stopped the walk early", result.Scanned, total)
 	}
 }
