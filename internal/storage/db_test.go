@@ -50,6 +50,20 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+func TestOpenBoundsReadPool(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "library.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	if got := db.Read().Stats().MaxOpenConnections; got != readPoolSize {
+		t.Errorf("read pool MaxOpenConnections = %d, want %d", got, readPoolSize)
+	}
+}
+
 func TestOpenIsIdempotent(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "library.db")
 
