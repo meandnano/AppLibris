@@ -1,5 +1,6 @@
 /bin
 /data
+/library
 *.db
 *.db-wal
 *.db-shm
