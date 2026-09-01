@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300..600;1,6..72,300..500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #fbfaf8; --bg2: #ffffff; --bg3: #f4f2ee;
+    --fg: #17140f; --fg2: #57534b; --fg3: #8d877d;
+    --rule: #ded9d1; --rule2: #eae6e0;
+    --accent: #8a5a3c; --accent-soft: #f3ebe4;
+    --ok: #3f6b52; --err: #9a3b34; --err-soft: #f7ece9;
+    --stripe: #e6e1d8; --stripe2: #efeae2;
+  }
+  [data-theme="dark"] {
+    --bg: #121110; --bg2: #1a1817; --bg3: #221f1d;
+    --fg: #f1ede5; --fg2: #a9a29a; --fg3: #7b756c;
+    --rule: #322e2a; --rule2: #262322;
+    --accent: #c98a5f; --accent-soft: #2b211a;
+    --ok: #7fae90; --err: #d98b81; --err-soft: #2c1e1c;
+    --stripe: #262320; --stripe2: #2e2a26;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+  body { font-family: "IBM Plex Sans", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  input, button, select, textarea { font: inherit; color: inherit; }
+  @keyframes caret { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+  @keyframes spin { to { transform: rotate(360deg) } }
+</style>
+</helmet>
+
+<div style="max-width: 1500px; margin: 0 auto; padding: 56px 40px 120px; display: flex; flex-direction: column; gap: 64px;">
+
+  <header style="display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; flex-wrap: wrap; border-bottom: 2px solid var(--fg); padding-bottom: 18px;">
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg3);">Interface mockups · state gallery</div>
+      <h1 style="font-family: Newsreader, serif; font-weight: 400; font-size: 46px; line-height: 1; margin: 0; letter-spacing: -0.015em;">Bookshelf</h1>
+      <p style="margin: 0; font-size: 14px; color: var(--fg2); max-width: 52ch; text-wrap: pretty;">Self-hosted ebook library. Every interaction state is drawn once and labeled, so wiring htmx later is connecting markup, not designing it.</p>
+    </div>
+    <button onClick="{{ toggleTheme }}" style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; background: transparent; border: 1px solid var(--rule); border-radius: 999px; padding: 9px 16px; cursor: pointer; color: var(--fg2);" style-hover="border-color: var(--fg); color: var(--fg);">{{ themeLabel }}</button>
+  </header>
+
+  <!-- ===== 01 LIBRARY DEFAULT ===== -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 9px; flex-wrap: wrap;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--accent);">01</span>
+      <h2 style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;">Library — default</h2>
+      <span style="font-size: 13px; color: var(--fg2); flex: 1;">Home screen. Search idle. Covers bottom-align to a shelf line so varying aspect ratios stay tidy.</span>
+    </div>
+    <div style="border: 1px solid var(--rule); background: var(--bg2);">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px 24px; border-bottom: 1px solid var(--rule);">
+        <div style="display: flex; align-items: center; gap: 28px;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase;">Bookshelf</span>
+          <nav style="display: flex; gap: 20px; font-size: 13.5px;">
+            <span style="color: var(--fg); border-bottom: 2px solid var(--accent); padding-bottom: 2px;">Library</span>
+            <span style="color: var(--fg3);">History</span>
+          </nav>
+        </div>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">1,284 books · scanned 4h ago</span>
+      </div>
+
+      <div style="padding: 22px 24px 14px; border-bottom: 1px solid var(--rule2); display: flex; align-items: center; gap: 14px;">
+        <div style="flex: 1; display: flex; align-items: center; gap: 10px; border: 1px solid var(--rule); background: var(--bg); padding: 11px 14px;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--fg3);">⌕</span>
+          <span style="font-size: 14px; color: var(--fg3);">Search title or author</span>
+        </div>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3); border: 1px solid var(--rule); padding: 4px 7px;">/</span>
+      </div>
+
+      <div style="padding: 26px 24px 34px;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 34px 22px;">
+          <sc-for list="{{ booksAll }}" as="b" hint-placeholder-count="24">
+            <div style="display: flex; flex-direction: column; gap: 10px; cursor: pointer;">
+              <div style="height: 210px; display: flex; align-items: flex-end; justify-content: flex-start;">
+                <div style="height: 100%; aspect-ratio: {{ b.ar }}; background: repeating-linear-gradient(135deg, var(--stripe) 0 3px, var(--stripe2) 3px 8px); border: 1px solid var(--rule); display: flex; align-items: flex-end; padding: 9px;">
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; line-height: 1.35; letter-spacing: 0.04em; color: var(--fg3); text-transform: uppercase;">{{ b.coverNote }}</span>
+                </div>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 3px;">
+                <div style="font-family: Newsreader, serif; font-size: 16.5px; line-height: 1.25; text-wrap: pretty;">{{ b.title }}</div>
+                <div style="font-size: 12.5px; color: var(--fg2);">{{ b.authorLine }}</div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 7px; margin-top: 1px;">
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; border: 1px solid var(--rule); padding: 2px 5px; color: var(--fg2);">{{ b.fmt }}</span>
+                <sc-if value="{{ b.paths }}" hint-placeholder-val="{{ false }}">
+                  <span title="Same file found in more than one location" style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; letter-spacing: 0.08em; color: var(--accent); border-bottom: 1px dotted var(--accent);">{{ b.pathLabel }}</span>
+                </sc-if>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top: 34px; padding-top: 18px; border-top: 1px solid var(--rule2); display: flex; justify-content: center;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg3);">Loading next 48 of 1,284 …</span>
+        </div>
+      </div>
+    </div>
+    <p style="margin: 0; font-size: 12.5px; color: var(--fg3); font-family: 'IBM Plex Mono', monospace;">Grid is fixed-column-width and lazily paged — the same layout holds at 6 books or 1,284.</p>
+  </section>
+
+  <!-- ===== 02 SEARCH STATES ===== -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 9px; flex-wrap: wrap;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--accent);">02</span>
+      <h2 style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;">Search — four states</h2>
+      <span style="font-size: 13px; color: var(--fg2); flex: 1;">One input, four swaps. The grid below it is the htmx target; the input itself never re-renders.</span>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px;">
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2); display: flex; flex-direction: column;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">a · idle</div>
+        <div style="padding: 20px 18px; display: flex; flex-direction: column; gap: 14px;">
+          <div style="display: flex; align-items: center; gap: 10px; border: 1px solid var(--rule); background: var(--bg); padding: 11px 14px;">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--fg3);">⌕</span>
+            <span style="font-size: 14px; color: var(--fg3);">Search title or author</span>
+          </div>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">1,284 books</span>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2); display: flex; flex-direction: column;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">b · typing / filtering</div>
+        <div style="padding: 20px 18px; display: flex; flex-direction: column; gap: 14px;">
+          <div style="display: flex; align-items: center; gap: 10px; border: 1px solid var(--accent); background: var(--bg); padding: 11px 14px; box-shadow: 0 0 0 3px var(--accent-soft);">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--accent);">⌕</span>
+            <span style="font-size: 14px;">le gui</span>
+            <span style="width: 1px; height: 17px; background: var(--fg); animation: caret 1s step-end infinite;"></span>
+            <span style="flex: 1;"></span>
+            <span style="width: 12px; height: 12px; border: 1.5px solid var(--rule); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite;"></span>
+          </div>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">filtering …</span>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2); display: flex; flex-direction: column; grid-column: 1 / -1;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">c · results</div>
+        <div style="padding: 20px 18px 28px; display: flex; flex-direction: column; gap: 16px;">
+          <div style="display: flex; align-items: center; gap: 10px; border: 1px solid var(--rule); background: var(--bg); padding: 11px 14px;">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--fg3);">⌕</span>
+            <span style="font-size: 14px;">le guin</span>
+            <span style="flex: 1;"></span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg2); border-bottom: 1px solid var(--rule);">clear ×</span>
+          </div>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg2);">4 of 1,284 · matched title, author</span>
+          <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 30px 22px;">
+            <sc-for list="{{ booksResults }}" as="b" hint-placeholder-count="4">
+              <div style="display: flex; flex-direction: column; gap: 10px;">
+                <div style="height: 190px; display: flex; align-items: flex-end; justify-content: flex-start;">
+                  <div style="height: 100%; aspect-ratio: {{ b.ar }}; background: repeating-linear-gradient(135deg, var(--stripe) 0 3px, var(--stripe2) 3px 8px); border: 1px solid var(--rule); display: flex; align-items: flex-end; padding: 9px;">
+                    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 9px; line-height: 1.35; color: var(--fg3); text-transform: uppercase;">{{ b.coverNote }}</span>
+                  </div>
+                </div>
+                <div style="font-family: Newsreader, serif; font-size: 16.5px; line-height: 1.25;">{{ b.title }}</div>
+                <div style="font-size: 12.5px; color: var(--fg2);">{{ b.authorLine }}</div>
+                <div style="display: flex; align-items: center; gap: 7px;">
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; border: 1px solid var(--rule); padding: 2px 5px; color: var(--fg2);">{{ b.fmt }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+          <p style="margin: 0; font-size: 12px; color: var(--fg3); font-family: 'IBM Plex Mono', monospace;">Two cards, one work: the EPUB and the FB2 stay separate entries.</p>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2); display: flex; flex-direction: column;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">d · no matches</div>
+        <div style="padding: 20px 18px 26px; display: flex; flex-direction: column; gap: 16px;">
+          <div style="display: flex; align-items: center; gap: 10px; border: 1px solid var(--rule); background: var(--bg); padding: 11px 14px;">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--fg3);">⌕</span>
+            <span style="font-size: 14px;">atlas of clouds</span>
+            <span style="flex: 1;"></span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg2); border-bottom: 1px solid var(--rule);">clear ×</span>
+          </div>
+          <div style="border: 1px dashed var(--rule); padding: 34px 24px; display: flex; flex-direction: column; gap: 8px; align-items: center; text-align: center;">
+            <div style="font-family: Newsreader, serif; font-size: 21px;">Nothing matches “atlas of clouds”</div>
+            <div style="font-size: 13px; color: var(--fg2);">Searches run over title, sort title and author names.</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2); display: flex; flex-direction: column;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">e · empty library</div>
+        <div style="padding: 20px 18px 26px; display: flex; flex-direction: column; gap: 16px;">
+          <div style="display: flex; align-items: center; gap: 10px; border: 1px solid var(--rule2); background: var(--bg3); padding: 11px 14px; opacity: 0.55;">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--fg3);">⌕</span>
+            <span style="font-size: 14px; color: var(--fg3);">Search title or author</span>
+          </div>
+          <div style="border: 1px dashed var(--rule); padding: 30px 24px; display: flex; flex-direction: column; gap: 10px; align-items: center; text-align: center;">
+            <div style="font-family: Newsreader, serif; font-size: 21px;">No books yet</div>
+            <div style="font-size: 13px; color: var(--fg2); max-width: 34ch; text-wrap: pretty;">Drop EPUB or FB2 files into <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px;">/srv/books</span> and run a scan.</div>
+            <span style="margin-top: 6px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 9px 16px;">Scan library</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ===== 03 BOOK DETAIL ===== -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 9px; flex-wrap: wrap;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--accent);">03</span>
+      <h2 style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;">Book detail — read state</h2>
+      <span style="font-size: 13px; color: var(--fg2); flex: 1;">Own page, back link to the grid. Send-to-Kindle sits at the top of the right column, above the metadata.</span>
+    </div>
+
+    <div style="border: 1px solid var(--rule); background: var(--bg2);">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px 24px; border-bottom: 1px solid var(--rule);">
+        <div style="display: flex; align-items: center; gap: 28px;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase;">Bookshelf</span>
+          <span style="font-size: 13.5px; color: var(--accent);">← Library</span>
+        </div>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">added 12 Mar 2026</span>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 44px; padding: 40px 44px 48px;">
+        <div style="display: flex; flex-direction: column; gap: 18px;">
+          <div style="aspect-ratio: 0.66; background: repeating-linear-gradient(135deg, var(--stripe) 0 4px, var(--stripe2) 4px 10px); border: 1px solid var(--rule); display: flex; align-items: flex-end; padding: 14px;">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; line-height: 1.4; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg3);">cover · 400 × 606 jpeg</span>
+          </div>
+          <dl style="margin: 0; display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--rule2);">
+            <div style="display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule2); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px;">
+              <dt style="color: var(--fg3);">format</dt><dd style="margin: 0; text-transform: uppercase;">epub</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule2); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px;">
+              <dt style="color: var(--fg3);">size</dt><dd style="margin: 0;">1.9 MB</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule2); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px;">
+              <dt style="color: var(--fg3);">locations</dt><dd style="margin: 0; color: var(--accent); border-bottom: 1px dotted var(--accent);">2 paths</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 30px;">
+          <div style="display: flex; flex-direction: column; gap: 10px;">
+            <h3 style="margin: 0; font-family: Newsreader, serif; font-weight: 400; font-size: 40px; line-height: 1.08; letter-spacing: -0.015em; max-width: 26ch; text-wrap: pretty;">The Left Hand of Darkness</h3>
+            <div style="font-size: 15px; color: var(--fg2);">Ursula K. Le Guin</div>
+          </div>
+
+          <div style="border: 1px solid var(--rule); background: var(--bg3); padding: 22px 24px; display: flex; flex-direction: column; gap: 16px;">
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg3);">Send to Kindle</div>
+            <div style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 12px; border: 1px solid var(--rule); background: var(--bg2); padding: 10px 14px; min-width: 300px;">
+                <span style="font-size: 14px;">Mine</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--fg2);">anton@kindle.com</span>
+                <span style="flex: 1;"></span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">▾</span>
+              </div>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 12px 22px;">Send</span>
+              <span style="font-size: 12.5px; color: var(--fg3);">+ add address</span>
+            </div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">last used 2 days ago · 2 saved recipients</div>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 10px;">
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg3);">Description</div>
+            <p style="margin: 0; font-family: Newsreader, serif; font-size: 17px; line-height: 1.55; color: var(--fg); max-width: 62ch; text-wrap: pretty;">A lone envoy arrives on the frozen world of Winter to invite its nations into a galactic federation, and finds a people whose sex is not fixed. Le Guin's fourth Hainish novel, first published in 1969.</p>
+          </div>
+
+          <dl style="margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 44px; border-top: 1px solid var(--rule);">
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">publisher</dt><dd style="margin: 0; font-size: 13.5px;">Ace Books</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">published</dt><dd style="margin: 0; font-size: 13.5px;">1969-03-01</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">language</dt><dd style="margin: 0; font-size: 13.5px;">en</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">isbn</dt><dd style="margin: 0; font-size: 13.5px; font-family: 'IBM Plex Mono', monospace;">9780441478125</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">sort title</dt><dd style="margin: 0; font-size: 13.5px;">Left Hand of Darkness, The</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">added</dt><dd style="margin: 0; font-size: 13.5px;">2026-03-12</dd>
+            </div>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 04 SPARSE DETAIL ===== -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 9px; flex-wrap: wrap;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--accent);">04</span>
+      <h2 style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;">Book detail — sparse metadata</h2>
+      <span style="font-size: 13px; color: var(--fg2); flex: 1;">No cover, no authors, no ISBN, no description. Missing fields stay visible as empty rows you can click to fill.</span>
+    </div>
+    <div style="border: 1px solid var(--rule); background: var(--bg2);">
+      <div style="display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 44px; padding: 40px 44px 48px;">
+        <div style="display: flex; flex-direction: column; gap: 18px;">
+          <div style="aspect-ratio: 0.66; border: 1px dashed var(--rule); display: flex; align-items: center; justify-content: center; background: var(--bg);">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg3);">no cover</span>
+          </div>
+          <dl style="margin: 0; display: flex; flex-direction: column; border-top: 1px solid var(--rule2);">
+            <div style="display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule2); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px;">
+              <dt style="color: var(--fg3);">format</dt><dd style="margin: 0; text-transform: uppercase;">fb2</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule2); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px;">
+              <dt style="color: var(--fg3);">size</dt><dd style="margin: 0;">640 KB</dd>
+            </div>
+          </dl>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 30px;">
+          <div style="display: flex; flex-direction: column; gap: 10px;">
+            <h3 style="margin: 0; font-family: Newsreader, serif; font-weight: 400; font-size: 40px; line-height: 1.08; letter-spacing: -0.015em; max-width: 26ch;">Собрание сочинений, т. 1</h3>
+            <div style="font-size: 13px; color: var(--fg3); font-style: italic;">Author unknown — click to add</div>
+          </div>
+          <div style="border: 1px solid var(--rule); background: var(--bg3); padding: 22px 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 12px; border: 1px solid var(--rule); background: var(--bg2); padding: 10px 14px; min-width: 300px;">
+              <span style="font-size: 14px;">Mine</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--fg2);">anton@kindle.com</span>
+              <span style="flex: 1;"></span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">▾</span>
+            </div>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 12px 22px;">Send</span>
+          </div>
+          <div style="font-size: 14px; color: var(--fg3); font-style: italic; border-bottom: 1px dotted var(--rule); padding-bottom: 10px; max-width: 62ch;">No description — click to add one</div>
+          <dl style="margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 44px; border-top: 1px solid var(--rule);">
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">publisher</dt><dd style="margin: 0; font-size: 13.5px; color: var(--fg3);">—</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">published</dt><dd style="margin: 0; font-size: 13.5px; color: var(--fg3);">—</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">language</dt><dd style="margin: 0; font-size: 13.5px;">ru</dd>
+            </div>
+            <div style="display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--rule2);">
+              <dt style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">isbn</dt><dd style="margin: 0; font-size: 13.5px; color: var(--fg3);">—</dd>
+            </div>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 05 INLINE EDIT ===== -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 9px; flex-wrap: wrap;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--accent);">05</span>
+      <h2 style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;">Inline metadata editing</h2>
+      <span style="font-size: 13px; color: var(--fg2); flex: 1;">Read view swaps for edit view in place. Same box model both ways, so nothing shifts on swap.</span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px;">
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">a · title, read</div>
+        <div style="padding: 24px 20px 30px;">
+          <div style="display: inline-flex; align-items: baseline; gap: 12px; padding: 4px 8px; margin: -4px -8px; border-radius: 2px; background: var(--bg3);">
+            <span style="font-family: Newsreader, serif; font-size: 32px; line-height: 1.1;">The Left Hand of Darkness</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);">edit</span>
+          </div>
+          <p style="margin: 20px 0 0; font-size: 12.5px; color: var(--fg3);">Hover reveals the affordance; the field itself never looks like an input until clicked.</p>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">b · title, editing</div>
+        <div style="padding: 24px 20px 30px; display: flex; flex-direction: column; gap: 12px;">
+          <div style="display: flex; align-items: center; gap: 0; border: 1px solid var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--bg); padding: 6px 10px;">
+            <span style="font-family: Newsreader, serif; font-size: 32px; line-height: 1.1;">The Left Hand of Darkness</span>
+            <span style="width: 1px; height: 32px; background: var(--accent); animation: caret 1s step-end infinite; margin-left: 2px;"></span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 8px 14px;">Save</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg2); border: 1px solid var(--rule); padding: 8px 14px;">Cancel</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">⏎ save · esc cancel</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">c · description, read</div>
+        <div style="padding: 24px 20px 30px;">
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg3); margin-bottom: 10px;">Description</div>
+          <p style="margin: 0; font-family: Newsreader, serif; font-size: 16px; line-height: 1.55; max-width: 52ch; padding: 6px 8px; margin-left: -8px; background: var(--bg3); text-wrap: pretty;">A lone envoy arrives on the frozen world of Winter to invite its nations into a galactic federation, and finds a people whose sex is not fixed.</p>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">d · description, editing</div>
+        <div style="padding: 24px 20px 30px; display: flex; flex-direction: column; gap: 12px;">
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg3);">Description</div>
+          <div style="border: 1px solid var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--bg); padding: 10px 12px; min-height: 108px; font-family: Newsreader, serif; font-size: 16px; line-height: 1.55;">A lone envoy arrives on the frozen world of Winter to invite its nations into a galactic federation, and finds a people whose sex is not fixed.<span style="display: inline-block; width: 1px; height: 17px; vertical-align: -3px; background: var(--accent); animation: caret 1s step-end infinite;"></span></div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 8px 14px;">Save</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg2); border: 1px solid var(--rule); padding: 8px 14px;">Cancel</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ===== 06 SEND CONTROL ===== -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 9px; flex-wrap: wrap;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--accent);">06</span>
+      <h2 style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;">Send control — four states</h2>
+      <span style="font-size: 13px; color: var(--fg2); flex: 1;">One block, swapped whole by the poll. Height is constant across all four so the page never jumps.</span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px;">
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">a · idle</div>
+        <div style="padding: 22px 20px; background: var(--bg3); display: flex; flex-direction: column; gap: 14px; min-height: 148px;">
+          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 12px; border: 1px solid var(--rule); background: var(--bg2); padding: 10px 14px; flex: 1; min-width: 240px;">
+              <span style="font-size: 14px;">Mine</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--fg2);">anton@kindle.com</span>
+              <span style="flex: 1;"></span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">▾</span>
+            </div>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 12px 22px;">Send</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px;">
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">Not sent yet</span>
+            <span style="font-size: 12.5px; color: var(--fg3);">+ add address</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">b · sending (polling)</div>
+        <div style="padding: 22px 20px; background: var(--bg3); display: flex; flex-direction: column; gap: 14px; min-height: 148px;">
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div style="display: flex; align-items: center; gap: 12px; border: 1px solid var(--rule2); background: var(--bg2); padding: 10px 14px; flex: 1; opacity: 0.5;">
+              <span style="font-size: 14px;">Mine</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--fg2);">anton@kindle.com</span>
+            </div>
+            <span style="display: inline-flex; align-items: center; gap: 9px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; border: 1px solid var(--accent); color: var(--accent); padding: 12px 22px;">
+              <span style="width: 11px; height: 11px; border: 1.5px solid var(--accent-soft); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite;"></span>
+              Sending
+            </span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <div style="height: 2px; background: var(--rule2); overflow: hidden;"><div style="width: 45%; height: 100%; background: var(--accent);"></div></div>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg2);">queued 3s ago · handing to SMTP</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">c · delivered</div>
+        <div style="padding: 22px 20px; background: var(--bg3); display: flex; flex-direction: column; gap: 14px; min-height: 148px;">
+          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 12px; border: 1px solid var(--rule); background: var(--bg2); padding: 10px 14px; flex: 1; min-width: 240px;">
+              <span style="font-size: 14px;">Mine</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--fg2);">anton@kindle.com</span>
+              <span style="flex: 1;"></span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">▾</span>
+            </div>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; border: 1px solid var(--rule); color: var(--fg2); padding: 12px 22px;">Send again</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px; border-left: 2px solid var(--ok); padding-left: 12px;">
+            <span style="font-size: 13.5px; color: var(--ok);">Delivered</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">30 Aug 2026, 14:02 · to anton@kindle.com</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--rule); background: var(--bg2);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3); padding: 10px 18px; border-bottom: 1px solid var(--rule2);">d · failed + retry</div>
+        <div style="padding: 22px 20px; background: var(--bg3); display: flex; flex-direction: column; gap: 14px; min-height: 148px;">
+          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 12px; border: 1px solid var(--rule); background: var(--bg2); padding: 10px 14px; flex: 1; min-width: 240px;">
+              <span style="font-size: 14px;">Kate</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--fg2);">kate@kindle.com</span>
+              <span style="flex: 1;"></span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">▾</span>
+            </div>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 12px 22px;">Retry</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 4px; border-left: 2px solid var(--err); background: var(--err-soft); padding: 10px 12px;">
+            <span style="font-size: 13.5px; color: var(--err);">Failed</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg2);">552 attachment too large (28.4 MB) · 14:07</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div style="border: 1px solid var(--rule); background: var(--bg2); padding: 20px; display: flex; flex-direction: column; gap: 12px; max-width: 520px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg3);">e · add address, expanded inline</div>
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <div style="flex: 1; border: 1px solid var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--bg); padding: 10px 12px; font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--fg3);">name@kindle.com</div>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 10px 16px;">Add</span>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--fg3);">esc</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 07 HISTORY ===== -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--rule); padding-bottom: 9px; flex-wrap: wrap;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--accent);">07</span>
+      <h2 style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;">Send history</h2>
+      <span style="font-size: 13px; color: var(--fg2); flex: 1;">Built to answer one question: is this already on the Kindle? Title leads, status is the only colored thing.</span>
+    </div>
+    <div style="border: 1px solid var(--rule); background: var(--bg2);">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px 24px; border-bottom: 1px solid var(--rule);">
+        <div style="display: flex; align-items: center; gap: 28px;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase;">Bookshelf</span>
+          <nav style="display: flex; gap: 20px; font-size: 13.5px;">
+            <span style="color: var(--fg3);">Library</span>
+            <span style="color: var(--fg); border-bottom: 2px solid var(--accent); padding-bottom: 2px;">History</span>
+          </nav>
+        </div>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3);">last 30 days</span>
+      </div>
+      <div style="padding: 8px 24px 28px;">
+        <sc-for list="{{ history }}" as="h" hint-placeholder-count="7">
+          <div style="display: grid; grid-template-columns: minmax(0, 2.4fr) minmax(0, 1.3fr) 120px 140px; gap: 24px; align-items: baseline; padding: 16px 0; border-bottom: 1px solid var(--rule2);">
+            <div style="display: flex; flex-direction: column; gap: 4px;">
+              <span style="font-family: Newsreader, serif; font-size: 18px; line-height: 1.25;">{{ h.title }}</span>
+              <sc-if value="{{ h.reason }}" hint-placeholder-val="{{ false }}">
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--err);">{{ h.reason }}</span>
+              </sc-if>
+            </div>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--fg2);">{{ h.to }}</span>
+            <span style="font-size: 13px; color: {{ h.color }};">{{ h.status }}</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--fg3); text-align: right;">{{ h.when }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;default&quot;:&quot;light&quot;,&quot;tsType&quot;:&quot;\&quot;light\&quot; | \&quot;dark\&quot;&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#8a5a3c&quot;,&quot;options&quot;:[&quot;#8a5a3c&quot;,&quot;#3f6b5c&quot;,&quot;#4a5a8a&quot;,&quot;#6b6257&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;denseGrid&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Library grid&quot;}}">
+const B = (title, authorLine, fmt, ar, paths, coverNote) => ({
+  title, authorLine, fmt, ar,
+  paths: paths > 1,
+  pathLabel: paths > 1 ? paths + " paths" : "",
+  coverNote: coverNote || "cover"
+});
+
+const ALL = [
+  B("The Left Hand of Darkness", "Ursula K. Le Guin", "epub", 0.66, 2),
+  B("The Dispossessed", "Ursula K. Le Guin", "epub", 0.64, 1),
+  B("Solaris", "Stanisław Lem", "fb2", 0.7, 2),
+  B("The Master and Margarita", "Mikhail Bulgakov", "fb2", 0.68, 1),
+  B("Invisible Cities", "Italo Calvino", "epub", 0.72, 1),
+  B("Piranesi", "Susanna Clarke", "epub", 0.66, 1),
+  B("Roadside Picnic", "Arkady & Boris Strugatsky", "fb2", 0.65, 1),
+  B("The Book of Disquiet", "Fernando Pessoa", "epub", 0.66, 1, "no cover"),
+  B("Gödel, Escher, Bach", "Douglas Hofstadter", "epub", 0.75, 1),
+  B("Pale Fire", "Vladimir Nabokov", "epub", 0.63, 1),
+  B("The Third Policeman", "Flann O'Brien", "epub", 0.67, 1),
+  B("Hard-Boiled Wonderland and the End of the World", "Haruki Murakami", "epub", 0.66, 3),
+  B("Kolyma Tales", "Varlam Shalamov", "fb2", 0.69, 1),
+  B("Stoner", "John Williams", "epub", 0.64, 1),
+  B("The Peregrine", "J. A. Baker", "epub", 0.71, 1),
+  B("Annals of the Former World", "John McPhee", "epub", 0.73, 1),
+  B("Ficciones", "Jorge Luis Borges", "epub", 0.62, 1),
+  B("The Rings of Saturn", "W. G. Sebald", "epub", 0.68, 1),
+  B("A Wizard of Earthsea", "Ursula K. Le Guin", "fb2", 0.66, 1),
+  B("Notes from the Underground", "Fyodor Dostoevsky", "fb2", 0.7, 1),
+  B("The Glass Bead Game", "Hermann Hesse", "epub", 0.65, 1),
+  B("Собрание сочинений, т. 1", "—", "fb2", 0.72, 1, "no cover"),
+  B("Blood Meridian", "Cormac McCarthy", "epub", 0.67, 1),
+  B("The Left Hand of Darkness", "Ursula K. Le Guin", "fb2", 0.66, 1)
+];
+
+const HISTORY = [
+  { title: "The Left Hand of Darkness", to: "anton@kindle.com", status: "Delivered", color: "var(--ok)", when: "today, 14:02", reason: "" },
+  { title: "Piranesi", to: "kate@kindle.com", status: "Sending", color: "var(--accent)", when: "today, 13:58", reason: "" },
+  { title: "Gödel, Escher, Bach", to: "kate@kindle.com", status: "Failed", color: "var(--err)", when: "today, 11:20", reason: "552 attachment too large (28.4 MB)" },
+  { title: "Invisible Cities", to: "anton@kindle.com", status: "Delivered", color: "var(--ok)", when: "yesterday, 22:41", reason: "" },
+  { title: "Solaris", to: "anton@kindle.com", status: "Delivered", color: "var(--ok)", when: "28 Aug, 09:15", reason: "" },
+  { title: "Собрание сочинений, т. 1", to: "anton@kindle.com", status: "Failed", color: "var(--err)", when: "27 Aug, 19:03", reason: "550 unrecognised sender address" },
+  { title: "The Peregrine", to: "kate@kindle.com", status: "Delivered", color: "var(--ok)", when: "24 Aug, 20:12", reason: "" },
+  { title: "Stoner", to: "anton@kindle.com", status: "Queued", color: "var(--fg2)", when: "22 Aug, 08:30", reason: "" }
+];
+
+class Component extends DCLogic {
+  state = { theme: null };
+
+  get theme() { return this.state.theme || this.props.theme || "light"; }
+
+  apply() {
+    document.documentElement.setAttribute("data-theme", this.theme);
+    const a = this.props.accent;
+    if (a) {
+      document.documentElement.style.setProperty("--accent", a);
+    } else {
+      document.documentElement.style.removeProperty("--accent");
+    }
+  }
+  componentDidMount() { this.apply(); }
+  componentDidUpdate() { this.apply(); }
+
+  renderVals() {
+    const dense = this.props.denseGrid;
+    return {
+      themeLabel: this.theme === "dark" ? "Light mode" : "Dark mode",
+      toggleTheme: () => this.setState({ theme: this.theme === "dark" ? "light" : "dark" }),
+      booksAll: dense ? ALL : ALL.slice(0, 18),
+      booksResults: [ALL[0], ALL[1], ALL[18], ALL[23]],
+      history: HISTORY
+    };
+  }
+}
+
+</script>
+</body>
+</html>

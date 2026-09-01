@@ -1,0 +1,80 @@
+/* Bookshelf design tokens.
+   Light is the default; dark follows the OS unless [data-theme] overrides it.
+   Use the variables, never the literals — dark mode redeclares these names. */
+
+:root {
+  --bg: #fbfaf8;
+  --bg-raised: #ffffff;
+  --bg-sunken: #f4f2ee;
+  --fg: #17140f;
+  --fg-muted: #57534b;
+  --fg-faint: #8d877d;
+  --rule: #ded9d1;
+  --rule-faint: #eae6e0;
+  --accent: #8a5a3c;
+  --accent-soft: #f3ebe4;
+
+  --ok: #3f6b52;
+  --err: #9a3b34;
+  --err-soft: #f7ece9;
+
+  --serif: "Newsreader", Georgia, "Times New Roman", serif;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --shelf-height: 210px;
+  --card-width: 148px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121110;
+    --bg-raised: #1a1817;
+    --bg-sunken: #221f1d;
+    --fg: #f1ede5;
+    --fg-muted: #a9a29a;
+    --fg-faint: #7b756c;
+    --rule: #322e2a;
+    --rule-faint: #262322;
+    --accent: #c98a5f;
+    --accent-soft: #2b211a;
+
+    --ok: #7fae90;
+    --err: #d98b81;
+    --err-soft: #2c1e1c;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #121110;
+  --bg-raised: #1a1817;
+  --bg-sunken: #221f1d;
+  --fg: #f1ede5;
+  --fg-muted: #a9a29a;
+  --fg-faint: #7b756c;
+  --rule: #322e2a;
+  --rule-faint: #262322;
+  --accent: #c98a5f;
+  --accent-soft: #2b211a;
+
+  --ok: #7fae90;
+  --err: #d98b81;
+  --err-soft: #2c1e1c;
+}
+
+@media (max-width: 640px) {
+  :root {
+    --shelf-height: 168px;
+    --card-width: 132px;
+  }
+}
+
+/* Font loading — add to <head>, or self-host and swap for @font-face:
+   <link rel="preconnect" href="https://fonts.googleapis.com">
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,300..600&display=swap">
+
+   Theme, applied before first paint so a dark-mode reader gets no light flash:
+   <script>(function(){try{var t=localStorage.getItem("theme");
+   if(t)document.documentElement.setAttribute("data-theme",t)}catch(e){}})()</script>
+*/
