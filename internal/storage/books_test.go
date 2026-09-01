@@ -274,11 +274,99 @@ func TestListBookAuthors(t *testing.T) {
 	if got := authors[soloID]; len(got) != 1 || got[0] != "Jane Doe" {
 		t.Errorf("authors[solo] = %v, want [Jane Doe]", got)
 	}
-	if got := authors[multiID]; len(got) != 2 {
-		t.Errorf("authors[multi] = %v, want 2 authors", got)
+	if got := authors[multiID]; len(got) != 2 || got[0] != "Jane Doe" || got[1] != "John Roe" {
+		t.Errorf("authors[multi] = %v, want [Jane Doe John Roe] in that order", got)
 	}
 	if got := authors[noneID]; got != nil {
 		t.Errorf("authors[none] = %v, want no entry", got)
+	}
+}
+
+// The regression this step exists for. author_id order is first-sight-in-
+// the-library order: Terry Pratchett is created via book one, so under the
+// old author_id-ordered query this returned [Terry Pratchett, Neil Gaiman]
+// for book two — the wrong lead author — no matter what book two's own
+// file credited them as. This fails on master today; it must not.
+func TestListBookAuthorsUsesEachBooksOwnOrderNotAuthorID(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Book One"}, []string{"Terry Pratchett"}); err != nil {
+		t.Fatalf("CreateBook 1: %v", err)
+	}
+	book2ID, err := db.CreateBook(ctx, Book{ContentHash: "hash-2", Title: "Book Two"}, []string{"Neil Gaiman", "Terry Pratchett"})
+	if err != nil {
+		t.Fatalf("CreateBook 2: %v", err)
+	}
+
+	authors, err := db.ListBookAuthors(ctx)
+	if err != nil {
+		t.Fatalf("ListBookAuthors: %v", err)
+	}
+	if got := authors[book2ID]; len(got) != 2 || got[0] != "Neil Gaiman" || got[1] != "Terry Pratchett" {
+		t.Errorf("authors[book2] = %v, want [Neil Gaiman Terry Pratchett] — book two's own credited order, not author_id order", got)
+	}
+}
+
+func TestBookAuthorsPositionIsZeroBasedAndContiguous(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	bookID, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Three Authors"}, []string{"Author A", "Author B", "Author C"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	rows, err := db.Read().QueryContext(ctx, `SELECT position FROM book_authors WHERE book_id = ? ORDER BY position`, bookID)
+	if err != nil {
+		t.Fatalf("query positions: %v", err)
+	}
+	defer rows.Close()
+	var positions []int
+	for rows.Next() {
+		var p int
+		if err := rows.Scan(&p); err != nil {
+			t.Fatalf("scan position: %v", err)
+		}
+		positions = append(positions, p)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if want := []int{0, 1, 2}; !slices.Equal(positions, want) {
+		t.Errorf("positions = %v, want %v", positions, want)
+	}
+}
+
+// The second defect found while validating this step: a name credited
+// twice in one file used to fail the whole CreateBook transaction —
+// book_authors' primary key is (book_id, author_id), so the second insert
+// for the same author violated it — and silently drop the book from the
+// library with nothing in the UI to say why. It must now link once, at its
+// first position, not error and not lose the book.
+func TestCreateBookDedupesRepeatedAuthorName(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	bookID, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Repeated Credit"}, []string{"Adam Author", "Adam Author"})
+	if err != nil {
+		t.Fatalf("CreateBook with a repeated author name: %v", err)
+	}
+
+	books, err := db.ListBooks(ctx)
+	if err != nil {
+		t.Fatalf("ListBooks: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("ListBooks returned %d books, want 1", len(books))
+	}
+
+	authors, err := db.ListBookAuthors(ctx)
+	if err != nil {
+		t.Fatalf("ListBookAuthors: %v", err)
+	}
+	if got := authors[bookID]; len(got) != 1 || got[0] != "Adam Author" {
+		t.Errorf("authors[book] = %v, want exactly one link to Adam Author", got)
 	}
 }
 
@@ -533,19 +621,30 @@ func TestCreateBookWithFile(t *testing.T) {
 // even runs — which is itself part of what this proves: the whole
 // operation is one transaction, not "insert the book, then maybe insert
 // the file."
+// A duplicate author name in authorNames is deduplicated, not an error (see
+// TestCreateBookDedupesRepeatedAuthorName) — so this test's failure
+// trigger is a duplicate content_hash instead, which still fails the
+// transaction's very first statement (the UNIQUE index on
+// books.content_hash) and proves the same thing: a failure anywhere in
+// CreateBookWithFile's transaction leaves no partial book row behind.
 func TestCreateBookWithFileIsAtomic(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
+	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "First", Format: "epub"},
+		nil, "/first.epub", 100, mtime); err != nil {
+		t.Fatalf("CreateBookWithFile first: %v", err)
+	}
+
 	_, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Should Not Exist", Format: "epub"},
-		[]string{"Dup Author", "Dup Author"}, "/path.epub", 100, mtime)
+		nil, "/second.epub", 100, mtime)
 	if err == nil {
-		t.Fatal("CreateBookWithFile with a duplicate author: want an error, got nil")
+		t.Fatal("CreateBookWithFile with a duplicate content_hash: want an error, got nil")
 	}
 
 	var count int
-	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books WHERE content_hash = ?`, "hash-1").Scan(&count); err != nil {
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books WHERE title = ?`, "Should Not Exist").Scan(&count); err != nil {
 		t.Fatalf("count books: %v", err)
 	}
 	if count != 0 {

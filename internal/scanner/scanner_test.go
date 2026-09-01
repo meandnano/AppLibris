@@ -257,6 +257,42 @@ func TestScanExtractsPublisherAndPublishedDate(t *testing.T) {
 	}
 }
 
+const testOPFWithTwoCreators = `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Two Authors</dc:title>
+    <dc:creator>Neil Gaiman</dc:creator>
+    <dc:creator>Terry Pratchett</dc:creator>
+  </metadata>
+</package>`
+
+// The end-to-end path the author-order bug actually travels: internal/epub
+// preserves OPF document order into Metadata.Authors, and this proves that
+// order survives all the way through the scanner into ListBookAuthors,
+// rather than being reshuffled at the storage boundary.
+func TestScanPreservesAuthorOrderFromOPF(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUBWithOPF(t, filepath.Join(libDir, "book.epub"), testOPFWithTwoCreators)
+
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	book := bookByPath(t, ctx, db, "book.epub")
+	authors, err := db.ListBookAuthors(ctx)
+	if err != nil {
+		t.Fatalf("ListBookAuthors: %v", err)
+	}
+	got := authors[book.ID]
+	if len(got) != 2 || got[0] != "Neil Gaiman" || got[1] != "Terry Pratchett" {
+		t.Errorf("authors = %v, want [Neil Gaiman Terry Pratchett] — the OPF's own document order", got)
+	}
+}
+
 func TestScanExtractsCover(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
