@@ -30,7 +30,12 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   any `ORDER BY sort_title` is case-insensitive without a per-query clause.
   `book_files.book_id` and both `book_authors` foreign keys are `ON DELETE
   CASCADE`, so deleting a book takes its file locations and author links
-  with it (the author row itself survives). `authors.name` has a unique
+  with it (the author row itself survives). `book_authors` carries a
+  `position` so a book's authors keep the order its source file listed
+  them in — `author_id` order is first-sight-in-the-library order, which is
+  not the same thing once an author is shared between books. A name
+  credited twice in one file links once, at its first position, rather
+  than failing the insert. `authors.name` has a unique
   index. Every timestamp column is written as fixed-width UTC RFC 3339 text
   (`sqliteTimeLayout`/`formatTime` in `internal/storage`), so SQLite's own
   date functions and a plain `ORDER BY` both work on it.

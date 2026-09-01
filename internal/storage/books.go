@@ -107,13 +107,16 @@ func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
 	return books, rows.Err()
 }
 
-// ListBookAuthors returns every book's author names, keyed by book id.
+// ListBookAuthors returns every book's author names, keyed by book id, in
+// each book's own credited order — author_id order (first-sight-in-the-
+// library order) is not the same thing once an author is shared between
+// books, so position is what this orders by.
 func (db *DB) ListBookAuthors(ctx context.Context) (map[int64][]string, error) {
 	rows, err := db.read.QueryContext(ctx, `
 		SELECT book_authors.book_id, authors.name
 		FROM book_authors
 		JOIN authors ON authors.id = book_authors.author_id
-		ORDER BY book_authors.book_id`)
+		ORDER BY book_authors.book_id, book_authors.position`)
 	if err != nil {
 		return nil, err
 	}
@@ -177,8 +180,13 @@ func (db *DB) ListFilesUnder(ctx context.Context, prefix string) ([]BookFile, er
 }
 
 // createBookTx inserts a book and its authors, find-or-creating each author
-// by name and linking it via book_authors. It must be called from inside a
-// DB.Write callback — see DB.Write's contract.
+// by name and linking it via book_authors at its position in authorNames —
+// the order the source file credited them in, which is what ListBookAuthors
+// later returns them in. A name repeated in authorNames links once, at its
+// first position: book_authors' primary key is (book_id, author_id), so a
+// second link for the same author would fail the whole transaction, and a
+// book cannot sensibly hold one author at two positions anyway. It must be
+// called from inside a DB.Write callback — see DB.Write's contract.
 func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string) (int64, error) {
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO books (content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, cover_retry, format)
@@ -193,14 +201,24 @@ func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string)
 		return 0, err
 	}
 
+	seen := make(map[string]bool, len(authorNames))
+	position := 0
 	for _, name := range authorNames {
+		if seen[name] {
+			continue // a name credited twice is one author, at its first position
+		}
+		seen[name] = true
+
 		authorID, err := findOrCreateAuthor(ctx, tx, name)
 		if err != nil {
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO book_authors (book_id, author_id) VALUES (?, ?)`, id, authorID); err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO book_authors (book_id, author_id, position) VALUES (?, ?, ?)`,
+			id, authorID, position); err != nil {
 			return 0, err
 		}
+		position++
 	}
 	return id, nil
 }
