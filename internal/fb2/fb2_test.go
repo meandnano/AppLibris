@@ -154,6 +154,8 @@ func TestAuthorNameAssembly(t *testing.T) {
 		{"all three", fb2Author{FirstName: "Jane", MiddleName: "Q", LastName: "Doe"}, "Jane Q Doe"},
 		{"first and last only", fb2Author{FirstName: "Jane", LastName: "Doe"}, "Jane Doe"},
 		{"last only", fb2Author{LastName: "Doe"}, "Doe"},
+		{"nickname only, no real name given at all", fb2Author{Nickname: "Pen Name"}, "Pen Name"},
+		{"a real name present wins over a nickname", fb2Author{LastName: "Doe", Nickname: "Pen Name"}, "Doe"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -161,6 +163,62 @@ func TestAuthorNameAssembly(t *testing.T) {
 				t.Errorf("authorName(%+v) = %q, want %q", tt.a, got, tt.want)
 			}
 		})
+	}
+}
+
+const testFB2NicknameOnlyAuthorTemplate = `<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info>
+      <book-title>Nickname Only</book-title>
+      <author>
+        <nickname>Pen Name</nickname>
+      </author>
+    </title-info>
+  </description>
+</FictionBook>`
+
+// The FB2 schema explicitly permits a nickname-only author (no real name
+// given at all) — this must not be silently dropped.
+func TestReadMetadataNicknameOnlyAuthor(t *testing.T) {
+	path := buildTestFB2(t, testFB2NicknameOnlyAuthorTemplate)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if len(got.Authors) != 1 || got.Authors[0] != "Pen Name" {
+		t.Errorf("Authors = %v, want [Pen Name]", got.Authors)
+	}
+}
+
+const testFB2AnnotationMarkupTemplate = `<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info>
+      <book-title>Annotation Markup</book-title>
+      <annotation>
+        <p>A <emphasis>great</emphasis> book.</p>
+        <p><emphasis>Entire paragraph is emphasized.</emphasis></p>
+      </annotation>
+    </title-info>
+  </description>
+</FictionBook>`
+
+// Inline markup inside a <p> (emphasis, strong, ...) must not eat the text
+// it wraps — including when it wraps the paragraph's entire content, which
+// a naive plain-string field drops outright rather than just losing the
+// tag.
+func TestReadMetadataAnnotationRetainsTextInsideInlineMarkup(t *testing.T) {
+	path := buildTestFB2(t, testFB2AnnotationMarkupTemplate)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	want := "A great book.\n\nEntire paragraph is emphasized."
+	if got.Description != want {
+		t.Errorf("Description = %q, want %q", got.Description, want)
 	}
 }
 

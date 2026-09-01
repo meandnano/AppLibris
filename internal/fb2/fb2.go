@@ -41,17 +41,43 @@ type titleInfo struct {
 	BookTitle string      `xml:"book-title"`
 	Author    []fb2Author `xml:"author"`
 	Lang      string      `xml:"lang"`
-	// Annotation holds <p> elements, sometimes with nested emphasis. A
-	// plain string field collects all character data within an element,
-	// including inside child elements no struct field otherwise claims, so
-	// this drops inline markup by construction — correct here, since
-	// Metadata.Description is plain text and the template renders it as
-	// such.
+	// Annotation holds <p> elements, sometimes with nested markup
+	// (<emphasis>, <strong>, ...). paragraph's UnmarshalXML walks the raw
+	// token stream to collect character data wherever it occurs, including
+	// inside such child elements — a plain string field would not: Go's
+	// struct-based XML unmarshaling skips a child element entirely (tag
+	// and text both) when no field claims it, so "<p>A <emphasis>great</
+	// emphasis> book</p>" would come back "A  book" and a paragraph that's
+	// entirely markup would vanish outright. Confirmed by hand before
+	// fixing.
 	Annotation struct {
-		P []string `xml:"p"`
+		P []paragraph `xml:"p"`
 	} `xml:"annotation"`
 	Date      fb2Date   `xml:"date"`
 	Coverpage coverpage `xml:"coverpage"`
+}
+
+// paragraph is a <p>'s text with any inline markup tags stripped but their
+// enclosed text kept.
+type paragraph string
+
+func (p *paragraph) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	var sb strings.Builder
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			sb.Write(t)
+		case xml.EndElement:
+			if t.Name.Local == start.Name.Local {
+				*p = paragraph(sb.String())
+				return nil
+			}
+		}
+	}
 }
 
 // fb2Author carries the structured name FB2 gives — dc:creator in EPUB
@@ -59,11 +85,15 @@ type titleInfo struct {
 // authors table stores one name, so authorName below joins the non-empty
 // parts with a single space; this is the one place FB2 offers more
 // structure than the schema keeps, and a future browse-by-author feature
-// might want it back.
+// might want it back. Nickname is a separate, valid author form the FB2
+// schema permits on its own (a pen name, with no real name given at all)
+// — authorName falls back to it when first/middle/last assemble to
+// nothing, rather than silently dropping the author.
 type fb2Author struct {
 	FirstName  string `xml:"first-name"`
 	MiddleName string `xml:"middle-name"`
 	LastName   string `xml:"last-name"`
+	Nickname   string `xml:"nickname"`
 }
 
 // fb2Date carries title-info/date's value attribute and text content —
@@ -188,7 +218,10 @@ func authorName(a fb2Author) string {
 			parts = append(parts, trimmed)
 		}
 	}
-	return strings.Join(parts, " ")
+	if name := strings.Join(parts, " "); name != "" {
+		return name
+	}
+	return strings.TrimSpace(a.Nickname)
 }
 
 func authorNames(authors []fb2Author) []string {
@@ -203,10 +236,10 @@ func authorNames(authors []fb2Author) []string {
 
 // annotationText joins annotation paragraphs with a blank line, dropping
 // any that are empty after trimming.
-func annotationText(paragraphs []string) string {
+func annotationText(paragraphs []paragraph) string {
 	var trimmed []string
 	for _, p := range paragraphs {
-		if t := strings.TrimSpace(p); t != "" {
+		if t := strings.TrimSpace(string(p)); t != "" {
 			trimmed = append(trimmed, t)
 		}
 	}
