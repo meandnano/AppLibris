@@ -1,7 +1,8 @@
 # library
 
 A self-hosted ebook library server: browse a book collection and send titles
-to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
+to a Kindle by email. See [DESIGN.md](DESIGN.md) on `init` branch for the
+full design.
 
 ## Current implementation
 
