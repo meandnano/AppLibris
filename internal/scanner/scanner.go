@@ -35,10 +35,13 @@ var supportedExtensions = map[string]bool{
 
 // Scan walks libraryDir and, for every supported book file, brings the
 // index up to date: unchanged files are skipped via the path+size+mtime
-// cheap check, moved/renamed files update their existing row's location,
-// and genuinely new content becomes a new book, with its cover (if any)
-// extracted and stored under coversDir. A per-file error is logged and
-// counted rather than aborting the sweep.
+// cheap check; known content found at a path with no book_files row yet
+// gets one attached (covering a moved/renamed file and an additional
+// location for byte-identical content alike — the two are indistinguishable
+// from a single path's perspective, and both are recorded as extra
+// locations rather than picked apart); genuinely new content becomes a new
+// book, with its cover (if any) extracted and stored under coversDir. A
+// per-file error is logged and counted rather than aborting the sweep.
 func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Result, error) {
 	var result Result
 
@@ -71,11 +74,11 @@ func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, resul
 	size := info.Size()
 	mtime := info.ModTime()
 
-	existing, err := db.FindBookByPath(ctx, path)
+	bf, err := db.FindFileByPath(ctx, path)
 	if err != nil {
-		return fmt.Errorf("find by path: %w", err)
+		return fmt.Errorf("find file by path: %w", err)
 	}
-	if existing != nil && existing.FileSize == size && existing.ModifiedAt.Equal(mtime) {
+	if bf != nil && bf.FileSize == size && bf.ModifiedAt.Equal(mtime) {
 		result.Unchanged++
 		return nil
 	}
@@ -85,26 +88,42 @@ func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, resul
 		return fmt.Errorf("hash: %w", err)
 	}
 
-	if existing != nil && existing.ContentHash == hash {
-		if err := db.UpdateBookFileStat(ctx, existing.ID, size, mtime); err != nil {
+	book, err := db.FindBookByContentHash(ctx, hash)
+	if err != nil {
+		return fmt.Errorf("find book by content hash: %w", err)
+	}
+
+	if book != nil && bf != nil && bf.BookID == book.ID {
+		// same book, same path: content unchanged, only size/mtime drifted (e.g. touched)
+		if err := db.UpdateBookFileStat(ctx, bf.ID, size, mtime); err != nil {
 			return fmt.Errorf("update file stat: %w", err)
 		}
 		result.Unchanged++
 		return nil
 	}
 
-	byHash, err := db.FindBookByContentHash(ctx, hash)
-	if err != nil {
-		return fmt.Errorf("find by content hash: %w", err)
-	}
-	if byHash != nil {
-		if err := db.UpdateBookFileLocation(ctx, byHash.ID, path, size, mtime); err != nil {
-			return fmt.Errorf("update file location: %w", err)
+	if book == nil {
+		bookID, err := createBook(ctx, db, path, hash, coversDir)
+		if err != nil {
+			return fmt.Errorf("create book: %w", err)
 		}
-		result.Moved++
+		if _, err := db.UpsertBookFile(ctx, bookID, path, size, mtime); err != nil {
+			return fmt.Errorf("attach file location: %w", err)
+		}
+		result.New++
 		return nil
 	}
 
+	// known content at a path with no (or a stale) book_files row: a move,
+	// a rename, or an additional location for byte-identical content
+	if _, err := db.UpsertBookFile(ctx, book.ID, path, size, mtime); err != nil {
+		return fmt.Errorf("attach file location: %w", err)
+	}
+	result.Moved++
+	return nil
+}
+
+func createBook(ctx context.Context, db *storage.DB, path, hash, coversDir string) (int64, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	meta := extractMetadata(path, ext)
 
@@ -126,16 +145,9 @@ func scanFile(ctx context.Context, db *storage.DB, path, coversDir string, resul
 		ISBN:        meta.ISBN,
 		Description: meta.Description,
 		CoverPath:   coverPath,
-		FilePath:    path,
 		Format:      strings.TrimPrefix(ext, "."),
-		FileSize:    size,
-		ModifiedAt:  mtime,
 	}
-	if _, err := db.CreateBook(ctx, book, meta.Authors); err != nil {
-		return fmt.Errorf("create book: %w", err)
-	}
-	result.New++
-	return nil
+	return db.CreateBook(ctx, book, meta.Authors)
 }
 
 type bookMeta struct {
