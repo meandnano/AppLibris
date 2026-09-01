@@ -97,7 +97,7 @@ func runScan(db *storage.DB, libraryDir, coversDir string, missingGrace time.Dur
 
 	attrs := []any{"scanned", result.Scanned, "new", result.New, "moved", result.Moved,
 		"unchanged", result.Unchanged, "orphaned", result.Orphaned, "missing", result.Missing,
-		"pruned", result.Pruned, "errors", result.Errors}
+		"pruned", result.Pruned, "covers_regenerated", result.CoversRegenerated, "errors", result.Errors}
 	if result.Errors > 0 {
 		slog.Warn("scan complete", attrs...)
 	} else {

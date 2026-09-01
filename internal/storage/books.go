@@ -28,30 +28,33 @@ type Book struct {
 	ISBN          string
 	Description   string
 	CoverPath     string
+	CoverRetry    bool
 	Format        string
 	AddedAt       time.Time
 	ModifiedAt    time.Time
 	DerivedFrom   sql.NullInt64
 }
 
-// BookFile mirrors the book_files table: one row per physical location a
-// book's content is known to live at.
+// BookFile carries one physical location plus the owning book fields the scanner needs on its cheap path
 type BookFile struct {
-	ID           int64
-	BookID       int64
-	FilePath     string
-	FileSize     int64
-	ModifiedAt   time.Time
-	AddedAt      time.Time
-	MissingSince sql.NullTime
+	ID              int64
+	BookID          int64
+	FilePath        string
+	FileSize        int64
+	ModifiedAt      time.Time
+	AddedAt         time.Time
+	MissingSince    sql.NullTime
+	BookContentHash string
+	BookCoverPath   string
+	BookCoverRetry  bool
 }
 
-const bookColumns = `id, content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, format, added_at, modified_at, derived_from`
+const bookColumns = `id, content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, cover_retry, format, added_at, modified_at, derived_from`
 
 func scanBook(row *sql.Row) (*Book, error) {
 	var b Book
 	err := row.Scan(&b.ID, &b.ContentHash, &b.Title, &b.SortTitle, &b.Publisher, &b.PublishedDate,
-		&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.Format,
+		&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.CoverRetry, &b.Format,
 		&b.AddedAt, &b.ModifiedAt, &b.DerivedFrom)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -63,6 +66,7 @@ func scanBook(row *sql.Row) (*Book, error) {
 }
 
 const bookFileColumns = `id, book_id, file_path, file_size, modified_at, added_at, missing_since`
+const qualifiedBookFileColumns = `book_files.id, book_files.book_id, book_files.file_path, book_files.file_size, book_files.modified_at, book_files.added_at, book_files.missing_since`
 
 func scanBookFile(row *sql.Row) (*BookFile, error) {
 	var f BookFile
@@ -94,7 +98,7 @@ func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
 	for rows.Next() {
 		var b Book
 		if err := rows.Scan(&b.ID, &b.ContentHash, &b.Title, &b.SortTitle, &b.Publisher, &b.PublishedDate,
-			&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.Format,
+			&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.CoverRetry, &b.Format,
 			&b.AddedAt, &b.ModifiedAt, &b.DerivedFrom); err != nil {
 			return nil, err
 		}
@@ -127,10 +131,23 @@ func (db *DB) ListBookAuthors(ctx context.Context) (map[int64][]string, error) {
 	return authorsByBook, rows.Err()
 }
 
-// FindFileByPath returns the book_files row at the given path, or nil if none exists.
+// FindFileByPath returns the location and its owning book's cover fields, or nil if none exists
 func (db *DB) FindFileByPath(ctx context.Context, path string) (*BookFile, error) {
-	row := db.read.QueryRowContext(ctx, `SELECT `+bookFileColumns+` FROM book_files WHERE file_path = ?`, path)
-	return scanBookFile(row)
+	row := db.read.QueryRowContext(ctx, `
+		SELECT `+qualifiedBookFileColumns+`, books.content_hash, books.cover_path, books.cover_retry
+		FROM book_files
+		JOIN books ON books.id = book_files.book_id
+		WHERE book_files.file_path = ?`, path)
+	var f BookFile
+	err := row.Scan(&f.ID, &f.BookID, &f.FilePath, &f.FileSize, &f.ModifiedAt, &f.AddedAt, &f.MissingSince,
+		&f.BookContentHash, &f.BookCoverPath, &f.BookCoverRetry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &f, nil
 }
 
 // ListFilesUnder returns every book_files row whose path is nested under
@@ -164,10 +181,10 @@ func (db *DB) ListFilesUnder(ctx context.Context, prefix string) ([]BookFile, er
 // DB.Write callback — see DB.Write's contract.
 func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string) (int64, error) {
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO books (content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, format)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO books (content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, cover_retry, format)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		b.ContentHash, b.Title, b.SortTitle, b.Publisher, b.PublishedDate, b.Language,
-		b.ISBN, b.Description, b.CoverPath, b.Format)
+		b.ISBN, b.Description, b.CoverPath, b.CoverRetry, b.Format)
 	if err != nil {
 		return 0, err
 	}
@@ -387,6 +404,14 @@ func updateBookFileStatTx(ctx context.Context, tx *sql.Tx, fileID int64, size in
 func (db *DB) UpdateBookFileStat(ctx context.Context, fileID int64, size int64, mtime time.Time) error {
 	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		return updateBookFileStatTx(ctx, tx, fileID, size, mtime)
+	})
+}
+
+// UpdateBookCoverPath records the current derived cover location and clears any retry marker
+func (db *DB) UpdateBookCoverPath(ctx context.Context, bookID int64, path string) error {
+	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE books SET cover_path = ?, cover_retry = 0 WHERE id = ?`, path, bookID)
+		return err
 	})
 }
 
