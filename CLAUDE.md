@@ -89,3 +89,21 @@ Plans in `docs/plans/completed/` are immutable: never edit one after it's
 moved there, even to fix a mistake found later. If a problem is discovered
 in a completed plan, write a new plan for the fix instead of rewriting the
 old one.
+
+## Backlog
+
+`docs/backlog/` holds known work that is worth doing but isn't top
+priority — things that don't corrupt data, don't block another step, and
+aren't visibly wrong in the shipped app today. Anything that *does* meet
+one of those bars belongs in `docs/plans/` instead, not here.
+
+Backlog files use the same `<YYYYMMDDNN-description>.md` naming as plans,
+sharing one same-day `NN` sequence with them so a number identifies exactly
+one file across both directories.
+
+A backlog item is a **problem statement, not an approved plan**: it records
+what's wrong and why it was judged non-urgent, with only a sketch of a fix.
+It is never implemented directly. To act on one, first re-validate it
+against the current code — the finding may have been fixed in passing,
+changed shape, or become urgent since it was written — then write a real
+plan under `docs/plans/` and delete the backlog file in the same change.
