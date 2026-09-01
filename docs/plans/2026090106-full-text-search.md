@@ -37,7 +37,7 @@ In scope:
 
 - A `books_fts` FTS5 index over title, authors, description and ISBN,
   kept in sync inside the same write transactions that change those
-  fields, plus a backfill migration for existing databases.
+  fields.
 - `storage.SearchBooks` and a `service.SearchBooks` over it.
 - Vendoring htmx as an embedded static asset (no build step, per
   DESIGN.md's constraints).
@@ -56,7 +56,15 @@ Out of scope:
 - Re-parsing existing books for richer metadata — search indexes what the
   columns already hold.
 
-## Schema: three migrations
+## Schema: two migrations
+
+No backfill migration: the app has never been deployed, so there is no
+database whose contents predate the index. Any existing dev database is
+deleted and rescanned (the same answer `2026090103` gave for re-parsing),
+and after that every row ever inserted goes through `CreateBook*`, which
+syncs the index in the same transaction — the FTS table can never be
+behind by construction. Nothing here touches the existing migration
+files either; the step is purely additive.
 
 One statement per file, per the house migration rules
 (`YYYYMMDDNN_description.sql`, applied in filename order, each in its own
@@ -98,17 +106,6 @@ transaction — a trigger body is one statement):
    `PruneMissingFiles`), and every future path dies for free too. Insert
    and update stay in Go — see the next section.
 
-3. `backfill_books_fts.sql` — one `INSERT INTO books_fts (rowid, title,
-   authors, description, isbn) SELECT b.id, b.title,
-   coalesce(group_concat(a.name, ' '), ''), b.description, b.isbn FROM
-   books b LEFT JOIN book_authors ba ON ba.book_id = b.id LEFT JOIN
-   authors a ON a.id = ba.author_id GROUP BY b.id`. On a fresh database
-   this is a no-op; on the real one it indexes everything already
-   scanned, so search works immediately on deploy without a rescan.
-   `group_concat` order is unspecified, which is fine — tokens are
-   matched bag-of-words, author display order doesn't survive
-   tokenization anyway.
-
 ## Storage: sync in Go, not triggers
 
 Insert/update sync does **not** use triggers. The searchable text spans
@@ -121,10 +118,13 @@ single `DB.Write` — fits better and is testable.
 Add to `internal/storage`:
 
 - `syncBookFTSTx(ctx, tx, bookID)` (package-internal): `DELETE FROM
-  books_fts WHERE rowid = ?` then `INSERT … SELECT` the same join as the
-  backfill, scoped to one book. Recompute-from-scratch, so there is no
-  drift between "what changed" bookkeeping and reality, and the same
-  helper serves create and every future metadata edit.
+  books_fts WHERE rowid = ?` then `INSERT … SELECT b.id, b.title,
+  coalesce(group_concat(a.name, ' '), ''), b.description, b.isbn` over
+  the `books`/`book_authors`/`authors` left join, scoped to one book
+  (`group_concat` order is unspecified, which is fine — tokens match
+  bag-of-words). Recompute-from-scratch, so there is no drift between
+  "what changed" bookkeeping and reality, and the same helper serves
+  create and every future metadata edit.
 - Call it inside `CreateBook` and `CreateBookWithFile`, after
   `createBookTx` **and** the author-linking helper have both run — the
   FTS row must see the authors.
@@ -268,15 +268,6 @@ storage because sanitization runs first.
   (`ReassignFileAndPruneOrphan` orphaning, `PruneMissingFiles`) leaves no
   FTS row behind — assert via a direct `books_fts` count, since the
   trigger is the mechanism under test.
-- Backfill: insert books through the current API, verify a fresh
-  `SearchBooks` finds them (exercises that migration order — table,
-  trigger, backfill — composes with rows created before this step only
-  implicitly; a second test opening a database file created without the
-  FTS migrations is not possible through the public API, so the backfill
-  statement itself is covered by a test that runs it against seeded
-  tables — acceptable to fold into the migration-application test
-  pattern if one exists, otherwise assert post-`Open` searchability).
-
 Sanitizer (pure unit tests, no DB): quotes, `AND`/`OR`/`NOT`, parens,
 `-`, `*`, lone whitespace, empty string, embedded `"` doubling — none may
 produce an expression FTS5 rejects (drive the produced expression through
@@ -302,7 +293,8 @@ scanner-created books enter the index through the composed transaction.
 
 - `internal/storage` bullet: the FTS5 index (`books_fts`), the sync
   contract (delete by trigger, insert/update via `syncBookFTSTx` inside
-  the owning write transaction, backfilled by migration), and
+  the owning write transaction; no backfill — every row is created
+  through the synced path), and
   `SearchBooks`.
 - `internal/service`: `SearchBooks`, blank-query semantics.
 - `internal/web`: htmx vendored; search-as-you-type on the library page;
@@ -314,9 +306,9 @@ scanner-created books enter the index through the composed transaction.
 ## Verification
 
 - `go build ./...`, `go vet ./...`, `go test -count=1 ./...` clean.
-- Manual, against the real library: run the server, confirm the deployed
-  database backfills on first start (log timing if it's not instant);
-  type in the box — results narrow per keystroke after the debounce, a
+- Manual, against the real library: delete the dev database, start the
+  server (fresh migrations plus a full rescan populate the index); type
+  in the box — results narrow per keystroke after the debounce, a
   diacritic-less query finds accented authors, clearing the box restores
   the full grid, a nonsense query shows the no-results state, and the
   same `?q=` URL pasted into a fresh tab renders the full filtered page.
