@@ -6,8 +6,11 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
 ## Current implementation
 
 - `internal/storage` — SQLite storage layer (`modernc.org/sqlite`). WAL mode,
-  foreign keys on. A read pool (`DB.Read()`) and a single-connection write
-  pool (`DB.Write(ctx, fn)`) serialize writes without a hand-rolled
+  foreign keys on. A read pool (`DB.Read()`), bounded to `readPoolSize` (8)
+  open and idle connections so concurrency above `database/sql`'s default
+  idle-2 ceiling reuses pooled connections instead of opening and
+  discarding a fresh one per request, and a single-connection write pool
+  (`DB.Write(ctx, fn)`) serialize writes without a hand-rolled
   goroutine/channel. Each exported write method owns one transaction; a
   multi-step atomic write composes the package-internal `…Tx` helpers (e.g.
   `createBookTx`) inside a single `DB.Write` call instead of calling two

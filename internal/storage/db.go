@@ -18,6 +18,17 @@ import (
 // carries another Write's in-progress marker — see Write's doc comment.
 var ErrNestedWrite = errors.New("storage: nested DB.Write")
 
+// readPoolSize bounds the read connection pool — see the comment on
+// SetMaxOpenConns in Open for why. A constant rather than runtime.NumCPU:
+// SQLite reads are I/O-bound against the page cache, not CPU-bound, so
+// sizing this to the host's core count would vary the pool between a
+// laptop and the target box for no reason connected to what it does. Not
+// 1 or 2: the scanner's reconcileMissing reads through this same pool, and
+// too small a ceiling would let a sweep's read block page renders even
+// though WAL mode means readers never block each other at the SQLite
+// level — only the pool itself would serialize them.
+const readPoolSize = 8
+
 // DB wraps a single SQLite file with two connection pools sharing it: a
 // multi-connection read pool, and a single-connection write pool. WAL mode
 // lets reads proceed concurrently with an in-flight write. Restricting the
@@ -43,6 +54,17 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open read pool: %w", err)
 	}
+	// The write pool is pinned to one connection to serialise writes. The
+	// read pool is bounded for a different reason: database/sql defaults to
+	// an unlimited ceiling with only 2 idle connections, so any concurrency
+	// above two opens connections, uses them once and discards them —
+	// measured at 49 discarded across 200 page renders at concurrency 4,
+	// and each discard is a fresh SQLite open plus pragma application.
+	// Matching max and idle keeps connections in the pool instead. This is
+	// about predictability and a bounded page-cache footprint, not speed:
+	// the wall-clock difference is inside the noise at this scale.
+	read.SetMaxOpenConns(readPoolSize)
+	read.SetMaxIdleConns(readPoolSize)
 
 	write, err := sql.Open("sqlite", dsn)
 	if err != nil {
