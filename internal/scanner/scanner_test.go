@@ -366,3 +366,63 @@ func TestScanTracksMultipleLocations(t *testing.T) {
 		t.Errorf("copy-b row changed across rescans: before=%+v after=%+v (%v)", fileB, fileB2, err)
 	}
 }
+
+func TestSortTitle(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{"leading The", "The Hobbit", "hobbit"},
+		{"leading A", "A Wizard of Earthsea", "wizard of earthsea"},
+		{"leading An", "An Ideal Husband", "ideal husband"},
+		{"article case is ignored", "THE GREAT GATSBY", "great gatsby"},
+		{"word merely starting with an article", "Theory of Everything", "theory of everything"},
+		{"another near-miss", "Android Dreams", "android dreams"},
+		{"already lowercase", "apple book", "apple book"},
+		{"mixed case folds", "Zebra Book", "zebra book"},
+		{"surrounding whitespace", "  Spaced Out  ", "spaced out"},
+		{"only an article", "A", "a"},
+		{"article with nothing after it", "The ", "the"},
+		{"only whitespace", "   ", ""},
+		{"leading digits are kept", "1984", "1984"},
+		{"leading punctuation is kept", "'Salem's Lot", "'salem's lot"},
+		{"one article only", "The A Team", "a team"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sortTitle(tt.title); got != tt.want {
+				t.Errorf("sortTitle(%q) = %q, want %q", tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScanDerivesSortTitle(t *testing.T) {
+	libraryDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libraryDir, "hobbit.epub"), "The Hobbit", "J.R.R. Tolkien", nil)
+
+	if _, err := Scan(ctx, db, libraryDir, coversDir); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	books, err := db.ListBooks(ctx)
+	if err != nil {
+		t.Fatalf("ListBooks: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("ListBooks returned %d books, want 1", len(books))
+	}
+	if books[0].Title != "The Hobbit" {
+		t.Errorf("Title = %q, want %q", books[0].Title, "The Hobbit")
+	}
+	if books[0].SortTitle != "hobbit" {
+		t.Errorf("SortTitle = %q, want %q — the display title must be kept intact "+
+			"while the sort form drops the article", books[0].SortTitle, "hobbit")
+	}
+}

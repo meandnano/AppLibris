@@ -2,7 +2,7 @@ CREATE TABLE books (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     content_hash    TEXT NOT NULL,
     title           TEXT NOT NULL,
-    sort_title      TEXT NOT NULL,
+    sort_title      TEXT NOT NULL COLLATE NOCASE,
     publisher       TEXT NOT NULL DEFAULT '',
     published_date  TEXT NOT NULL DEFAULT '',
     language        TEXT NOT NULL DEFAULT '',
