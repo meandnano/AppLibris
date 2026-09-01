@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -27,6 +28,8 @@ type Result struct {
 	Moved     int
 	Unchanged int
 	Orphaned  int
+	Missing   int
+	Pruned    int
 	Errors    int
 }
 
@@ -50,17 +53,30 @@ var supportedExtensions = map[string]bool{
 // directory WalkDir can't read: its subtree is skipped, not the rest of
 // the library. Only a failure on libraryDir itself (missing, unmounted) is
 // fatal, since that must not look like an empty library.
-func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Result, error) {
+//
+// After a clean walk, Scan reconciles book_files rows that weren't seen:
+// under a subtree that was itself walked cleanly, a row not seen this
+// sweep and reconfirmed absent (via os.Lstat, every sweep, whether or not
+// already marked) is marked missing; a row seen again has any mark
+// cleared. A row is only actually deleted once it's both past missingGrace
+// and reconfirmed absent this exact sweep — along with any book that
+// leaves with no locations — see reconcileMissing for the full set of
+// guards that keep an unmounted volume, a skipped subtree, or a stale
+// confirmation from ever being read as "this file is gone."
+func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, missingGrace time.Duration) (Result, error) {
 	var result Result
+	seen := make(map[string]bool)
+	var skippedDirs []string
 
-	err := filepath.WalkDir(libraryDir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(libraryDir, func(walkPath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// a directory we can't read costs us its subtree, not the sweep —
 			// anything else (including an error on the root itself) is fatal;
 			// d is nil when the error comes from os.Lstat on the root itself
-			if d != nil && d.IsDir() && path != libraryDir {
-				slog.Warn("skipping unreadable directory", "path", path, "error", err)
+			if d != nil && d.IsDir() && walkPath != libraryDir {
+				slog.Warn("skipping unreadable directory", "path", walkPath, "error", err)
 				result.Errors++
+				skippedDirs = append(skippedDirs, relSlash(libraryDir, walkPath))
 				return fs.SkipDir
 			}
 			return err
@@ -70,8 +86,11 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Re
 		}
 
 		result.Scanned++
-		if err := scanFile(ctx, db, libraryDir, path, coversDir, &result); err != nil {
-			slog.Warn("scan file failed", "path", path, "error", err)
+		if rel := relSlash(libraryDir, walkPath); rel != "" {
+			seen[rel] = true
+		}
+		if err := scanFile(ctx, db, libraryDir, walkPath, coversDir, &result); err != nil {
+			slog.Warn("scan file failed", "path", walkPath, "error", err)
 			result.Errors++
 		}
 		return nil
@@ -79,7 +98,130 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string) (Re
 	if err != nil {
 		return result, fmt.Errorf("walk %s: %w", libraryDir, err)
 	}
+
+	reconcileMissing(ctx, db, libraryDir, skippedDirs, seen, missingGrace, &result)
+
 	return result, nil
+}
+
+// relSlash returns path relative to libraryDir, slash-separated — the form
+// book_files.file_path is stored in. Empty on error, which callers treat
+// as "don't touch this path" rather than a hard failure; scanFile
+// independently recomputes and reports the same failure through the
+// per-file error path, so nothing is silently dropped.
+func relSlash(libraryDir, path string) string {
+	rel, err := filepath.Rel(libraryDir, path)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+// reconcileMissing marks, clears, and prunes book_files rows once a walk
+// completes. Nothing here runs if the walk found no files at all — a
+// successfully-mounted-but-empty directory is indistinguishable from a
+// volume that mounted empty, and the cost of getting that wrong is the
+// whole index, so an apparently-empty library prunes nothing and only
+// warns.
+//
+// skippedDirs are the directories this sweep couldn't read (see Scan); a
+// book_files row at or under one of them is left alone entirely, whether
+// or not it was previously marked, since not being able to look isn't
+// evidence one way or the other.
+//
+// Every unseen, non-excluded row is re-checked with os.Lstat this same
+// sweep — including one already marked missing from an earlier sweep.
+// Deletion eligibility (past missingGrace) is necessary but never
+// sufficient on its own: only a row this exact sweep's Lstat confirms
+// fs.ErrNotExist for is ever handed to PruneMissingFiles, so a path whose
+// failure mode changes while it waits out its grace period (say, from
+// ErrNotExist to EACCES, or to a directory sitting where the file used to
+// be) can never be deleted on the strength of a confirmation that's since
+// gone stale.
+func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, skippedDirs []string, seen map[string]bool, missingGrace time.Duration, result *Result) {
+	if result.Scanned == 0 {
+		slog.Warn("library appeared empty, skipping missing-file reconciliation", "library_dir", libraryDir)
+		return
+	}
+
+	all, err := db.ListFilesUnder(ctx, "")
+	if err != nil {
+		slog.Warn("list files for missing-file reconciliation failed", "error", err)
+		return
+	}
+
+	now := time.Now()
+	cutoff := now.Add(-missingGrace)
+
+	var toMark, toClear, toPrune []int64
+	for _, f := range all {
+		if underAny(f.FilePath, skippedDirs) {
+			continue
+		}
+		if seen[f.FilePath] {
+			if f.MissingSince.Valid {
+				toClear = append(toClear, f.ID)
+			}
+			continue
+		}
+
+		// Not seen this sweep, in a subtree we did read successfully — but
+		// os.Lstat directly on the path, not just absence from the walk, is
+		// what decides "gone" versus "couldn't tell": only ErrNotExist
+		// counts, and it's checked here every sweep regardless of whether
+		// the row is already marked, precisely so a stale confirmation can
+		// never carry a row all the way to deletion on its own.
+		absPath := filepath.Join(libraryDir, filepath.FromSlash(f.FilePath))
+		_, statErr := os.Lstat(absPath)
+		if statErr == nil || !errors.Is(statErr, fs.ErrNotExist) {
+			if statErr != nil {
+				slog.Warn("could not confirm missing file", "path", absPath, "error", statErr)
+			}
+			continue
+		}
+
+		if !f.MissingSince.Valid {
+			toMark = append(toMark, f.ID)
+		} else if f.MissingSince.Time.Before(cutoff) {
+			toPrune = append(toPrune, f.ID)
+		}
+	}
+
+	if len(toMark) > 0 {
+		if err := db.SetFilesMissing(ctx, toMark, now); err != nil {
+			slog.Warn("mark missing files failed", "error", err)
+		} else {
+			result.Missing = len(toMark)
+		}
+	}
+	if len(toClear) > 0 {
+		if err := db.ClearFilesMissing(ctx, toClear); err != nil {
+			slog.Warn("clear missing files failed", "error", err)
+		}
+	}
+	if len(toPrune) == 0 {
+		return
+	}
+
+	files, books, err := db.PruneMissingFiles(ctx, toPrune)
+	if err != nil {
+		slog.Warn("prune missing files failed", "error", err)
+		return
+	}
+	result.Pruned = files
+	if files > 0 || books > 0 {
+		slog.Info("pruned missing files", "files", files, "books", books)
+	}
+}
+
+// underAny reports whether relPath is nested under any of prefixes.
+func underAny(relPath string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if relPath == p || strings.HasPrefix(relPath, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) error {

@@ -684,3 +684,254 @@ func TestReassignFileAndPruneOrphanCascadesAuthorLinkButKeepsAuthor(t *testing.T
 		t.Errorf("authors row for %q after orphaning = %d, want 1 (the author itself must survive)", "Jane Doe", authorCount)
 	}
 }
+
+func TestSetFilesMissingDoesNotRestartAnAlreadyMissingRowsTimer(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime); err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	f, err := db.FindFileByPath(ctx, "/x.epub")
+	if err != nil || f == nil {
+		t.Fatalf("FindFileByPath: %+v, %v", f, err)
+	}
+
+	first := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	if err := db.SetFilesMissing(ctx, []int64{f.ID}, first); err != nil {
+		t.Fatalf("SetFilesMissing first: %v", err)
+	}
+
+	later := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	if err := db.SetFilesMissing(ctx, []int64{f.ID}, later); err != nil {
+		t.Fatalf("SetFilesMissing second: %v", err)
+	}
+
+	updated, err := db.FindFileByPath(ctx, "/x.epub")
+	if err != nil || updated == nil {
+		t.Fatalf("FindFileByPath: %+v, %v", updated, err)
+	}
+	if !updated.MissingSince.Valid {
+		t.Fatal("MissingSince = invalid, want set")
+	}
+	if !updated.MissingSince.Time.Equal(first) {
+		t.Errorf("MissingSince = %v, want the first mark %v, not the later one", updated.MissingSince.Time, first)
+	}
+}
+
+func TestClearFilesMissing(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime); err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	f, err := db.FindFileByPath(ctx, "/x.epub")
+	if err != nil || f == nil {
+		t.Fatalf("FindFileByPath: %+v, %v", f, err)
+	}
+
+	if err := db.SetFilesMissing(ctx, []int64{f.ID}, time.Now()); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+	if err := db.ClearFilesMissing(ctx, []int64{f.ID}); err != nil {
+		t.Fatalf("ClearFilesMissing: %v", err)
+	}
+
+	cleared, err := db.FindFileByPath(ctx, "/x.epub")
+	if err != nil || cleared == nil {
+		t.Fatalf("FindFileByPath: %+v, %v", cleared, err)
+	}
+	if cleared.MissingSince.Valid {
+		t.Errorf("MissingSince = %v, want cleared", cleared.MissingSince)
+	}
+}
+
+func TestListFilesUnder(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-root", Title: "Root Book", Format: "epub"}, nil, "root.epub", 100, mtime); err != nil {
+		t.Fatalf("CreateBookWithFile root: %v", err)
+	}
+	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-sub", Title: "Sub Book", Format: "epub"}, nil, "sub/book.epub", 100, mtime); err != nil {
+		t.Fatalf("CreateBookWithFile sub: %v", err)
+	}
+	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-sibling", Title: "Sibling Book", Format: "epub"}, nil, "subsequent.epub", 100, mtime); err != nil {
+		t.Fatalf("CreateBookWithFile sibling: %v", err)
+	}
+
+	all, err := db.ListFilesUnder(ctx, "")
+	if err != nil {
+		t.Fatalf("ListFilesUnder(\"\"): %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("ListFilesUnder(\"\") = %d rows, want 3", len(all))
+	}
+
+	underSub, err := db.ListFilesUnder(ctx, "sub")
+	if err != nil {
+		t.Fatalf("ListFilesUnder(sub): %v", err)
+	}
+	if len(underSub) != 1 || underSub[0].FilePath != "sub/book.epub" {
+		t.Errorf("ListFilesUnder(sub) = %+v, want just sub/book.epub (not the sibling %q which merely shares a string prefix)", underSub, "subsequent.epub")
+	}
+}
+
+// PruneMissingFiles does no filtering of its own — the caller (reconcile-
+// Missing, in internal/scanner) is the one that decides what's eligible,
+// via age and a current Lstat reconfirmation. This test only pins the
+// mechanical contract: it deletes exactly the rows named, and nothing else,
+// regardless of how long other rows have been marked.
+func TestPruneMissingFilesDeletesOnlyTheGivenIDs(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	setup := func(path, hash string) int64 {
+		if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: hash, Title: path, Format: "epub"}, nil, path, 100, mtime); err != nil {
+			t.Fatalf("CreateBookWithFile %s: %v", path, err)
+		}
+		f, err := db.FindFileByPath(ctx, path)
+		if err != nil || f == nil {
+			t.Fatalf("FindFileByPath %s: %+v, %v", path, f, err)
+		}
+		return f.ID
+	}
+
+	targetID := setup("target.epub", "hash-target")
+	untouchedID := setup("untouched.epub", "hash-untouched")
+
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := db.SetFilesMissing(ctx, []int64{targetID, untouchedID}, old); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+
+	files, books, err := db.PruneMissingFiles(ctx, []int64{targetID})
+	if err != nil {
+		t.Fatalf("PruneMissingFiles: %v", err)
+	}
+	if files != 1 || books != 1 {
+		t.Errorf("PruneMissingFiles = files=%d books=%d, want files=1 books=1 (only target.epub)", files, books)
+	}
+
+	if f, err := db.FindFileByPath(ctx, "target.epub"); err != nil || f != nil {
+		t.Errorf("target.epub survived pruning: %+v, %v", f, err)
+	}
+	// untouched.epub is just as overdue as target.epub was, but wasn't
+	// named — PruneMissingFiles must not decide on its own that it also
+	// qualifies.
+	if f, err := db.FindFileByPath(ctx, "untouched.epub"); err != nil || f == nil {
+		t.Errorf("untouched.epub was pruned despite not being in the given ID list: %+v, %v", f, err)
+	}
+}
+
+func TestPruneMissingFilesDeletesBookOnlyWhenLastLocationGoes(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Two Locations", Format: "epub"}, nil, "a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, bookID, "b.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile second location: %v", err)
+	}
+
+	fileA, err := db.FindFileByPath(ctx, "a.epub")
+	if err != nil || fileA == nil {
+		t.Fatalf("FindFileByPath a.epub: %+v, %v", fileA, err)
+	}
+	fileB, err := db.FindFileByPath(ctx, "b.epub")
+	if err != nil || fileB == nil {
+		t.Fatalf("FindFileByPath b.epub: %+v, %v", fileB, err)
+	}
+
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Losing one of two locations must not delete the book.
+	if err := db.SetFilesMissing(ctx, []int64{fileA.ID}, old); err != nil {
+		t.Fatalf("SetFilesMissing a: %v", err)
+	}
+	files, books, err := db.PruneMissingFiles(ctx, []int64{fileA.ID})
+	if err != nil {
+		t.Fatalf("PruneMissingFiles (one of two): %v", err)
+	}
+	if files != 1 || books != 0 {
+		t.Errorf("PruneMissingFiles (one of two) = files=%d books=%d, want files=1 books=0", files, books)
+	}
+	var bookCount int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books WHERE id = ?`, bookID).Scan(&bookCount); err != nil {
+		t.Fatalf("count book: %v", err)
+	}
+	if bookCount != 1 {
+		t.Errorf("book survived losing one of two locations = %d rows, want 1", bookCount)
+	}
+
+	// Losing the last remaining location must delete the book too.
+	if err := db.SetFilesMissing(ctx, []int64{fileB.ID}, old); err != nil {
+		t.Fatalf("SetFilesMissing b: %v", err)
+	}
+	files, books, err = db.PruneMissingFiles(ctx, []int64{fileB.ID})
+	if err != nil {
+		t.Fatalf("PruneMissingFiles (last location): %v", err)
+	}
+	if files != 1 || books != 1 {
+		t.Errorf("PruneMissingFiles (last location) = files=%d books=%d, want files=1 books=1", files, books)
+	}
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books WHERE id = ?`, bookID).Scan(&bookCount); err != nil {
+		t.Fatalf("count book: %v", err)
+	}
+	if bookCount != 0 {
+		t.Errorf("book survived losing its last location = %d rows, want 0", bookCount)
+	}
+}
+
+// A single DELETE ... IN (...) statement can't take an unbounded number of
+// bound parameters (SQLite's SQLITE_MAX_VARIABLE_NUMBER), so a large overdue
+// batch must be chunked internally rather than handed to SQL as one list.
+// This exercises well past pruneMissingFilesChunkSize to prove chunking
+// doesn't drop or double-count rows at a chunk boundary.
+func TestPruneMissingFilesHandlesMoreIDsThanOneSQLChunk(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	const total = pruneMissingFilesChunkSize + 200
+	var fileIDs []int64
+	for i := 0; i < total; i++ {
+		path := fmt.Sprintf("book-%d.epub", i)
+		if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: fmt.Sprintf("hash-%d", i), Title: path, Format: "epub"}, nil, path, 100, mtime); err != nil {
+			t.Fatalf("CreateBookWithFile %s: %v", path, err)
+		}
+		f, err := db.FindFileByPath(ctx, path)
+		if err != nil || f == nil {
+			t.Fatalf("FindFileByPath %s: %+v, %v", path, f, err)
+		}
+		fileIDs = append(fileIDs, f.ID)
+	}
+	if err := db.SetFilesMissing(ctx, fileIDs, old); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+
+	files, books, err := db.PruneMissingFiles(ctx, fileIDs)
+	if err != nil {
+		t.Fatalf("PruneMissingFiles: %v", err)
+	}
+	if files != total || books != total {
+		t.Errorf("PruneMissingFiles = files=%d books=%d, want files=%d books=%d", files, books, total, total)
+	}
+
+	var remaining int
+	if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM book_files`).Scan(&remaining); err != nil {
+		t.Fatalf("count book_files: %v", err)
+	}
+	if remaining != 0 {
+		t.Errorf("book_files rows remaining = %d, want 0", remaining)
+	}
+}

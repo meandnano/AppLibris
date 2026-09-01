@@ -67,9 +67,34 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   (slash-separated), so the index survives the library being mounted at a
   different absolute path (dev's `./library` versus a container's
   `/library`); a directory `WalkDir` can't read skips its subtree and
-  counts an error rather than aborting the rest of the sweep. Missing-file
-  handling (a `book_files` row whose path no longer exists on disk) is not
-  implemented — such a row is simply left stale.
+  counts an error rather than aborting the rest of the sweep. A
+  `book_files` row whose path goes missing is reconciled in two phases:
+  first marked (`missing_since`, via `storage.SetFilesMissing`) rather than
+  deleted outright, then actually deleted (`storage.PruneMissingFiles`,
+  taking its book with it via the same orphan-pruning path as a reassigned
+  file if it was the book's last location) once it's stayed missing past
+  the `MISSING_GRACE` duration — a row that reappears before then has its
+  mark cleared (`storage.ClearFilesMissing`) instead. `storage.
+  PruneMissingFiles` does no filtering of its own (no age check, no path
+  exclusion) — it deletes exactly the file IDs it's given; every guard
+  below lives in the scanner, the only place with access to live
+  filesystem state, and decides that ID list. Guards that keep this from
+  misreading a transient failure as deletion: a row is only eligible if
+  `os.Lstat` on it fails with `fs.ErrNotExist` specifically (any other
+  error, e.g. a path component that's no longer a directory, only logs a
+  warning), and this check runs fresh *every* sweep — including for a row
+  already marked from an earlier sweep — so a row whose failure mode
+  later changes (`ErrNotExist` to `EACCES`, say, or to a directory now
+  sitting at that path) can never be deleted on the strength of a
+  confirmation that's since gone stale; a row under a directory the sweep
+  couldn't read *this* sweep is left untouched, at both mark and prune
+  time (`Scan` tracks these as `skippedDirs`, a negative list — `WalkDir`'s
+  callback only ever reports directory-read failure as a second,
+  error-bearing invocation, so a positive "cleanly read" list isn't
+  obtainable from the API); and reconciliation is skipped entirely if the
+  sweep visited zero files (an unmounted volume can present as an empty
+  directory, so seeing nothing is not evidence that everything is gone),
+  logged at Warn.
 - `internal/service` — the layer beneath HTTP handlers DESIGN.md's
   "Layering for a future API" calls for, so a future `/api/v1` can reuse it
   as a second thin transport alongside `internal/web`. One method so far:
@@ -91,8 +116,9 @@ to a Kindle by email. See [DESIGN.md](DESIGN.md) for the full design.
   `./data/library.db`), runs a synchronous full scan of `LIBRARY_DIR`
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
   before serving, then reruns it on a `SCAN_INTERVAL` timer (default `15m`)
-  in the background. Serves `/healthz` and mounts `internal/web`'s routes
-  at `/`, on `ADDR` (default `:8080`).
+  in the background, with missing-file grace period `MISSING_GRACE`
+  (default `24h`). Serves `/healthz` and mounts `internal/web`'s routes at
+  `/`, on `ADDR` (default `:8080`).
 - Logging goes through `log/slog` (a text handler on stderr), leveled via
   the `LOG_LEVEL` env var (default `INFO`) set once in `cmd/server` and
   used everywhere else via `slog`'s package-level functions against that
