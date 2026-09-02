@@ -15,6 +15,15 @@
   --accent: #8a5a3c;
   --accent-soft: #f3ebe4;
 
+  /* Status colours: used only for the send control's state, per
+     TOKENS.md — status is the only place colour carries meaning besides
+     the accent, so nothing else in the UI may reach for these. Queued and
+     sending read as --fg-muted/--accent instead; there's no separate pair
+     for them. */
+  --ok: #3f6b52;
+  --err: #9a3b34;
+  --err-soft: #f7ece9;
+
   --serif: "Newsreader", Georgia, "Times New Roman", serif;
   --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -35,6 +44,9 @@
     --rule-faint: #262322;
     --accent: #c98a5f;
     --accent-soft: #2b211a;
+    --ok: #7fae90;
+    --err: #d98b81;
+    --err-soft: #2c1e1c;
   }
 }
 
@@ -49,6 +61,9 @@
   --rule-faint: #262322;
   --accent: #c98a5f;
   --accent-soft: #2b211a;
+  --ok: #7fae90;
+  --err: #d98b81;
+  --err-soft: #2c1e1c;
 }
 
 *,
@@ -605,8 +620,184 @@ a:hover {
   font-style: italic;
 }
 
-.detail__send:empty {
+/* ---------- send control (plate 06) ---------- */
+
+/* One block, min-height held constant so the page never jumps as it
+   swaps between idle/sending/delivered/failed. */
+.send {
+  border: 1px solid var(--rule);
+  background: var(--bg-sunken);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 148px;
+  max-width: 560px;
+}
+
+.send__disabled {
+  margin: 0;
+  color: var(--fg-faint);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.send__form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.send__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.send__picker {
+  flex: 1;
+  min-width: 220px;
+  border: 1px solid var(--rule);
+  background: var(--bg-raised);
+  color: var(--fg);
+  padding: 10px 12px;
+  font-family: var(--sans);
+  font-size: 13.5px;
+}
+
+.send__picker:disabled {
+  opacity: 0.5;
+}
+
+.send__button {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 11px 20px;
+  border: 1px solid var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.send__button--primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.send__button--secondary {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--fg-muted);
+}
+
+.send__button:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.send__spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--accent-soft);
+  border-top-color: currentcolor;
+  border-radius: 50%;
+  animation: search-spin 0.7s linear infinite;
+}
+
+.send__hint {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.send__error {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--err);
+}
+
+.send__add summary {
+  cursor: pointer;
+  color: var(--fg-faint);
+  font-size: 12.5px;
+  list-style: none;
+}
+
+.send__add summary::-webkit-details-marker {
   display: none;
+}
+
+.send__add-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.send__add-input {
+  flex: 1;
+  min-width: 180px;
+  border: 1px solid var(--rule);
+  background: var(--bg-raised);
+  color: var(--fg);
+  padding: 9px 11px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.send__add-input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.send__status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--rule);
+}
+
+.send__status-label {
+  font-size: 13.5px;
+}
+
+.send__status-detail {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.send__status--pending {
+  border-left-color: var(--accent);
+}
+
+.send__status--pending .send__status-label {
+  color: var(--accent);
+}
+
+.send__status--ok {
+  border-left-color: var(--ok);
+}
+
+.send__status--ok .send__status-label {
+  color: var(--ok);
+}
+
+.send__status--err {
+  border-left-color: var(--err);
+  background: var(--err-soft);
+}
+
+.send__status--err .send__status-label {
+  color: var(--err);
 }
 
 .detail__description {

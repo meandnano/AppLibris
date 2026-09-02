@@ -81,6 +81,48 @@ full design.
   loads the whole library's author map, right for the grid page and wrong
   for a single book). `CountBooks` is a plain `count(*)`, independent of
   any search filter.
+- `recipients` and `send_log` (`internal/storage/sends.go`) back
+  send-to-Kindle. `recipients.address` is `COLLATE NOCASE` with a unique
+  index on it — the same arrangement `books.sort_title` uses — so
+  `CreateRecipient` (`INSERT … ON CONFLICT DO NOTHING` then a select) is
+  idempotent across case: re-adding a known address returns the existing
+  row rather than erroring, since that's a user slip, not a failure.
+  `send_log.recipient_address` is a plain string, not a foreign key
+  (deleting a recipient must never orphan or rewrite history), and
+  `send_log.book_id` is `ON DELETE SET NULL` — the one non-cascading FK in
+  the schema — with `book_title` denormalised beside it: every other FK
+  here cascades because those rows are meaningless without their book, but
+  a send log entry is *the record that a thing happened*, and the scanner
+  deletes books routinely (orphan pruning, `PruneMissingFiles`). Cascading
+  would erase the evidence a book was ever sent, defeating the log's
+  purpose of answering "did I already put this on the Kindle?". `status`
+  carries a `CHECK` closing it to the four states
+  (`queued`/`sending`/`delivered`/`failed`) DESIGN.md defines — a typo in a
+  Go constant fails at the write rather than producing a job no worker
+  ever claims. `EnqueueSend` inserts the `queued` row and bumps
+  `recipients.last_used_at` in one transaction (via package-internal
+  `…Tx` helpers, per the `DB.Write` composition rule above) — the bump
+  belongs at enqueue, not delivery, because "most recently used" means
+  "the one I last chose," and a failed send must not silently reset the
+  picker's default to a different address. `ListRecipients` orders
+  `last_used_at DESC, address`; SQLite sorts `NULL` smaller than any
+  value, so that ordering alone puts never-used addresses last with no
+  `NULLS LAST` clause, and the picker's default becomes simply "the first
+  option," with no ordering logic in the transport. `ClaimNextSend` is one
+  transaction that selects the oldest `queued` row, flips it to `sending`
+  with `started_at` set, and returns it — atomic even though today's
+  single worker makes contention impossible, because the claim is the one
+  place a second worker would corrupt. `MarkSendDelivered` and
+  `MarkSendFailed` both scope their `UPDATE` to `WHERE status = 'sending'`,
+  so a terminal row can never be rewritten by a late or duplicate call —
+  the guard is a silent no-op `UPDATE`, not an error, by design.
+  `FailInterruptedSends` fails every row still `sending` (startup recovery
+  after a crash — see `internal/sender`) and never requeues: which side of
+  the in-flight request a dead process failed on is unknowable, so
+  requeueing risks a silent duplicate delivery, while failing surfaces the
+  ambiguity and leaves retry a click away. `LatestSendForBook` is the
+  detail page's initial-render lookup (`ORDER BY queued_at DESC, id DESC
+  LIMIT 1`).
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
   ISBN, description, publisher, publication date) from the OPF package
   inside the zip, and extracts the declared cover image (EPUB3
@@ -120,10 +162,72 @@ full design.
   rename, so readers never observe a partial canonical cover.
 - `internal/resend` — `Client.Send` POSTs one attachment to Resend's API
   (DESIGN.md's send-to-Kindle transport), enforcing the ~28MB size limit
-  DESIGN.md derives before attempting a send. Nothing calls it yet — no
-  `recipients`/`send_log` schema, job queue, or `RESEND_API_KEY`/
-  `RESEND_FROM` wiring into `cmd/server` exists, both separate
-  prerequisites for send-to-Kindle per DESIGN.md.
+  DESIGN.md derives before attempting a send, and setting a non-empty
+  `text` body ("Sent from the library.") since Resend requires one of
+  `text`/`html`/`react`. Its caller is `internal/sender`'s queue worker.
+  `NewClient` builds its own `*http.Client` with `SendTimeout` (5 minutes)
+  set, rather than `http.DefaultClient`, which has none — the exported
+  constant covers the *whole* request including the attachment upload, not
+  just a connect deadline, and `internal/sender` reuses it for the
+  worker's own per-job context deadline, the mechanism that actually makes
+  a send abandonable at shutdown. The whole attachment is still held in
+  memory as raw bytes, a base64 string, the marshaled JSON body and a
+  reader over it all at once (~3.3x `MaxAttachmentSize` at the ceiling) —
+  deliberately unstreamed: `internal/sender` runs a single worker, so
+  there's only ever one send in flight, making this a bound on the whole
+  process rather than a per-request multiplier, and the pre-read stat
+  check in `internal/sender` means the worst case only occurs for a file
+  that will actually be sent. Revisit on measurement, not as a reflex.
+- `internal/sender` — the send-to-Kindle queue worker: a single `Worker`
+  claims `send_log` rows one at a time, in queue order, and hands each to
+  a `Transport` (`*resend.Client` satisfies it without changes; the
+  interface lives here, on the consumer side, since `internal/resend`
+  deliberately has no `Sender` interface of its own). `Run` wakes on
+  either a `Notify` poke (non-blocking, capacity-1 channel — a burst of
+  enqueues coalesces into one wake-up) or a once-a-minute `pollInterval`
+  tick, the same poke-plus-tick shape as the scanner's watcher-versus-
+  periodic-rescan split: the poke is the optimisation, the tick is the
+  mechanism that catches anything a poke missed (a row left `queued` by a
+  crash between insert and notify, most obviously). A book's file is
+  resolved at *send* time, not enqueue time — `ListBookFiles`, first
+  location whose `missing_since` is `NULL` — since a queue is a promise to
+  act later and the library moves underneath it; no such location (the
+  book was pruned, or every copy is currently missing) fails the job with
+  a fixed "the file is no longer in the library" reason. A failure to read
+  the index *itself* is reported separately ("could not read the library
+  index — try again"), never folded into that one: a storage error says
+  nothing about whether the book is still there, and claiming otherwise is
+  a confident lie about a file that is probably fine. Before reading
+  the file, its size is stat'd against `resend.MaxAttachmentSize`, failing
+  with both sizes named ("14.2 MB exceeds the 28 MB limit") so an
+  oversized file is never loaded into memory and the failure reason always
+  has the numbers; the transport call itself runs under a per-job
+  `context.WithTimeout(ctx, resend.SendTimeout)`. A transport error's text
+  is recorded verbatim (truncated to `maxFailureReason`, 500 bytes, on a
+  UTF-8 boundary) as the
+  failure reason — Resend's API errors already read as sentences. Two
+  rules are easy to get backwards and are deliberate: **interrupted jobs
+  fail, they never requeue** — a job in flight when `Run`'s `ctx` is
+  cancelled is left `sending` in the database (the process may or may not
+  have reached the transport; guessing risks a silent duplicate delivery),
+  recovered at next startup by `cmd/server` calling
+  `storage.FailInterruptedSends` before the worker starts; and **retry is
+  a new row** — the retry button re-posts the same form, calling
+  `EnqueueSend` again rather than mutating the failed row back to
+  `queued`, so the log keeps the fact that the first attempt failed, and
+  `MarkSend*`'s `status = 'sending'` guard never has to reason about an
+  in-place transition out of a terminal state.
+  The line those two rules are drawn along is *whether the outcome is
+  known*, and the terminal writes follow it: a send Resend accepted, and a
+  failure decided locally (file gone, oversized, unreadable, index
+  unreadable, or a transport answer that is a rejection), are both
+  definite, so `MarkSendDelivered`/`fail` write under
+  `context.WithoutCancel` plus a short `markTimeout` — a shutdown landing
+  in that gap must not cost a verdict already reached, or recovery
+  rewrites a delivered book as failed and invites a duplicate send. Only
+  the genuinely unknown case, a transport call abandoned mid-flight (its
+  error arrives with `ctx` already cancelled), skips the write and leaves
+  the row `sending` for startup recovery to surface.
 - `internal/scanner` — walks the library directory and syncs it into
   `internal/storage`. Cheap path+size+mtime check (against `book_files`)
   skips unchanged files; content hash (SHA-256) is a book's identity, so
@@ -215,6 +319,27 @@ full design.
   `HasFileSize` is what carries that: without it a book with no location
   is indistinguishable from one whose file is genuinely zero bytes, and
   the page claims `0 B` for a size it doesn't know.
+  The send-to-Kindle surface follows the same layering: `Recipients`
+  shapes `storage.ListRecipients` into picker options; `QueueSend` is
+  where the business rules live, per DESIGN.md's "parse request, call
+  service method, render" note for handlers — it validates the address
+  with `net/mail.ParseAddress` and stores only `addr.Address` (so a pasted
+  `"Mike <mike@kindle.com>"` saves the mailbox, not the display name),
+  returning `ErrInvalidAddress` and queueing nothing on a parse failure;
+  reads the book directly via storage rather than through `GetBook` (whose
+  authors/file-location joins a title snapshot has no use for), returning
+  `nil, nil` on an unknown id, `GetBook`'s own contract; then saves the
+  recipient (idempotently) and calls `EnqueueSend`. `Service.Notify
+  func()`, set by `cmd/server` to the worker's `Notify` method (nil in
+  tests and whenever sending is unconfigured), is called once a send is
+  successfully queued — a function field rather than an interface, since
+  `internal/service` depending on `internal/sender` (which depends on
+  `storage`) would be a cycle. `SendState` collapses "when did this
+  happen" to one `At` field (`finished_at` once terminal, else
+  `queued_at`) so the template branches on one shape regardless of which
+  produced it, mirroring `BookDetail.FileSize`'s single-source-of-truth
+  approach; `SendState`, `LatestSend` and `QueueSend`'s return value all
+  produce it through the same unexported `sendStateFrom` shaping.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
@@ -253,8 +378,8 @@ full design.
   write failure past that point (almost always the client disconnecting)
   is logged inside `render` rather than returned — a handler reacting to
   it with `http.Error` would double-write onto an already-committed
-  response. Inline metadata editing and send-to-Kindle are designed but
-  not built — each needs backing features that don't exist yet.
+  response. Inline metadata editing is designed but not built — it needs
+  backing features that don't exist yet.
 - Search-as-you-type is `GET /{$}` extended, not a separate route: a `q`
   parameter narrows the grid, and htmx (vendored at
   `internal/web/static/js/htmx.min.js`, version pinned in a comment at the
@@ -336,10 +461,63 @@ full design.
   accent affordance; since no JS is guaranteed to have loaded yet, the
   reveal is a native `<details>`/`<summary>` rather than anything
   htmx-driven, and a location still within its missing-file grace period
-  carries a subdued annotation. The send-to-Kindle slot keeps its
-  designed position (above the description, "the reason the page gets
-  opened") as an empty, collapsed container — no plate-06 states are
-  mocked, since there's no control yet to be in any of them.
+  carries a subdued annotation.
+- The send-to-Kindle control mounts at `book.html`'s designed position
+  (above the description, "the reason the page gets opened") via
+  `{{template "send-control" .}}`, reusing `bookDetailPage` itself as the
+  fragment's data — the same struct-reuse `book-grid`'s fragment already
+  makes of `libraryPage` — so `POST /books/{id}/send` and
+  `GET /books/{id}/sends/{sendID}` build one mostly-zero-valued
+  `bookDetailPage` rather than a parallel type. Plate 06's four states
+  (idle, sending, delivered, failed) plus a fifth for
+  `RESEND_API_KEY`/`RESEND_FROM` being unset are driven by fields
+  `book.go`'s `applySendState` computes once — `SendPending`,
+  `SendButtonLabel`, `SendButtonPrimary`, `SendAt`, `SendPollURL` — the
+  same discipline `searchSummary` applies to the results line, so the
+  template only branches on *which* block to show, never how to phrase
+  it. `send.Status` of `queued` or `sending` are one visual state
+  ("Sending"): the UI has no separate treatment for the gap between
+  enqueue and claim, which the worker's `Notify` poke keeps short anyway.
+  The whole control is one swap target (`id="send"`, the class
+  `detail__send` kept alongside it for positioning) — form and status
+  share a region because the states replace each other rather than
+  coexisting; the status box's own `hx-get`/`hx-trigger="load delay:2s"`
+  targets `#send` (not itself) so the outer swap replaces the whole
+  control, and a terminal state's status block carries no such attributes
+  at all, so polling stops by construction — the `<form>`'s own
+  `hx-post` is unrelated and survives every state, keeping "Send
+  again"/"Retry" htmx-enhanced. With zero saved recipients the "+ add
+  address" `<details>` renders open and the `<select>` is omitted — the
+  first-run state; it also renders open after a rejected address, with
+  `SendNewAddress`/`SendNewLabel` carrying the typed values back so the
+  fix is an edit rather than a retype. That rejection path re-reads
+  `LatestSend` rather than rendering a nil state: nothing was queued, so
+  retracting a Delivered or Failed result the user is looking at would
+  make the page contradict itself over a typo that changed nothing. `POST /books/{id}/send` accepts `recipient` (an
+  address from the picker) or `new_address`/`new_label`
+  (whichever's non-blank wins), answers an `HX-Request` (without
+  `HX-History-Restore-Request`, the same rule search's fragment split
+  uses) with the fragment and everyone else with a `303` back to the book
+  page — so a plain form POST with JS disabled still works, landing on a
+  page whose initial render (`LatestSend`) picks the job up — and 503s
+  with the disabled fragment when sending isn't configured, rather than
+  404ing, so a stale open tab gets an explanation. `GET
+  /books/{id}/sends/{sendID}` is scoped under the book id specifically so
+  a mismatched pairing 404s instead of leaking one book's send status
+  under another's page; it needs no `Vary` at all, since it serves one
+  body to every caller.
+  The send POST — the only state-changing route in the app — is wrapped in
+  `sameSiteOnly`, which rejects a request whose `Sec-Fetch-Site` the
+  browser reports as anything but `same-origin` or `none`. There is no
+  login here, so a request's network position is the only thing between
+  the collection and everyone else: any page in the user's browser can
+  reach a LAN or localhost server its author cannot, and a form-encoded
+  POST needs no CORS preflight to do it — with the attachment's
+  destination address sitting in the request body. A request carrying no
+  fetch metadata at all is allowed through, since a client that sends
+  none (curl, a script, a browser predating the header) isn't the
+  ambient-authority vector this guards, and failing closed there would
+  cost the UI for no security gain.
 - `cmd/server` — entrypoint. `main` sets up logging and a
   `signal.NotifyContext` (SIGINT/SIGTERM) and calls `run(ctx) error`, so
   every failure path has one exit point (`slog.Error` + `os.Exit(1)`).
@@ -351,15 +529,24 @@ full design.
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
   runs in the background alongside the `SCAN_INTERVAL`-timed (default
   `15m`) periodic rescan, with missing-file grace period `MISSING_GRACE`
-  (default `24h`). The scan loops run on their own `scanCtx`, a child of
-  the signal-aware context but independently cancellable — a shared
-  `waitForScan` helper cancels it and waits out a bounded 10s window
+  (default `24h`). Sending is configured by `RESEND_API_KEY` and
+  `RESEND_FROM`: both set builds an `internal/resend.Client` and an
+  `internal/sender.Worker`, wires `Service.Notify` to the worker's
+  `Notify`, and runs `storage.FailInterruptedSends` once before the
+  worker starts claiming jobs; either missing only logs a `Warn` naming
+  which one and passes `sendEnabled: false` into `web.Routes` — browsing
+  must work on a dev machine with neither set, so a missing key never
+  fails startup. The scan loop and the (if enabled) worker both run on
+  the same `scanCtx`, a child of the signal-aware context but
+  independently cancellable — a shared `waitForBackground` helper
+  (generalised from the scan-only `waitForScan` once the worker needed
+  the identical treatment) cancels it and waits out a bounded 10s window
   before the database closes, on *both* the SIGINT/SIGTERM path (`run`
   shuts the HTTP server down first, then waits, then closes the database
-  — order matters, so no request or in-flight scan write is torn down by
-  the database closing under it) and a serving failure (e.g. `ADDR`
-  already in use), which used to close the database immediately and race
-  the still-running scan. `internal/scanner.Scan` itself checks
+  — order matters, so no request or in-flight scan/send write is torn
+  down by the database closing under it) and a serving failure (e.g.
+  `ADDR` already in use), which used to close the database immediately
+  and race the still-running scan. `internal/scanner.Scan` itself checks
   `ctx.Err()` before the walk starts and on every entry it visits, so
   cancellation stops the walk outright (and skips reconciliation) rather
   than just failing each remaining file's own DB calls one at a time. The
@@ -374,11 +561,11 @@ full design.
   used everywhere else via `slog`'s package-level functions against that
   default logger.
 
-Still missing from DESIGN.md: inline metadata editing and send-to-Kindle
-(designed, not built), metadata provider
-enrichment (Open Library / Google Books), the filesystem watcher (the
-periodic rescan is the only live-update mechanism so far), near-duplicate
-detection, and format conversion.
+Still missing from DESIGN.md: inline metadata editing (designed, not
+built), metadata provider enrichment (Open Library / Google Books), the
+filesystem watcher (the periodic rescan is the only live-update mechanism
+so far), the send history view, recipient management beyond the inline
+add-address control, near-duplicate detection, and format conversion.
 
 ## Planning
 

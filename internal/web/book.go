@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,19 @@ import (
 // would be a rename of nothing. FileSizeHuman is empty when the book has
 // no location to take a size from — the template renders an em dash there
 // rather than "0 B", which is a size, and a wrong one.
+//
+// ID is the book id the send form posts to — removed as unread after #29,
+// it comes back here with that caller. The Send* fields are also this
+// struct's data for the "send-control" fragment the send POST and status
+// poll routes render standalone (most other fields left zero, same reuse
+// #28's book-grid fragment already makes of libraryPage). Send itself is
+// service.SendState as it comes — nil when the book has never been sent,
+// the idle state before any address is picked — with SendPending,
+// SendButtonLabel, SendButtonPrimary, SendAt and SendPollURL as its
+// derived presentation fields, computed once by applySendState so the
+// template branches on state without formatting a timestamp or composing a
+// label itself, the same discipline searchSummary applies to the results
+// line.
 type bookDetailPage struct {
 	Title             string
 	Count             int
@@ -37,12 +51,25 @@ type bookDetailPage struct {
 	ISBN              string
 	Description       string
 	AddedAt           string
+
+	ID                int64
+	SendEnabled       bool
+	Recipients        []service.RecipientOption
+	Send              *service.SendState
+	SendPending       bool
+	SendButtonLabel   string
+	SendButtonPrimary bool
+	SendAt            string
+	SendPollURL       string
+	SendError         string
+	SendNewAddress    string
+	SendNewLabel      string
 }
 
 // bookDetailHandler serves GET /books/{id}. A non-numeric id and an
 // unknown id both 404 identically (http.NotFound) — deliberately
 // indistinguishable, since neither is a client error worth its own page.
-func bookDetailHandler(svc *service.Service) http.HandlerFunc {
+func bookDetailHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 		if err != nil {
@@ -90,12 +117,74 @@ func bookDetailHandler(svc *service.Service) http.HandlerFunc {
 			ISBN:              detail.ISBN,
 			Description:       detail.Description,
 			AddedAt:           detail.AddedAt.Format("2006-01-02"),
+			ID:                detail.ID,
+		}
+		if err := populateSendControl(r.Context(), svc, sendEnabled, &page); err != nil {
+			slog.Error("load send state failed", "id", id, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
 		}
 
 		if err := render(w, "book.html", page); err != nil {
 			slog.Error("render template failed", "template", "book.html", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
+	}
+}
+
+// populateSendControl fills page's send-control fields: the saved
+// recipients (skipped when sending is unconfigured — there is nothing to
+// pick from) and this book's most recent send, if any. Shared by the full
+// detail-page render and the standalone send-control fragment handlers in
+// send.go, so the three routes derive the picker and status box the same
+// way.
+func populateSendControl(ctx context.Context, svc *service.Service, sendEnabled bool, page *bookDetailPage) error {
+	page.SendEnabled = sendEnabled
+	if !sendEnabled {
+		return nil
+	}
+
+	recipients, err := svc.Recipients(ctx)
+	if err != nil {
+		return err
+	}
+	page.Recipients = recipients
+
+	send, err := svc.LatestSend(ctx, page.ID)
+	if err != nil {
+		return err
+	}
+	applySendState(page, send)
+	return nil
+}
+
+// applySendState fills page's derived send-status fields from send (nil
+// for a book that has never been sent). Computed once here — the button
+// label, whether the control is mid-send, and the formatted timestamp —
+// rather than in the template, the same discipline searchSummary applies
+// to the results line.
+func applySendState(page *bookDetailPage, send *service.SendState) {
+	page.Send = send
+	if send == nil {
+		page.SendButtonLabel = "Send"
+		page.SendButtonPrimary = true
+		return
+	}
+
+	page.SendAt = send.At.Format("2006-01-02 15:04")
+	switch send.Status {
+	case "queued", "sending":
+		page.SendPending = true
+		page.SendButtonLabel = "Sending"
+		page.SendPollURL = fmt.Sprintf("/books/%d/sends/%d", page.ID, send.ID)
+	case "delivered":
+		page.SendButtonLabel = "Send again"
+	case "failed":
+		page.SendButtonLabel = "Retry"
+		page.SendButtonPrimary = true
+	default:
+		page.SendButtonLabel = "Send"
+		page.SendButtonPrimary = true
 	}
 }
 

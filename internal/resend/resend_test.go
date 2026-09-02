@@ -10,6 +10,13 @@ import (
 	"testing"
 )
 
+func TestNewClientSetsTimeout(t *testing.T) {
+	c := NewClient("key", "from@example.com")
+	if c.httpClient.Timeout != SendTimeout {
+		t.Errorf("httpClient.Timeout = %v, want SendTimeout (%v); http.DefaultClient has none at all", c.httpClient.Timeout, SendTimeout)
+	}
+}
+
 func testClient(t *testing.T, handler http.HandlerFunc) (*Client, *int) {
 	t.Helper()
 	hits := 0
@@ -48,6 +55,9 @@ func TestSendSuccess(t *testing.T) {
 		}
 		if len(req.To) != 1 || req.To[0] != "reader@example.com" {
 			t.Errorf("to = %v, want [reader@example.com]", req.To)
+		}
+		if req.Text == "" {
+			t.Error("text is empty; Resend requires one of text/html/react")
 		}
 		if len(req.Attachments) != 1 {
 			t.Fatalf("attachments = %d, want 1", len(req.Attachments))

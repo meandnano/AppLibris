@@ -5,6 +5,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"net/mail"
 	"time"
 
 	"library/internal/storage"
@@ -13,6 +15,15 @@ import (
 // Service exposes the application's operations over a storage.DB.
 type Service struct {
 	db *storage.DB
+
+	// Notify, if set, is called after a send is successfully queued —
+	// cmd/server's hook into the worker's poke, so a send starts the
+	// instant the button is pressed instead of waiting for its next
+	// poll tick. nil in tests and whenever sending is unconfigured.
+	// A function field rather than an interface: it's one nullary call,
+	// and an interface would make this package depend on internal/sender,
+	// which depends on storage — a cycle waiting to happen.
+	Notify func()
 }
 
 // New returns a Service backed by db.
@@ -211,4 +222,135 @@ func (s *Service) summarize(ctx context.Context, books []storage.Book) ([]BookSu
 		}
 	}
 	return summaries, nil
+}
+
+// ErrInvalidAddress is returned by QueueSend when the given address doesn't
+// parse as an email address. The handler renders this as a field error on
+// the send form, not a 500.
+var ErrInvalidAddress = errors.New("service: invalid recipient address")
+
+// SendState is what the send status box needs — the shared shape for the
+// detail page's initial render and every polled fragment, so the template
+// branches on one set of fields regardless of which produced them. BookID
+// is what lets the poll route (scoped under a book id in its URL) reject a
+// send that belongs to a different book, rather than leak its status
+// across the mismatch; it is 0 if the book has since been pruned, which a
+// real book id can never be.
+type SendState struct {
+	ID            int64
+	BookID        int64
+	Status        string
+	Recipient     string
+	FailureReason string
+	At            time.Time // finished_at once terminal, else queued_at
+}
+
+// RecipientOption is one entry in the send control's recipient picker.
+type RecipientOption struct{ Address, Label string }
+
+// Recipients returns the saved recipients for the picker, most-recently-
+// used first — see storage.ListRecipients for the ordering.
+func (s *Service) Recipients(ctx context.Context) ([]RecipientOption, error) {
+	recipients, err := s.db.ListRecipients(ctx)
+	if err != nil {
+		return nil, err
+	}
+	options := make([]RecipientOption, len(recipients))
+	for i, r := range recipients {
+		options[i] = RecipientOption{Address: r.Address, Label: r.Label}
+	}
+	return options, nil
+}
+
+// QueueSend is where send-to-Kindle's business rules live, per DESIGN.md's
+// layering note that a handler must stay "parse request, call service
+// method, render":
+//
+//   - address is validated with net/mail.ParseAddress and only its mailbox
+//     (addr.Address) is stored, so a pasted "Mike <mike@kindle.com>" saves
+//     the address, not the display name. An unparseable address returns
+//     ErrInvalidAddress and queues nothing.
+//   - bookID that doesn't exist returns nil, nil — the same absent-isn't-
+//     an-error contract GetBook uses, so the handler turns it into a 404
+//     the same way. This reads the book directly via storage rather than
+//     through GetBook, which also loads authors and file locations that a
+//     title snapshot has no use for.
+//   - The recipient is saved (idempotently — re-adding a known address is
+//     a user slip, not an error) before the send is queued, and Notify is
+//     called only once both writes succeed.
+func (s *Service) QueueSend(ctx context.Context, bookID int64, address, label string) (*SendState, error) {
+	parsed, err := mail.ParseAddress(address)
+	if err != nil {
+		return nil, ErrInvalidAddress
+	}
+
+	book, err := s.db.FindBookByID(ctx, bookID)
+	if err != nil {
+		return nil, err
+	}
+	if book == nil {
+		return nil, nil
+	}
+
+	now := time.Now()
+	if _, err := s.db.CreateRecipient(ctx, parsed.Address, label, now); err != nil {
+		return nil, err
+	}
+	sendID, err := s.db.EnqueueSend(ctx, bookID, book.Title, parsed.Address, now)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.Notify != nil {
+		s.Notify()
+	}
+
+	send, err := s.db.GetSend(ctx, sendID)
+	if err != nil {
+		return nil, err
+	}
+	return sendStateFrom(send), nil
+}
+
+// SendState returns sendID's current state, or nil if it doesn't exist —
+// the status poll's lookup.
+func (s *Service) SendState(ctx context.Context, sendID int64) (*SendState, error) {
+	send, err := s.db.GetSend(ctx, sendID)
+	if err != nil {
+		return nil, err
+	}
+	return sendStateFrom(send), nil
+}
+
+// LatestSend returns the most recent send for bookID, or nil if it has
+// never been sent — the detail page's initial render, so a page loaded
+// mid-send resumes polling and one loaded after a completed send shows its
+// outcome, instead of both showing a bare button.
+func (s *Service) LatestSend(ctx context.Context, bookID int64) (*SendState, error) {
+	send, err := s.db.LatestSendForBook(ctx, bookID)
+	if err != nil {
+		return nil, err
+	}
+	return sendStateFrom(send), nil
+}
+
+// sendStateFrom shapes a storage.Send into a SendState. The at-a-glance
+// timestamp collapses to one field — finished_at once a send is terminal,
+// queued_at otherwise — so the template needs no branching to pick it.
+func sendStateFrom(send *storage.Send) *SendState {
+	if send == nil {
+		return nil
+	}
+	at := send.QueuedAt
+	if send.FinishedAt.Valid {
+		at = send.FinishedAt.Time
+	}
+	return &SendState{
+		ID:            send.ID,
+		BookID:        send.BookID.Int64, // 0 if send.BookID is NULL (the book was since pruned)
+		Status:        string(send.Status),
+		Recipient:     send.RecipientAddress,
+		FailureReason: send.FailureReason,
+		At:            at,
+	}
 }
