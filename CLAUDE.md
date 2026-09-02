@@ -67,6 +67,16 @@ full design.
   access) is the one place raw user input becomes one, by quoting and
   prefix-terming every whitespace-separated token so no input, however
   adversarial, can reach `MATCH` unescaped.
+- Single-book lookups, for the detail page: `FindBookByID` (nil, nil on an
+  unknown id, same contract as `FindBookByContentHash`); `ListBookFiles`
+  (a book's own locations, ordered by `file_path`, `missing_since`
+  surfaced — a targeted query, not a filter over `ListFilesUnder("")`,
+  which loads every location in the library to serve one book's row);
+  `ListAuthorsForBook` (one book's authors in source order, as an empty
+  non-nil slice rather than an error when there are none — `ListBookAuthors`
+  loads the whole library's author map, right for the grid page and wrong
+  for a single book). `CountBooks` is a plain `count(*)`, independent of
+  any search filter.
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
   ISBN, description, publisher, publication date) from the OPF package
   inside the zip, and extracts the declared cover image (EPUB3
@@ -179,16 +189,27 @@ full design.
   and a freshly-loaded page are the same state, so callers don't
   special-case it. `CountBooks` returns the library's total size,
   independent of any search filter — what the masthead shows, kept
-  separate from however many a search matched.
+  separate from however many a search matched. `GetBook` assembles one
+  `BookDetail` for the detail page (nil, nil on an unknown id, same
+  absent-isn't-an-error contract as the storage finders — the web handler
+  is what turns that into a 404). `BookDetail.FileSize` is a book-level
+  field, not per-location: every location of one book is byte-identical by
+  construction (content hash is identity), so it's taken from the first
+  `ListBookFiles` row rather than carried per location, where showing a
+  size per path would imply a difference that cannot exist. A book with
+  zero locations can't actually be observed — the last location's deletion
+  prunes the book in the same transaction — but `GetBook` treats that race
+  as survivable anyway, rendering no size rather than erroring.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
   step. `GET /{$}` renders the library grid — the first real page,
   translated from Claude Design's mockups (see `UI.md`, kept on the `init`
   branch/worktree, not on `master`) — `{$}` matches only the exact path, so
-  the mux's own 404 handles everything else, including a stale or mistyped
-  `/books/{id}`; `GET /static/` serves the embedded stylesheet and theme
-  script; `GET /covers/` serves the scanner's stored cover thumbnails out of
+  the mux's own 404 handles every other unmatched path (`GET /books/{id}`
+  is now a real route below, but the mux still 404s a non-numeric or
+  unknown id under it); `GET /static/` serves the embedded stylesheet and
+  theme script; `GET /covers/` serves the scanner's stored cover thumbnails out of
   `COVERS_DIR` (runtime data, so it's passed into `Routes` rather than
   embedded). Both mounts wrap their filesystem in `noDirFS` so a directory
   with no `index.html` 404s instead of `http.FileServer` generating a
@@ -217,9 +238,8 @@ full design.
   write failure past that point (almost always the client disconnecting)
   is logged inside `render` rather than returned — a handler reacting to
   it with `http.Error` would double-write onto an already-committed
-  response. Book detail, inline metadata editing and send-to-Kindle are
-  designed but not built — each needs backing features that don't exist
-  yet.
+  response. Inline metadata editing and send-to-Kindle are designed but
+  not built — each needs backing features that don't exist yet.
 - Search-as-you-type is `GET /{$}` extended, not a separate route: a `q`
   parameter narrows the grid, and htmx (vendored at
   `internal/web/static/js/htmx.min.js`, version pinned in a comment at the
@@ -243,6 +263,29 @@ full design.
   query HTML-escaped by `html/template`) if nothing matched — kept visually
   and structurally separate from the "No books yet" empty-library block,
   since the two call for different next actions.
+- `GET /books/{id}` is the detail page (`book.html`, alongside
+  `library.html`). `r.PathValue("id")` is parsed with `strconv.ParseInt`;
+  a non-numeric id and an unknown one both plain 404 (`http.NotFound`),
+  indistinguishable on purpose — neither is a client error worth its own
+  page. Every grid card in `book-grid` is now wrapped in `<a
+  href="/books/{{.ID}}">`. Metadata renders field-granular (one element
+  per field, not one blob) so a future inline-edit step connects markup
+  rather than redesigning it: empty optional fields (publisher, published
+  date, language, ISBN) render as visible em-dash rows rather than being
+  dropped — a hidden field can't be filled in, and sparse metadata is the
+  common FB2 case — while an empty author or description gets its own
+  italic `--fg-faint` line ("Author unknown" / "No description") instead
+  of an em dash, since those aren't table rows. `PublishedDate` renders
+  exactly as stored, never parsed — it's free-text from embedded metadata
+  (sometimes a year, sometimes a full date) and parsing it would lie
+  confidently. A book's locations show as a count with a dotted-underline
+  accent affordance; since no JS is guaranteed to have loaded yet, the
+  reveal is a native `<details>`/`<summary>` rather than anything
+  htmx-driven, and a location still within its missing-file grace period
+  carries a subdued annotation. The send-to-Kindle slot keeps its
+  designed position (above the description, "the reason the page gets
+  opened") as an empty, collapsed container — no plate-06 states are
+  mocked, since there's no control yet to be in any of them.
 - `cmd/server` — entrypoint. `main` sets up logging and a
   `signal.NotifyContext` (SIGINT/SIGTERM) and calls `run(ctx) error`, so
   every failure path has one exit point (`slog.Error` + `os.Exit(1)`).
@@ -277,8 +320,8 @@ full design.
   used everywhere else via `slog`'s package-level functions against that
   default logger.
 
-Still missing from DESIGN.md: the book detail page, inline metadata
-editing and send-to-Kindle (designed, not built), metadata provider
+Still missing from DESIGN.md: inline metadata editing and send-to-Kindle
+(designed, not built), metadata provider
 enrichment (Open Library / Google Books), the filesystem watcher (the
 periodic rescan is the only live-update mechanism so far), near-duplicate
 detection, and format conversion.

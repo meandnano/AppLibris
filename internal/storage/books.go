@@ -110,6 +110,14 @@ func (db *DB) FindBookByContentHash(ctx context.Context, hash string) (*Book, er
 	return scanBook(row)
 }
 
+// FindBookByID returns the book with the given id, or nil if none exists —
+// the book detail page's lookup, and an unknown id turning up nil rather
+// than an error is what lets the handler turn it into a plain 404.
+func (db *DB) FindBookByID(ctx context.Context, id int64) (*Book, error) {
+	row := db.read.QueryRowContext(ctx, `SELECT `+bookColumns+` FROM books WHERE id = ?`, id)
+	return scanBook(row)
+}
+
 // ListBooks returns every book, ordered by sort_title.
 func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
 	rows, err := db.read.QueryContext(ctx, `SELECT `+bookColumns+` FROM books ORDER BY sort_title`)
@@ -174,6 +182,34 @@ func (db *DB) ListBookAuthors(ctx context.Context) (map[int64][]string, error) {
 	return authorsByBook, rows.Err()
 }
 
+// ListAuthorsForBook returns one book's author names, in the order its
+// source file credited them — unlike ListBookAuthors, which loads the
+// whole library's author map (right for the grid page, wrong for a
+// single-book page). Returns an empty, non-nil slice for an authorless
+// book rather than an error.
+func (db *DB) ListAuthorsForBook(ctx context.Context, bookID int64) ([]string, error) {
+	rows, err := db.read.QueryContext(ctx, `
+		SELECT authors.name
+		FROM book_authors
+		JOIN authors ON authors.id = book_authors.author_id
+		WHERE book_authors.book_id = ?
+		ORDER BY book_authors.position`, bookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	names := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
 // FindFileByPath returns the location and its owning book's cover fields, or nil if none exists
 func (db *DB) FindFileByPath(ctx context.Context, path string) (*BookFile, error) {
 	row := db.read.QueryRowContext(ctx, `
@@ -203,6 +239,29 @@ func (db *DB) ListFilesUnder(ctx context.Context, prefix string) ([]BookFile, er
 		pattern = prefix + "/%"
 	}
 	rows, err := db.read.QueryContext(ctx, `SELECT `+bookFileColumns+` FROM book_files WHERE file_path LIKE ?`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []BookFile
+	for rows.Next() {
+		var f BookFile
+		if err := rows.Scan(&f.ID, &f.BookID, &f.FilePath, &f.FileSize, &f.ModifiedAt, &f.AddedAt, &f.MissingSince); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+// ListBookFiles returns one book's file locations, ordered by path for
+// stable display — a targeted query rather than a filter over
+// ListFilesUnder(""), which loads every location in the library to serve
+// one book's row.
+func (db *DB) ListBookFiles(ctx context.Context, bookID int64) ([]BookFile, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT `+bookFileColumns+` FROM book_files WHERE book_id = ? ORDER BY file_path`, bookID)
 	if err != nil {
 		return nil, err
 	}

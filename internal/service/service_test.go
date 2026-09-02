@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"library/internal/storage"
 )
@@ -128,5 +129,78 @@ func TestCountBooksIsUnaffectedBySearchFilter(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("CountBooks = %d, want 2 (the library total, not a search-filtered count)", count)
+	}
+}
+
+func TestGetBookAssemblesFullDetail(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	id, orphanedID, _, err := db.CreateBookWithFile(ctx, storage.Book{
+		ContentHash:   "hash-1",
+		Title:         "The Left Hand of Darkness",
+		SortTitle:     "Left Hand of Darkness, The",
+		Publisher:     "Ace Books",
+		PublishedDate: "1969-03-01",
+		Language:      "en",
+		ISBN:          "9780441478125",
+		Description:   "A lone envoy arrives on the frozen world of Winter.",
+		CoverPath:     "/covers/hash-1.jpg",
+		Format:        "epub",
+	}, []string{"Ursula K. Le Guin"}, "b/second.epub", 1234, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	if orphanedID != 0 {
+		t.Fatalf("unexpected orphaned book %d", orphanedID)
+	}
+	if _, err := db.UpsertBookFile(ctx, id, "a/first.epub", 1234, mtime); err != nil {
+		t.Fatalf("UpsertBookFile second location: %v", err)
+	}
+
+	detail, err := svc.GetBook(ctx, id)
+	if err != nil {
+		t.Fatalf("GetBook: %v", err)
+	}
+	if detail == nil {
+		t.Fatal("GetBook = nil, want the assembled detail")
+	}
+
+	if detail.Title != "The Left Hand of Darkness" {
+		t.Errorf("Title = %q", detail.Title)
+	}
+	if len(detail.Authors) != 1 || detail.Authors[0] != "Ursula K. Le Guin" {
+		t.Errorf("Authors = %v, want [Ursula K. Le Guin]", detail.Authors)
+	}
+	if detail.Publisher != "Ace Books" || detail.PublishedDate != "1969-03-01" || detail.Language != "en" || detail.ISBN != "9780441478125" {
+		t.Errorf("metadata fields = %+v, unexpected values", detail)
+	}
+	if detail.FileSize != 1234 {
+		t.Errorf("FileSize = %d, want 1234 (taken from a location, all locations byte-identical)", detail.FileSize)
+	}
+	if len(detail.Locations) != 2 {
+		t.Fatalf("Locations = %+v, want 2", detail.Locations)
+	}
+	if detail.Locations[0].Path != "a/first.epub" || detail.Locations[1].Path != "b/second.epub" {
+		t.Errorf("Locations paths = [%q, %q], want ordered by path", detail.Locations[0].Path, detail.Locations[1].Path)
+	}
+	if detail.Locations[0].Missing || detail.Locations[1].Missing {
+		t.Errorf("Locations = %+v, want neither missing", detail.Locations)
+	}
+}
+
+func TestGetBookUnknownIDReturnsNilNil(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	detail, err := svc.GetBook(ctx, 99999)
+	if err != nil {
+		t.Fatalf("GetBook(unknown): %v", err)
+	}
+	if detail != nil {
+		t.Errorf("GetBook(unknown) = %+v, want nil", detail)
 	}
 }

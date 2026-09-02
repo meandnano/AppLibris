@@ -268,6 +268,115 @@ func TestCountBooks(t *testing.T) {
 	}
 }
 
+func TestFindBookByID(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Example", SortTitle: "Example", Format: "epub"}, []string{"Jane Doe"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	got, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatalf("FindBookByID: %v", err)
+	}
+	if got == nil || got.ID != id || got.Title != "Example" {
+		t.Errorf("FindBookByID(%d) = %+v, want the created book", id, got)
+	}
+
+	unknown, err := db.FindBookByID(ctx, id+1000)
+	if err != nil {
+		t.Fatalf("FindBookByID unknown id: %v", err)
+	}
+	if unknown != nil {
+		t.Errorf("FindBookByID(unknown) = %+v, want nil", unknown)
+	}
+}
+
+func TestListAuthorsForBook(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	multiID, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Multi", SortTitle: "Multi"}, []string{"Zed Zorro", "Ann Alpha"})
+	if err != nil {
+		t.Fatalf("CreateBook multi: %v", err)
+	}
+	noneID, err := db.CreateBook(ctx, Book{ContentHash: "hash-2", Title: "None", SortTitle: "None"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook none: %v", err)
+	}
+
+	names, err := db.ListAuthorsForBook(ctx, multiID)
+	if err != nil {
+		t.Fatalf("ListAuthorsForBook multi: %v", err)
+	}
+	if want := []string{"Zed Zorro", "Ann Alpha"}; !slices.Equal(names, want) {
+		t.Errorf("ListAuthorsForBook(multi) = %v, want %v (source order, not alphabetical)", names, want)
+	}
+
+	names, err = db.ListAuthorsForBook(ctx, noneID)
+	if err != nil {
+		t.Fatalf("ListAuthorsForBook none: %v", err)
+	}
+	if names == nil || len(names) != 0 {
+		t.Errorf("ListAuthorsForBook(authorless) = %v (nil=%v), want empty non-nil slice", names, names == nil)
+	}
+}
+
+func TestListBookFiles(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookAID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-a", Title: "Book A", SortTitle: "Book A"}, nil, "b/second.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile A: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, bookAID, "a/first.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile A second location: %v", err)
+	}
+	bookBID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-b", Title: "Book B", SortTitle: "Book B"}, nil, "other.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile B: %v", err)
+	}
+
+	files, err := db.ListBookFiles(ctx, bookAID)
+	if err != nil {
+		t.Fatalf("ListBookFiles A: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("ListBookFiles(A) returned %d files, want 2", len(files))
+	}
+	if files[0].FilePath != "a/first.epub" || files[1].FilePath != "b/second.epub" {
+		t.Errorf("ListBookFiles(A) paths = [%q, %q], want ordered by path", files[0].FilePath, files[1].FilePath)
+	}
+	for _, f := range files {
+		if f.BookID != bookAID {
+			t.Errorf("ListBookFiles(A) leaked a file from another book: %+v", f)
+		}
+	}
+
+	filesB, err := db.ListBookFiles(ctx, bookBID)
+	if err != nil {
+		t.Fatalf("ListBookFiles B: %v", err)
+	}
+	if len(filesB) != 1 || filesB[0].FilePath != "other.epub" {
+		t.Errorf("ListBookFiles(B) = %+v, want exactly [other.epub]", filesB)
+	}
+
+	if err := db.SetFilesMissing(ctx, []int64{filesB[0].ID}, mtime); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+	filesB, err = db.ListBookFiles(ctx, bookBID)
+	if err != nil {
+		t.Fatalf("ListBookFiles B after marking missing: %v", err)
+	}
+	if !filesB[0].MissingSince.Valid {
+		t.Error("ListBookFiles(B) after SetFilesMissing: MissingSince not surfaced")
+	}
+}
+
 func TestListBookAuthors(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
