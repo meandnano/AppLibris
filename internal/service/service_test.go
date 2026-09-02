@@ -186,8 +186,23 @@ func TestGetBookAssemblesFullDetail(t *testing.T) {
 	if detail.Publisher != "Ace Books" || detail.PublishedDate != "1969-03-01" || detail.Language != "en" || detail.ISBN != "9780441478125" {
 		t.Errorf("metadata fields = %+v, unexpected values", detail)
 	}
+	if detail.Description != "A lone envoy arrives on the frozen world of Winter." {
+		t.Errorf("Description = %q", detail.Description)
+	}
+	if detail.CoverPath != "/covers/hash-1.jpg" {
+		t.Errorf("CoverPath = %q, want the stored path", detail.CoverPath)
+	}
+	if detail.Format != "epub" {
+		t.Errorf("Format = %q, want epub", detail.Format)
+	}
+	if detail.AddedAt.IsZero() {
+		t.Error("AddedAt is zero; the detail page renders it as the added date")
+	}
 	if detail.FileSize != 1234 {
 		t.Errorf("FileSize = %d, want 1234 (taken from a location, all locations byte-identical)", detail.FileSize)
+	}
+	if !detail.HasFileSize {
+		t.Error("HasFileSize = false for a book with locations")
 	}
 	if len(detail.Locations) != 2 {
 		t.Fatalf("Locations = %+v, want 2", detail.Locations)
@@ -197,6 +212,61 @@ func TestGetBookAssemblesFullDetail(t *testing.T) {
 	}
 	if detail.Locations[0].Missing || detail.Locations[1].Missing {
 		t.Errorf("Locations = %+v, want neither missing", detail.Locations)
+	}
+}
+
+// A book with no location has no size to report, which is a different
+// thing from a size of zero — the transport renders an em dash for the
+// first and "0 B" for the second, and only HasFileSize tells them apart.
+func TestGetBookReportsNoFileSizeWithoutLocations(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "hash-1", Title: "No Locations", SortTitle: "No Locations", Format: "epub",
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	detail, err := svc.GetBook(ctx, id)
+	if err != nil {
+		t.Fatalf("GetBook: %v", err)
+	}
+	if detail == nil {
+		t.Fatal("GetBook = nil for an existing book")
+	}
+	if detail.HasFileSize {
+		t.Error("HasFileSize = true for a book with no location")
+	}
+	if len(detail.Locations) != 0 {
+		t.Errorf("Locations = %+v, want none", detail.Locations)
+	}
+}
+
+// The counterpart: a real zero-byte file is a known size.
+func TestGetBookReportsZeroByteLocationAsAKnownSize(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	id, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
+		ContentHash: "hash-1", Title: "Empty File", SortTitle: "Empty File", Format: "epub",
+	}, nil, "empty.epub", 0, time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+
+	detail, err := svc.GetBook(ctx, id)
+	if err != nil {
+		t.Fatalf("GetBook: %v", err)
+	}
+	if !detail.HasFileSize {
+		t.Error("HasFileSize = false for a location that is genuinely zero bytes")
+	}
+	if detail.FileSize != 0 {
+		t.Errorf("FileSize = %d, want 0", detail.FileSize)
 	}
 }
 

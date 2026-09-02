@@ -20,7 +20,11 @@
         </div>
         <div class="facts__row">
           <dt>size</dt>
+          {{if .FileSizeHuman}}
           <dd title="{{.FileSizeBytesText}}">{{.FileSizeHuman}}</dd>
+          {{else}}
+          <dd><span class="facts__empty">&mdash;</span></dd>
+          {{end}}
         </div>
         <div class="facts__row">
           <dt>locations</dt>

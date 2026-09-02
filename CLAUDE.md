@@ -212,6 +212,9 @@ full design.
   zero locations can't actually be observed — the last location's deletion
   prunes the book in the same transaction — but `GetBook` treats that race
   as survivable anyway, rendering no size rather than erroring.
+  `HasFileSize` is what carries that: without it a book with no location
+  is indistinguishable from one whose file is genuinely zero bytes, and
+  the page claims `0 B` for a size it doesn't know.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
@@ -316,10 +319,13 @@ full design.
   href="/books/{{.ID}}">`. Its masthead is the shared `site-header`
   partial, so `bookDetailPage` carries the same `Count`/`CountText` pair
   `libraryPage` does — the partial renders one and pluralizes on the
-  other. Metadata renders field-granular (one element per field, not one
+  other. Its `Locations` is `service.FileLocation` as it comes: the
+  template reads `Path` and `Missing` under those names, so a per-page
+  copy of the same two fields would be a rename of nothing. Metadata renders field-granular (one element per field, not one
   blob) so a future inline-edit step connects markup rather than
   redesigning it: empty optional fields (publisher, published date,
-  language, ISBN) render as visible em-dash rows rather than being
+  language, ISBN — and file size, when the book has no location to take
+  one from) render as visible em-dash rows rather than being
   dropped — a hidden field can't be filled in, and sparse metadata is the
   common FB2 case — while an empty author or description gets its own
   italic `--fg-faint` line ("Author unknown" / "No description") instead

@@ -114,6 +114,7 @@ type BookDetail struct {
 	CoverPath     string
 	Format        string
 	FileSize      int64
+	HasFileSize   bool
 	AddedAt       time.Time
 	Locations     []FileLocation
 }
@@ -137,6 +138,9 @@ type FileLocation struct {
 // book can't actually be observed with zero locations — the last
 // location's deletion prunes the book in the same transaction — but if
 // that race is ever hit anyway, this renders no size rather than erroring.
+// HasFileSize is what says so: without it a book with no location is
+// indistinguishable from one whose file is genuinely zero bytes, and the
+// page would claim "0 B" for a size it does not actually know.
 func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 	book, err := s.db.FindBookByID(ctx, id)
 	if err != nil {
@@ -157,6 +161,7 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 	}
 
 	var fileSize int64
+	hasFileSize := len(files) > 0
 	locations := make([]FileLocation, len(files))
 	for i, f := range files {
 		if i == 0 {
@@ -177,6 +182,7 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 		CoverPath:     book.CoverPath,
 		Format:        book.Format,
 		FileSize:      fileSize,
+		HasFileSize:   hasFileSize,
 		AddedAt:       book.AddedAt,
 		Locations:     locations,
 	}, nil

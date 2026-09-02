@@ -658,7 +658,8 @@ a:hover {
   font-family: var(--mono);
 }
 
-.detail__meta-empty {
+.detail__meta-empty,
+.facts__empty {
   color: var(--fg-faint);
 }
 

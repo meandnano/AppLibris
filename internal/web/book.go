@@ -10,29 +10,26 @@ import (
 	"library/internal/service"
 )
 
-// bookLocationView is one of a book's file locations, shaped for the
-// template.
-type bookLocationView struct {
-	Path    string
-	Missing bool
-}
-
 // bookDetailPage is the data book.html renders against. Title doubles as
 // the browser tab title (via document-head) and the on-page heading — the
 // book's own title, unlike libraryPage's constant "Library". Count and
 // CountText are the masthead's library-wide total, same contract as
 // libraryPage's — the shared site-header partial renders CountText and
 // pluralizes on Count, so both have to be here or the masthead breaks.
+// Locations is service.FileLocation as it comes: the template reads Path
+// and Missing under those names, so a per-page copy of the same two fields
+// would be a rename of nothing. FileSizeHuman is empty when the book has
+// no location to take a size from — the template renders an em dash there
+// rather than "0 B", which is a size, and a wrong one.
 type bookDetailPage struct {
 	Title             string
 	Count             int
 	CountText         string
-	ID                int64
 	CoverURL          string
 	Format            string
 	FileSizeHuman     string
 	FileSizeBytesText string
-	Locations         []bookLocationView
+	Locations         []service.FileLocation
 	AuthorLine        string
 	Publisher         string
 	PublishedDate     string
@@ -71,21 +68,21 @@ func bookDetailHandler(svc *service.Service) http.HandlerFunc {
 			return
 		}
 
-		locations := make([]bookLocationView, len(detail.Locations))
-		for i, l := range detail.Locations {
-			locations[i] = bookLocationView{Path: l.Path, Missing: l.Missing}
+		var sizeHuman, sizeBytes string
+		if detail.HasFileSize {
+			sizeHuman = humanSize(detail.FileSize)
+			sizeBytes = fmt.Sprintf("%d bytes", detail.FileSize)
 		}
 
 		page := bookDetailPage{
 			Title:             detail.Title,
 			Count:             count,
 			CountText:         formatCount(count),
-			ID:                detail.ID,
 			CoverURL:          coverURL(detail.CoverPath),
 			Format:            detail.Format,
-			FileSizeHuman:     humanSize(detail.FileSize),
-			FileSizeBytesText: fmt.Sprintf("%d bytes", detail.FileSize),
-			Locations:         locations,
+			FileSizeHuman:     sizeHuman,
+			FileSizeBytesText: sizeBytes,
+			Locations:         detail.Locations,
 			AuthorLine:        fullAuthorLine(detail.Authors),
 			Publisher:         detail.Publisher,
 			PublishedDate:     detail.PublishedDate,
