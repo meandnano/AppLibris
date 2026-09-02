@@ -113,15 +113,28 @@ func fullAuthorLine(names []string) string {
 }
 
 // humanSize formats n bytes as e.g. "12.3 MB", binary (1024-based) units.
+// Picking the unit off the truncated ratio isn't quite enough on its own:
+// a value like 1023.97 is < 1024 but rounds to "1024.0" at one decimal
+// place, so a size a handful of bytes under 1 GiB would otherwise print as
+// "1024.0 MB". Bumping the unit once more when the rounded value would
+// reach the next tier's threshold keeps the displayed number and its unit
+// in agreement.
 func humanSize(n int64) string {
 	const unit = 1024
 	if n < unit {
 		return fmt.Sprintf("%d B", n)
 	}
+	units := "KMGTPE"
 	div, exp := int64(unit), 0
 	for x := n / unit; x >= unit; x /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+	value := float64(n) / float64(div)
+	if value >= unit-0.05 && exp < len(units)-1 {
+		div *= unit
+		exp++
+		value = float64(n) / float64(div)
+	}
+	return fmt.Sprintf("%.1f %cB", value, units[exp])
 }

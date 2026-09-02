@@ -389,6 +389,13 @@ a:hover {
 
 /* ---------- book detail ---------- */
 
+/* SCREENS.md 03 gives this page its own page padding (40px 44px 48px),
+   distinct from the grid page's — an override rather than changing .page
+   itself, which the grid page also uses. */
+.page--detail {
+  padding: 40px 44px 48px;
+}
+
 .back-link {
   display: inline-block;
   margin-bottom: 24px;

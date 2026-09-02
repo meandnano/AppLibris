@@ -192,3 +192,26 @@ func TestBookDetailHandlerShowsLocationsAndMissingAnnotation(t *testing.T) {
 func itoa(n int64) string {
 	return strconv.FormatInt(n, 10)
 }
+
+func TestHumanSize(t *testing.T) {
+	cases := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0 B"},
+		{1023, "1023 B"},
+		{1258291, "1.2 MB"},
+		{1024, "1.0 KB"},
+		// One byte short of each binary unit: the unrounded ratio is just
+		// under the threshold (1023.999...), but rounds to "1024.0" at one
+		// decimal place if the unit isn't bumped to compensate.
+		{1024*1024 - 1, "1.0 MB"},
+		{1024*1024*1024 - 1, "1.0 GB"},
+		{1024 * 1024 * 1024, "1.0 GB"},
+	}
+	for _, c := range cases {
+		if got := humanSize(c.bytes); got != c.want {
+			t.Errorf("humanSize(%d) = %q, want %q", c.bytes, got, c.want)
+		}
+	}
+}
