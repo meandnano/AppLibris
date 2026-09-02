@@ -45,17 +45,27 @@ func (s *Service) ListBooks(ctx context.Context) ([]BookSummary, error) {
 // input that's only punctuation or an FTS5 keyword like AND, still becomes
 // a literal search term rather than degrading to "no search" — see
 // SanitizeFTSQuery.
-func (s *Service) SearchBooks(ctx context.Context, query string) ([]BookSummary, error) {
+//
+// The bool reports which of those two happened, so a caller rendering a
+// "searching" state doesn't have to re-derive it from the raw query and
+// get it wrong. Blank-after-trimming is not the only input that sanitizes
+// to nothing: SanitizeFTSQuery also strips control characters, so "?q=%00"
+// is a non-blank query that is nonetheless no search at all. Deciding it
+// here keeps the one definition of "this was a search" next to the one
+// place that can answer it.
+func (s *Service) SearchBooks(ctx context.Context, query string) ([]BookSummary, bool, error) {
 	sanitized := storage.SanitizeFTSQuery(query)
 	if sanitized == "" {
-		return s.ListBooks(ctx)
+		books, err := s.ListBooks(ctx)
+		return books, false, err
 	}
 
 	books, err := s.db.SearchBooks(ctx, sanitized)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
-	return s.summarize(ctx, books)
+	summaries, err := s.summarize(ctx, books)
+	return summaries, true, err
 }
 
 // CountBooks returns the total number of books, independent of any search

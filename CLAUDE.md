@@ -174,10 +174,15 @@ full design.
   as a second thin transport alongside `internal/web`. `ListBooks` and
   `SearchBooks` both assemble `internal/storage`'s books and authors into a
   `BookSummary` per book via a shared unexported `summarize` helper.
-  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first; a blank or
-  whitespace-only query is treated as `ListBooks` — the empty search box
-  and a freshly-loaded page are the same state, so callers don't
-  special-case it. `CountBooks` returns the library's total size,
+  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first; a query
+  that sanitizes to nothing is treated as `ListBooks` — the empty search
+  box and a freshly-loaded page are the same state, so callers don't
+  special-case it — and its second return value reports which of the two
+  happened. That bool exists because "sanitizes to nothing" is wider than
+  "looks blank": control characters are stripped, so `?q=%00` is a
+  non-blank query that is nonetheless no search, and a transport deriving
+  its own "searching" flag from the raw query would render a result count
+  over the whole unfiltered library. `CountBooks` returns the library's total size,
   independent of any search filter — what the masthead shows, kept
   separate from however many a search matched.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
@@ -227,18 +232,28 @@ full design.
   partial request. Whether a request gets the full page or just the
   `book-grid` fragment (a named template in `templates/partials.html`,
   alongside the new `search-bar`) depends on the `HX-Request` header htmx
-  sets, so the handler always sets `Vary: HX-Request` — the same URL now
-  serves two different bodies, and without the header a cache or the
-  browser's back-forward cache could serve one where the other was wanted.
+  sets — but on that header *without* `HX-History-Restore-Request`, not on
+  `HX-Request` alone. htmx sets both on the request it issues when the user
+  goes Back to a URL that has dropped out of its history cache (ten
+  entries, and `hx-push-url` pushes one per keystroke, so this is ordinary
+  Back-button use), and it swaps that response into the whole document
+  body — so answering it with the fragment replaces the masthead, search
+  bar and scripts with a bare grid that can no longer search. Both headers
+  are therefore named in `Vary: HX-Request, HX-History-Restore-Request`:
+  this one URL serves different bodies depending on both, and without the
+  header a cache or the browser's back-forward cache could serve one where
+  another was wanted.
   The search box itself lives only in the full-page render, never in the
   fragment: `hx-target="#book-grid"` with `hx-swap="outerHTML"` means only
   the grid is ever replaced, so a keystroke mid-request is never lost to a
   render. `hx-push-url="true"` keeps the URL shareable. With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
-  drift out of sync. A blank or whitespace-only `q` is "not searching" —
-  the plain grid, no result count, same as before this query parameter
-  existed; a non-blank `q` renders either the count-and-filtered-grid state
+  drift out of sync. A `q` that sanitizes to nothing is "not
+  searching" — the plain grid, no result count, same as before this query
+  parameter existed; that covers blank and whitespace-only input and also
+  input stripped to nothing, such as a lone control character. A `q` that
+  does search renders either the count-and-filtered-grid state
   or a distinct `search__empty` block (`Nothing matches "<query>"`, the
   query HTML-escaped by `html/template`) if nothing matched — kept visually
   and structurally separate from the "No books yet" empty-library block,

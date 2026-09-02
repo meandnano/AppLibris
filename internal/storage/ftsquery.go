@@ -30,8 +30,19 @@ import (
 // way needs both sides normalized the same way — see syncBookFTSTx for
 // the index-side half of this.
 //
+// Only a whole query of that shape takes the ISBN path. A partial ISBN —
+// "978-0-85705" typed on the way to the full one — is neither 10 nor 13
+// characters, so it falls through to the per-word path below and is quoted
+// whole, which FTS5 reads as the phrase "978 0 85705"; the single
+// normalized token the index holds does not contain that phrase, so it
+// matches nothing. Prefix-matching an ISBN as it is typed therefore works
+// only for the unpunctuated form, which is a known gap rather than a
+// decision — see docs/backlog/2026090202-partial-isbn-prefix-search.md.
+//
 // Input with no non-whitespace content returns "", which callers treat as
 // "no search" (the full list) rather than a query that matches nothing.
+// So does input that is entirely control characters, since those are
+// stripped above — "no search" there too, not a search for nothing.
 func SanitizeFTSQuery(input string) string {
 	input = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {

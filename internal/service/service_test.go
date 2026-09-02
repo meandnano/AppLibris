@@ -75,9 +75,12 @@ func TestSearchBooksBlankQueryReturnsFullList(t *testing.T) {
 	}
 
 	for _, q := range []string{"", "   ", "\t"} {
-		books, err := svc.SearchBooks(ctx, q)
+		books, searched, err := svc.SearchBooks(ctx, q)
 		if err != nil {
 			t.Fatalf("SearchBooks(%q): %v", q, err)
+		}
+		if searched {
+			t.Errorf("SearchBooks(%q) reported a search; a query that sanitizes to nothing is not one", q)
 		}
 		if len(books) != 1 {
 			t.Errorf("SearchBooks(%q) = %d books, want the full list (1)", q, len(books))
@@ -98,9 +101,12 @@ func TestSearchBooksMatchReturnsSummaryWithAuthors(t *testing.T) {
 		t.Fatalf("CreateBook unrelated: %v", err)
 	}
 
-	books, err := svc.SearchBooks(ctx, "Piranesi")
+	books, searched, err := svc.SearchBooks(ctx, "Piranesi")
 	if err != nil {
 		t.Fatalf("SearchBooks: %v", err)
+	}
+	if !searched {
+		t.Error("SearchBooks(Piranesi) reported no search, want a search")
 	}
 	if len(books) != 1 || books[0].ID != matchID {
 		t.Fatalf("SearchBooks(Piranesi) = %+v, want exactly the matching book", books)

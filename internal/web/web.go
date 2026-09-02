@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"library/internal/service"
 )
@@ -63,25 +62,37 @@ type libraryPage struct {
 	Searching bool
 }
 
-// libraryHandler serves both the full library page and, for an htmx
+// libraryHandler serves both the full library page and, for a live search
 // request, just its book-grid fragment — the same resource, differing
 // only in how much of the page comes back. GET /?q=... narrows the grid to
-// a search; a blank or missing q is the unfiltered list. Vary: HX-Request
-// matters because the two responses at this one URL have different
-// bodies: without it a shared cache or the browser's back-forward cache
-// could serve a bare fragment where a full page was expected, or the
-// reverse.
+// a search; a blank or missing q is the unfiltered list.
+//
+// HX-Request alone does not mean "send the fragment". htmx sets it on a
+// history-restore request too — the GET it issues when the user goes Back
+// to a URL that has fallen out of its history cache (ten entries, and
+// hx-push-url pushes one per keystroke, so this is ordinary Back-button
+// use, not an edge case) — and there it swaps the response into the whole
+// body. Answering that with the fragment would replace the masthead, the
+// search bar and the scripts with a bare grid, leaving no way back but a
+// manual reload. htmx marks that request HX-History-Restore-Request, so
+// the fragment is for a request carrying HX-Request without it.
+//
+// Both headers are named in Vary because both change the body at this one
+// URL: without it a shared cache or the browser's back-forward cache could
+// serve a bare fragment where a full page was expected, or the reverse.
 func libraryHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Vary", "HX-Request")
+		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
 
 		query := r.URL.Query().Get("q")
-		searching := strings.TrimSpace(query) != ""
-		fragment := r.Header.Get("HX-Request") != ""
+		fragment := r.Header.Get("HX-Request") != "" && r.Header.Get("HX-History-Restore-Request") == ""
 
 		// SearchBooks already treats a blank query as ListBooks, so this
-		// covers both cases without repeating that check here.
-		books, err := svc.SearchBooks(r.Context(), query)
+		// covers both cases without repeating that check here, and it
+		// reports whether what came back was a search — which is not the
+		// same as the query looking non-blank, since input that sanitizes
+		// to nothing (a lone control character, say) is no search either.
+		books, searching, err := svc.SearchBooks(r.Context(), query)
 		if err != nil {
 			slog.Error("list books failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
