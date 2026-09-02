@@ -64,3 +64,48 @@ func TestListBooksAssemblesAuthors(t *testing.T) {
 		t.Errorf("none.Authors = %v, want empty", none.Authors)
 	}
 }
+
+func TestSearchBooksBlankQueryReturnsFullList(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	if _, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "A Book", SortTitle: "A Book", Format: "epub"}, nil); err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	for _, q := range []string{"", "   ", "\t"} {
+		books, err := svc.SearchBooks(ctx, q)
+		if err != nil {
+			t.Fatalf("SearchBooks(%q): %v", q, err)
+		}
+		if len(books) != 1 {
+			t.Errorf("SearchBooks(%q) = %d books, want the full list (1)", q, len(books))
+		}
+	}
+}
+
+func TestSearchBooksMatchReturnsSummaryWithAuthors(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	matchID, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "Piranesi", SortTitle: "Piranesi", Format: "epub"}, []string{"Susanna Clarke"})
+	if err != nil {
+		t.Fatalf("CreateBook match: %v", err)
+	}
+	if _, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-2", Title: "Unrelated", SortTitle: "Unrelated", Format: "epub"}, nil); err != nil {
+		t.Fatalf("CreateBook unrelated: %v", err)
+	}
+
+	books, err := svc.SearchBooks(ctx, "Piranesi")
+	if err != nil {
+		t.Fatalf("SearchBooks: %v", err)
+	}
+	if len(books) != 1 || books[0].ID != matchID {
+		t.Fatalf("SearchBooks(Piranesi) = %+v, want exactly the matching book", books)
+	}
+	if len(books[0].Authors) != 1 || books[0].Authors[0] != "Susanna Clarke" {
+		t.Errorf("SearchBooks result Authors = %v, want [Susanna Clarke]", books[0].Authors)
+	}
+}

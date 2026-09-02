@@ -74,6 +74,110 @@ func TestLibraryHandlerRendersEmptyState(t *testing.T) {
 	}
 }
 
+func newTestHandlerWithBook(t *testing.T, title string, authors []string) http.Handler {
+	t.Helper()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if _, err := db.CreateBook(context.Background(), storage.Book{
+		ContentHash: "hash-1",
+		Title:       title,
+		SortTitle:   title,
+		Format:      "epub",
+	}, authors); err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	return Routes(service.New(db), t.TempDir())
+}
+
+func TestSearchFullPageRendersFilteredGridWithEchoedQuery(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=<script>alert(1)</script>", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=... status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<html") {
+		t.Errorf("GET /?q=... without HX-Request body does not look like a full page: %q", body)
+	}
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Errorf("GET /?q=... body contains an unescaped <script> tag from the query: %q", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
+		t.Errorf("GET /?q=... body does not contain the HTML-escaped query echoed back: %q", body)
+	}
+	if !strings.Contains(body, "Nothing matches") {
+		t.Errorf("GET /?q=... body = %q, want the no-results state (nothing titled <script>...)", body)
+	}
+}
+
+func TestSearchFragmentOmitsFullPageChromeAndSetsVary(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=Piranesi (HX-Request) status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "<html") || strings.Contains(body, "<head") {
+		t.Errorf("HX-Request response contains full-page chrome: %q", body)
+	}
+	if !strings.Contains(body, "Piranesi") {
+		t.Errorf("HX-Request response = %q, want it to contain the matching book", body)
+	}
+	if got := rec.Header().Get("Vary"); got != "HX-Request" {
+		t.Errorf("GET /?q=Piranesi Vary = %q, want %q", got, "HX-Request")
+	}
+}
+
+func TestSearchNoResultsIsDistinctFromEmptyLibrary(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=nonexistentbook", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "search__empty") {
+		t.Errorf("no-results body = %q, want the search__empty block", body)
+	}
+	if strings.Contains(body, "No books yet") {
+		t.Errorf("no-results body = %q, want the no-results block, not the empty-library block", body)
+	}
+}
+
+func TestSearchBlankQueryIsIdleNotSearching(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	for _, path := range []string{"/", "/?q=", "/?q=%20%20"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("HX-Request", "true")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		body := rec.Body.String()
+		if !strings.Contains(body, "Piranesi") {
+			t.Errorf("GET %s body = %q, want the full unfiltered grid", path, body)
+		}
+		if strings.Contains(body, "search__count") {
+			t.Errorf("GET %s body = %q, want no result count on the idle/unfiltered grid", path, body)
+		}
+	}
+}
+
 func TestUnknownPathReturns404(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
 	if err != nil {

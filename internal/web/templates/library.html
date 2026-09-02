@@ -5,33 +5,8 @@
 {{template "site-header" .}}
 
 <main class="page">
-  {{if .Books}}
-  <ul class="grid">
-    {{range .Books}}
-    <li class="card">
-      <div class="card__shelf">
-        {{if .CoverURL}}
-        <img class="card__cover" src="{{.CoverURL}}" alt="" loading="lazy" decoding="async">
-        {{else}}
-        <div class="card__cover card__cover--missing"><span>no cover</span></div>
-        {{end}}
-      </div>
-      <h2 class="card__title">{{.Title}}</h2>
-      {{if .AuthorLine}}
-      <p class="card__author">{{.AuthorLine}}</p>
-      {{else}}
-      <p class="card__author card__author--unknown">Author unknown</p>
-      {{end}}
-      <p class="card__meta"><span class="badge">{{.Format}}</span></p>
-    </li>
-    {{end}}
-  </ul>
-  {{else}}
-  <div class="empty">
-    <h2 class="empty__title">No books yet</h2>
-    <p class="empty__body">Drop EPUB or FB2 files into your library directory. The next scan picks them up.</p>
-  </div>
-  {{end}}
+{{template "search-bar" .}}
+{{template "book-grid" .}}
 </main>
 
 {{template "site-scripts" .}}

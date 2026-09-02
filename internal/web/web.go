@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"library/internal/service"
 )
@@ -42,16 +43,41 @@ type bookCard struct {
 	CoverURL   string
 }
 
-// libraryPage is the data library.html renders against.
+// libraryPage is the data library.html (and its book-grid fragment) render
+// against. Query and Searching distinguish "browsing the whole library"
+// from "typed something, however it resolved" — a blank Books with
+// Searching true is the no-results state; a blank Books with Searching
+// false is the empty-library state, and the two need different treatment.
 type libraryPage struct {
-	Title string
-	Count int
-	Books []bookCard
+	Title     string
+	Count     int
+	Books     []bookCard
+	Query     string
+	Searching bool
 }
 
+// libraryHandler serves both the full library page and, for an htmx
+// request, just its book-grid fragment — the same resource, differing
+// only in how much of the page comes back. GET /?q=... narrows the grid to
+// a search; a blank or missing q is the unfiltered list. Vary: HX-Request
+// matters because the two responses at this one URL have different
+// bodies: without it a shared cache or the browser's back-forward cache
+// could serve a bare fragment where a full page was expected, or the
+// reverse.
 func libraryHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		books, err := svc.ListBooks(r.Context())
+		w.Header().Set("Vary", "HX-Request")
+
+		query := r.URL.Query().Get("q")
+		searching := strings.TrimSpace(query) != ""
+
+		var books []service.BookSummary
+		var err error
+		if searching {
+			books, err = svc.SearchBooks(r.Context(), query)
+		} else {
+			books, err = svc.ListBooks(r.Context())
+		}
 		if err != nil {
 			slog.Error("list books failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -69,9 +95,14 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 			}
 		}
 
-		page := libraryPage{Title: "Library", Count: len(cards), Books: cards}
-		if err := render(w, "library.html", page); err != nil {
-			slog.Error("render template failed", "template", "library.html", "error", err)
+		page := libraryPage{Title: "Library", Count: len(cards), Books: cards, Query: query, Searching: searching}
+
+		templateName := "library.html"
+		if r.Header.Get("HX-Request") != "" {
+			templateName = "book-grid"
+		}
+		if err := render(w, templateName, page); err != nil {
+			slog.Error("render template failed", "template", templateName, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
 	}

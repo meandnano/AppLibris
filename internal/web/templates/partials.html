@@ -36,4 +36,72 @@
 
 {{define "site-scripts"}}
 <script src="/static/js/theme.js" defer></script>
+<script src="/static/js/htmx.min.js" defer></script>
+{{end}}
+
+{{/* The input is never itself re-rendered by htmx — only #book-grid below
+     it is the swap target, so a keystroke in flight is never lost — which
+     is why search-bar is only ever included on a full-page render, never
+     part of the book-grid fragment a search request swaps in. With
+     JavaScript disabled this degrades to a plain form GET: the same
+     handler serves both, so no separate no-JS path exists to fall out of
+     sync. */}}
+{{define "search-bar"}}
+<form class="search" id="search-form" action="/" method="get" role="search">
+  <div class="search__box">
+    <span class="search__icon" aria-hidden="true">⌕</span>
+    <input class="search__input" type="search" name="q" value="{{.Query}}"
+           placeholder="Search title or author" aria-label="Search title or author"
+           hx-get="/" hx-trigger="input changed delay:300ms, search"
+           hx-target="#book-grid" hx-swap="outerHTML" hx-push-url="true"
+           hx-indicator="closest form">
+    <span class="search__spinner" aria-hidden="true"></span>
+  </div>
+</form>
+{{end}}
+
+{{/* The count line and the no-results block live inside this fragment,
+     not beside it, so an htmx swap of #book-grid updates them together
+     with no separate out-of-band swap to keep in sync. Distinct from the
+     "No books yet" empty-library block below: "nothing matched this
+     search" and "the library has nothing in it" are different states that
+     call for different next actions. */}}
+{{define "book-grid"}}
+<div id="book-grid">
+  {{if .Books}}
+  {{if .Searching}}
+  <p class="search__count">{{len .Books}} {{if eq (len .Books) 1}}book{{else}}books{{end}} matched</p>
+  {{end}}
+  <ul class="grid">
+    {{range .Books}}
+    <li class="card">
+      <div class="card__shelf">
+        {{if .CoverURL}}
+        <img class="card__cover" src="{{.CoverURL}}" alt="" loading="lazy" decoding="async">
+        {{else}}
+        <div class="card__cover card__cover--missing"><span>no cover</span></div>
+        {{end}}
+      </div>
+      <h2 class="card__title">{{.Title}}</h2>
+      {{if .AuthorLine}}
+      <p class="card__author">{{.AuthorLine}}</p>
+      {{else}}
+      <p class="card__author card__author--unknown">Author unknown</p>
+      {{end}}
+      <p class="card__meta"><span class="badge">{{.Format}}</span></p>
+    </li>
+    {{end}}
+  </ul>
+  {{else if .Searching}}
+  <div class="search__empty">
+    <h2 class="search__empty-title">Nothing matches &ldquo;{{.Query}}&rdquo;</h2>
+    <p class="search__empty-body">Search runs over title, authors, description and ISBN.</p>
+  </div>
+  {{else}}
+  <div class="empty">
+    <h2 class="empty__title">No books yet</h2>
+    <p class="empty__body">Drop EPUB or FB2 files into your library directory. The next scan picks them up.</p>
+  </div>
+  {{end}}
+</div>
 {{end}}

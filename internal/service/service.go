@@ -34,7 +34,35 @@ func (s *Service) ListBooks(ctx context.Context) ([]BookSummary, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.summarize(ctx, books)
+}
 
+// SearchBooks returns every book matching query, with its authors attached,
+// ordered by sort_title. A query that sanitizes to nothing searchable — an
+// empty string, or one built only of whitespace, quotes or operators — is
+// treated as no search at all: the empty search box and a freshly-loaded
+// page are the same state, so the handler needs no special-casing between
+// them.
+func (s *Service) SearchBooks(ctx context.Context, query string) ([]BookSummary, error) {
+	sanitized := storage.SanitizeFTSQuery(query)
+	if sanitized == "" {
+		return s.ListBooks(ctx)
+	}
+
+	books, err := s.db.SearchBooks(ctx, sanitized)
+	if err != nil {
+		return nil, err
+	}
+	return s.summarize(ctx, books)
+}
+
+// summarize attaches authors to books and shapes both into BookSummary.
+// ListBookAuthors loads every book's authors rather than a filtered
+// variant scoped to books — at this library's scale the whole-table map is
+// cheaper than the extra query plumbing a filtered version would need, and
+// ListBooks already set that precedent before SearchBooks needed the same
+// shape.
+func (s *Service) summarize(ctx context.Context, books []storage.Book) ([]BookSummary, error) {
 	authorsByBook, err := s.db.ListBookAuthors(ctx)
 	if err != nil {
 		return nil, err

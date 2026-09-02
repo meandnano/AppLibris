@@ -51,6 +51,30 @@ type BookFile struct {
 
 const bookColumns = `id, content_hash, title, sort_title, publisher, published_date, language, isbn, description, cover_path, cover_retry, format, added_at, modified_at, derived_from`
 
+// qualifiedBookColumns is bookColumns with every column prefixed
+// books. — needed wherever a query joins books against another table that
+// has columns of the same name (books_fts, in SearchBooks, has its own
+// title and isbn), so an unqualified list would be ambiguous.
+const qualifiedBookColumns = `books.id, books.content_hash, books.title, books.sort_title, books.publisher, books.published_date, books.language, books.isbn, books.description, books.cover_path, books.cover_retry, books.format, books.added_at, books.modified_at, books.derived_from`
+
+// scanBooks reads every row of a bookColumns/qualifiedBookColumns result set
+// into a slice, closing rows itself. Shared by ListBooks and SearchBooks so
+// the two don't carry two copies of the same Scan call list.
+func scanBooks(rows *sql.Rows) ([]Book, error) {
+	defer rows.Close()
+	var books []Book
+	for rows.Next() {
+		var b Book
+		if err := rows.Scan(&b.ID, &b.ContentHash, &b.Title, &b.SortTitle, &b.Publisher, &b.PublishedDate,
+			&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.CoverRetry, &b.Format,
+			&b.AddedAt, &b.ModifiedAt, &b.DerivedFrom); err != nil {
+			return nil, err
+		}
+		books = append(books, b)
+	}
+	return books, rows.Err()
+}
+
 func scanBook(row *sql.Row) (*Book, error) {
 	var b Book
 	err := row.Scan(&b.ID, &b.ContentHash, &b.Title, &b.SortTitle, &b.Publisher, &b.PublishedDate,
@@ -92,19 +116,26 @@ func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return scanBooks(rows)
+}
 
-	var books []Book
-	for rows.Next() {
-		var b Book
-		if err := rows.Scan(&b.ID, &b.ContentHash, &b.Title, &b.SortTitle, &b.Publisher, &b.PublishedDate,
-			&b.Language, &b.ISBN, &b.Description, &b.CoverPath, &b.CoverRetry, &b.Format,
-			&b.AddedAt, &b.ModifiedAt, &b.DerivedFrom); err != nil {
-			return nil, err
-		}
-		books = append(books, b)
+// SearchBooks returns every book whose books_fts row matches query, ordered
+// by sort_title rather than relevance — DESIGN.md's search UI filters the
+// grid in place rather than opening a results page, and reordering a grid
+// the user is actively scanning while they type would be jarring. query
+// must already be a valid FTS5 MATCH expression; SanitizeFTSQuery is what
+// produces one from raw user input.
+func (db *DB) SearchBooks(ctx context.Context, query string) ([]Book, error) {
+	rows, err := db.read.QueryContext(ctx, `
+		SELECT `+qualifiedBookColumns+`
+		FROM books
+		JOIN books_fts ON books_fts.rowid = books.id
+		WHERE books_fts MATCH ?
+		ORDER BY books.sort_title`, query)
+	if err != nil {
+		return nil, err
 	}
-	return books, rows.Err()
+	return scanBooks(rows)
 }
 
 // ListBookAuthors returns every book's author names, keyed by book id, in
@@ -223,6 +254,29 @@ func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string)
 	return id, nil
 }
 
+// syncBookFTSTx recomputes bookID's books_fts row from the books/
+// book_authors/authors tables as they stand right now, replacing whatever
+// was there. Recompute-from-scratch rather than incremental update means
+// there is no separate "what changed" bookkeeping to keep in sync with
+// reality — the same call serves book creation and every future metadata
+// edit. Must run after both the book row and its author links exist, since
+// the FTS row needs to see the authors; it must be called from inside a
+// DB.Write callback — see DB.Write's contract.
+func syncBookFTSTx(ctx context.Context, tx *sql.Tx, bookID int64) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM books_fts WHERE rowid = ?`, bookID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO books_fts (rowid, title, authors, description, isbn)
+		SELECT b.id, b.title, coalesce(group_concat(a.name, ' '), ''), b.description, b.isbn
+		FROM books b
+		LEFT JOIN book_authors ba ON ba.book_id = b.id
+		LEFT JOIN authors a ON a.id = ba.author_id
+		WHERE b.id = ?
+		GROUP BY b.id`, bookID)
+	return err
+}
+
 // CreateBook inserts a new book row along with its authors, find-or-creating
 // each author by name and linking it via book_authors. Runs as one write
 // transaction. Callers attach the book's first file location separately via
@@ -230,7 +284,10 @@ func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string)
 func (db *DB) CreateBook(ctx context.Context, b Book, authorNames []string) (id int64, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		id, err = createBookTx(ctx, tx, b, authorNames)
-		return err
+		if err != nil {
+			return err
+		}
+		return syncBookFTSTx(ctx, tx, id)
 	})
 	return id, err
 }
@@ -259,6 +316,9 @@ func (db *DB) CreateBookWithFile(ctx context.Context, b Book, authorNames []stri
 
 		id, err = createBookTx(ctx, tx, b, authorNames)
 		if err != nil {
+			return err
+		}
+		if err := syncBookFTSTx(ctx, tx, id); err != nil {
 			return err
 		}
 		if _, err := upsertBookFileTx(ctx, tx, id, path, size, mtime); err != nil {
