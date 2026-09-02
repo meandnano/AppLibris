@@ -28,7 +28,7 @@ note says which. **Not built** — designed here, no code yet.
 | Area | Status |
 |---|---|
 | SQLite storage, WAL, single writer, migrations | Built |
-| FTS5 index | Not built — planned, see `docs/plans/2026090106-full-text-search.md` |
+| FTS5 index | Built |
 | Library directory, covers directory | Built |
 | Scanner: startup sweep, periodic rescan, cheap check, hash identity | Built |
 | Scanner: filesystem watcher | Not built — the periodic rescan is the only live-update mechanism |
@@ -43,7 +43,8 @@ note says which. **Not built** — designed here, no code yet.
 | Send to Kindle: job model, recipient picker | Not built |
 | Web UI: server-side templates, embedded CSS, service layer | Built |
 | Web UI: library grid | Built |
-| Web UI: htmx, search, book detail, inline editing, send control | Not built — search planned (`docs/plans/2026090106`) |
+| Web UI: htmx, search, book detail | Built |
+| Web UI: inline editing, send control | Not built |
 | Format conversion, near-duplicate detection, programmatic API | Not built — deferred by design |
 | Authentication | Not built, by design |
 
@@ -69,7 +70,7 @@ irrelevant here: writes come in scan bursts, reads dominate.
 - Run in WAL mode.
 - Single writer goroutine.
 
-**Status: Built, except FTS5.** `internal/storage` opens the database in WAL
+**Status: Built.** `internal/storage` opens the database in WAL
 mode with foreign keys on, and serialises writes through a write pool
 pinned to a single connection rather than a hand-rolled goroutine and
 channel — same guarantee, less machinery. The read pool is bounded (8
@@ -77,10 +78,10 @@ connections) so read concurrency reuses pooled connections instead of
 churning fresh ones. Schema changes are embedded SQL migration files
 applied in filename order, each in its own transaction.
 
-The FTS5 index does not exist yet, but is now planned
-(`docs/plans/2026090106-full-text-search.md`) — FTS5 support in the
-pure-Go driver has been verified, so the reason SQLite was chosen over
-Bolt is about to stop running on credit.
+The FTS5 index exists now (`docs/plans/completed/2026090106-full-text-search.md`)
+— a `books_fts` virtual table over title, authors, description and ISBN,
+synced on every book create — so the reason SQLite was chosen over Bolt
+is no longer running on credit.
 
 `CGO_ENABLED=0` holds and the image is a single static binary. The image
 base is `distroless/static-debian12:nonroot` rather than literal
@@ -414,30 +415,36 @@ htmx is used only where dynamism is actually needed:
 - the send-to-Kindle button swapping into a status indicator that polls the job
 - inline metadata editing on a book row
 
-**Status: Partial — the server-rendered shell is built, the dynamic parts
-are not.**
+**Status: Partial — the library grid, search and book detail are built;
+the send control and inline editing are not.**
 
-Built: `internal/web` serves the library grid at `GET /`, with templates,
-CSS and a theme script embedded via `go:embed` and no build step, translated
-from the mockups in `UI.md`. Cover thumbnails are served from the covers
+Built: `internal/web` serves the library grid at `GET /` and a book
+detail page at `GET /books/{id}`, with templates, CSS and a theme script
+embedded via `go:embed` and no build step, translated from the mockups in
+`UI.md`/`ui-handoff/`. Cover thumbnails are served from the covers
 directory; both the covers and static mounts refuse to generate directory
 listings and carry cache validators. Templates render into a buffer
 before anything is written, so a template error is a clean 500 rather
 than a truncated page.
 
 The catch-all caveat this section used to carry is fixed: the library
-page matches only `/` exactly and the mux owns its 404s, so a
-`/books/{id}` route can exist without a stale link silently rendering
-the whole library
-(`docs/plans/completed/2026083112-web-transport-correctness.md`).
+page matches only `/` exactly and the mux owns its 404s
+(`docs/plans/completed/2026083112-web-transport-correctness.md`), and
+`/books/{id}` is now that route — a non-numeric or unknown id 404s rather
+than silently rendering the whole library.
 
-Not built: **htmx itself is not vendored** — none of the three interactions
-above exists. Search is the first with no unbuilt prerequisite and is
-planned, htmx vendoring included
-(`docs/plans/2026090106-full-text-search.md`); the send control remains
-blocked on the job model and inline editing on field provenance. Book
-detail and the multi-location badge are likewise unbuilt, though nothing
-blocks either any more.
+htmx is vendored (`docs/plans/completed/2026090106-full-text-search.md`)
+and, of the three interactions this section names, search-as-you-type is
+built: a `q` parameter narrows the grid via an htmx partial swap, `Vary:
+HX-Request` since the same URL serves a full page or just the fragment,
+and the same handler degrades to a plain form GET with JS off. Not
+built: the send control, still blocked on the job model, and inline
+metadata editing, still blocked on field provenance — the detail page
+leaves both their designed positions empty and collapsed rather than
+mocking them. The multi-location badge on the grid is also still unbuilt,
+though the detail page shows a book's locations directly now
+(`docs/plans/completed/2026090107-book-detail-page.md`), which delivers
+most of that item's value anyway.
 
 ### Layering for a future API
 
@@ -450,9 +457,9 @@ transport over the same service calls, and no business logic ends up trapped
 inside a template handler.
 
 **Status: Built.** `internal/service` sits beneath `internal/web` as
-described, and the handlers are thin over it. It has one method so far
-(`ListBooks`), which is as much as the single existing page needs. The
-`/api/v1` transport itself remains deferred.
+described, and the handlers are thin over it: `ListBooks`, `SearchBooks`,
+`CountBooks` and `GetBook` are as much as the grid and detail pages need
+so far. The `/api/v1` transport itself remains deferred.
 
 ## Authentication
 
@@ -483,7 +490,7 @@ first thing that has to change, and several others follow it.
 
 Worth keeping distinct from the rest of this document: *deferred* is not the
 same as *not yet built*. Everything in this list was consciously ruled out
-of scope. The filesystem watcher, the FTS5 index, the send job model,
-provider enrichment and the book detail page are all unbuilt but **not**
-deferred — they are in scope and simply haven't been reached. Only the six
-items above are decisions rather than backlog.
+of scope. The filesystem watcher, the send job model and provider
+enrichment are all unbuilt but **not** deferred — they are in scope and
+simply haven't been reached. Only the six items above are decisions
+rather than backlog.
