@@ -32,11 +32,23 @@ const pollInterval = 1 * time.Minute
 // stops a future transport from returning something enormous.
 const maxFailureReason = 500
 
+// markTimeout bounds the write that records a send's outcome. It runs on a
+// context detached from the worker's, so it needs a deadline of its own —
+// short, because it is one local SQLite write and the process may be inside
+// its shutdown budget when it happens.
+const markTimeout = 5 * time.Second
+
 // fileGoneReason is recorded when a send's book has no file location left
 // to send — the book was pruned, or every copy is currently marked
 // missing. Resolved at send time, not enqueue time, since a queue is a
 // promise to act later and the library moves underneath it.
 const fileGoneReason = "the file is no longer in the library"
+
+// lookupFailedReason is recorded when the library index itself could not be
+// read, which is not the same thing as the file being gone and must not
+// claim to be: the book may be perfectly fine. Says "try again" because,
+// unlike every other failure here, this one plausibly succeeds next time.
+const lookupFailedReason = "could not read the library index — try again"
 
 // Transport is what the worker needs from a mail provider. Declared here,
 // on the consumer side, rather than in internal/resend — which notes it
@@ -113,7 +125,10 @@ func (w *Worker) drain(ctx context.Context) {
 
 		send, err := w.db.ClaimNextSend(ctx, time.Now())
 		if err != nil {
-			slog.Error("claim next send", "error", err)
+			// A claim that lost its context is shutdown, not failure.
+			if ctx.Err() == nil {
+				slog.Error("claim next send", "error", err)
+			}
 			return
 		}
 		if send == nil {
@@ -131,7 +146,16 @@ func (w *Worker) drain(ctx context.Context) {
 func (w *Worker) process(ctx context.Context, send *storage.Send) {
 	path, filename, err := w.resolveFile(ctx, send)
 	if err != nil {
-		w.fail(ctx, send.ID, err.Error())
+		// Only errFileGone is a sentence written for a reader; anything
+		// else is a storage failure, whose text belongs in the log rather
+		// than in the status box under the Send button — and which says
+		// nothing about whether the book is still there.
+		reason := fileGoneReason
+		if !errors.Is(err, errFileGone) {
+			slog.Error("resolve send file", "send_id", send.ID, "error", err)
+			reason = lookupFailedReason
+		}
+		w.fail(ctx, send.ID, reason)
 		return
 	}
 
@@ -159,11 +183,27 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 	})
 	cancel()
 	if err != nil {
+		// A transport error that arrives with the worker's own context
+		// already cancelled says nothing about whether Resend received
+		// the message — the request was abandoned, not answered. Leave
+		// the row sending for FailInterruptedSends to surface at the
+		// next startup, rather than recording a failure that might be a
+		// silent success. Every other transport error is an answer.
+		if ctx.Err() != nil {
+			return
+		}
 		w.fail(ctx, send.ID, truncate(err.Error(), maxFailureReason))
 		return
 	}
 
-	if err := w.db.MarkSendDelivered(ctx, send.ID, messageID, time.Now()); err != nil {
+	// Deliberately not ctx: Resend has accepted the message, and a
+	// shutdown landing in this gap would otherwise leave the row sending
+	// for FailInterruptedSends to rewrite as failed — reporting a book
+	// that did arrive as one that didn't, and inviting a duplicate send.
+	// The outcome of a completed request is always worth the write.
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)
+	defer cancel()
+	if err := w.db.MarkSendDelivered(markCtx, send.ID, messageID, time.Now()); err != nil {
 		slog.Error("mark send delivered", "send_id", send.ID, "error", err)
 	}
 }
@@ -193,8 +233,18 @@ func (w *Worker) resolveFile(ctx context.Context, send *storage.Send) (path, fil
 // without distinguishing "how" it's gone.
 var errFileGone = errors.New(fileGoneReason)
 
+// fail records sendID's terminal failure. Like the delivered path, it
+// writes on a context detached from ctx: every caller has already
+// established that this send definitely failed — the file is gone, too
+// large, unreadable, or the transport answered with a rejection — and
+// losing that verdict to a shutdown would turn a definite failure into the
+// ambiguous sending row recovery has to hedge over. The one genuinely
+// ambiguous case, a transport call abandoned mid-flight, does not reach
+// here at all.
 func (w *Worker) fail(ctx context.Context, sendID int64, reason string) {
-	if err := w.db.MarkSendFailed(ctx, sendID, reason, time.Now()); err != nil {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)
+	defer cancel()
+	if err := w.db.MarkSendFailed(markCtx, sendID, reason, time.Now()); err != nil {
 		slog.Error("mark send failed", "send_id", sendID, "error", err)
 	}
 }

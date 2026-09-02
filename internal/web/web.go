@@ -30,11 +30,35 @@ func Routes(svc *service.Service, coversDir string, sendEnabled bool) http.Handl
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", libraryHandler(svc))
 	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled))
-	mux.HandleFunc("POST /books/{id}/send", sendHandler(svc, sendEnabled))
+	mux.HandleFunc("POST /books/{id}/send", sameSiteOnly(sendHandler(svc, sendEnabled)))
 	mux.HandleFunc("GET /books/{id}/sends/{sendID}", sendStatusHandler(svc, sendEnabled))
 	mux.Handle("GET /static/", staticHandler())
 	mux.Handle("GET /covers/", coversHandler(coversDir))
 	return mux
+}
+
+// sameSiteOnly rejects a state-changing request the browser itself reports
+// as cross-site. The library has no login, so a request's network position
+// is the only thing between the collection and everyone else: a page on any
+// origin can reach a LAN or localhost server its author cannot, and a
+// form-encoded POST gets there with no CORS preflight to stop it. Sending a
+// book is exactly the action worth stealing that way — the attachment goes
+// to an address in the request body.
+//
+// Sec-Fetch-Site is what separates the two cases, and a page cannot forge
+// it: the browser sets it. A request carrying no fetch metadata is allowed
+// through, since a client that sends none (curl, a script, a browser older
+// than the header) is not the ambient-authority vector this guards, and
+// failing closed there would cost the UI for no security gain.
+func sameSiteOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Sec-Fetch-Site") {
+		case "", "same-origin", "none":
+			next(w, r)
+		default:
+			http.Error(w, "cross-site request", http.StatusForbidden)
+		}
+	}
 }
 
 // bookCard is one library-grid entry shaped for the template: a

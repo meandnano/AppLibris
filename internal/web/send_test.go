@@ -250,3 +250,98 @@ func TestSendHandlerUnknownBookReturns404(t *testing.T) {
 		t.Errorf("POST send for an unknown book = %d, want 404", rec.Code)
 	}
 }
+
+// postSendFormFrom is postSendForm with an explicit Sec-Fetch-Site, the
+// header a browser stamps on every request it issues — "same-origin" for
+// the app's own form, "cross-site" for a page on someone else's domain.
+func postSendFormFrom(handler http.Handler, id int64, form url.Values, fetchSite string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/books/"+itoa(id)+"/send", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", fetchSite)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestSendHandlerRejectsCrossSitePost(t *testing.T) {
+	db := newSendTestDB(t)
+	id := createSendTestBook(t, db)
+	handler := Routes(service.New(db), t.TempDir(), true)
+
+	// The shape of an auto-submitting form on an attacker's page: a
+	// form-encoded POST needs no preflight, and the library has no login
+	// to stop it, so the send would go to an address of their choosing.
+	rec := postSendFormFrom(handler, id, url.Values{"new_address": {"attacker@evil.example"}}, "cross-site")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-site POST send = %d, want 403", rec.Code)
+	}
+	send, err := db.LatestSendForBook(context.Background(), id)
+	if err != nil {
+		t.Fatalf("LatestSendForBook: %v", err)
+	}
+	if send != nil {
+		t.Errorf("a cross-site POST queued a send: %+v, want none", send)
+	}
+}
+
+func TestSendHandlerAllowsSameOriginAndMetadataLessPosts(t *testing.T) {
+	// "none" is a direct navigation, and an absent header is a client
+	// that sends no fetch metadata at all — neither is the cross-origin
+	// page the guard exists for, so both must still work.
+	for _, fetchSite := range []string{"same-origin", "none", ""} {
+		db := newSendTestDB(t)
+		id := createSendTestBook(t, db)
+		handler := Routes(service.New(db), t.TempDir(), true)
+
+		rec := postSendFormFrom(handler, id, url.Values{"recipient": {"reader@kindle.com"}}, fetchSite)
+		if rec.Code != http.StatusSeeOther {
+			t.Errorf("Sec-Fetch-Site %q: POST send = %d, want 303", fetchSite, rec.Code)
+		}
+		send, err := db.LatestSendForBook(context.Background(), id)
+		if err != nil {
+			t.Fatalf("LatestSendForBook: %v", err)
+		}
+		if send == nil {
+			t.Errorf("Sec-Fetch-Site %q: queued nothing, want a send", fetchSite)
+		}
+	}
+}
+
+func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) {
+	db := newSendTestDB(t)
+	id := createSendTestBook(t, db)
+	handler := Routes(service.New(db), t.TempDir(), true)
+	ctx := context.Background()
+
+	// A send that has already finished, so the control is showing a
+	// result the rejected address must not retract.
+	sendID, err := db.EnqueueSend(ctx, id, "Piranesi", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+	if _, err := db.ClaimNextSend(ctx, time.Now()); err != nil {
+		t.Fatalf("ClaimNextSend: %v", err)
+	}
+	if err := db.MarkSendDelivered(ctx, sendID, "msg-1", time.Now()); err != nil {
+		t.Fatalf("MarkSendDelivered: %v", err)
+	}
+
+	rec := postSendForm(handler, id, url.Values{
+		"new_address": {"not-an-address"},
+		"new_label":   {"Spare Kindle"},
+	}, true)
+	body := rec.Body.String()
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST send with an invalid address = %d, want 200; body = %s", rec.Code, body)
+	}
+	if !strings.Contains(body, "send__error") {
+		t.Errorf("response missing the field error; body = %q", body)
+	}
+	if !strings.Contains(body, "Delivered") {
+		t.Errorf("a rejected address retracted the delivered result; body = %q", body)
+	}
+	if !strings.Contains(body, `value="not-an-address"`) || !strings.Contains(body, `value="Spare Kindle"`) {
+		t.Errorf("the typed address and label were not carried back; body = %q", body)
+	}
+}

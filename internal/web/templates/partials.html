@@ -179,11 +179,11 @@
     {{end}}
 
     {{if not .SendPending}}
-    <details class="send__add"{{if not .Recipients}} open{{end}}>
+    <details class="send__add"{{if or (not .Recipients) .SendError}} open{{end}}>
       <summary>+ add address</summary>
       <div class="send__add-row">
-        <input class="send__add-input" type="email" name="new_address" placeholder="name@kindle.com">
-        <input class="send__add-input" type="text" name="new_label" placeholder="label (optional)">
+        <input class="send__add-input" type="email" name="new_address" value="{{.SendNewAddress}}" placeholder="name@kindle.com">
+        <input class="send__add-input" type="text" name="new_label" value="{{.SendNewLabel}}" placeholder="label (optional)">
       </div>
     </details>
     {{end}}

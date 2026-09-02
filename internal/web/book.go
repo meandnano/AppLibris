@@ -62,6 +62,8 @@ type bookDetailPage struct {
 	SendAt            string
 	SendPollURL       string
 	SendError         string
+	SendNewAddress    string
+	SendNewLabel      string
 }
 
 // bookDetailHandler serves GET /books/{id}. A non-numeric id and an

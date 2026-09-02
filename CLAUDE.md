@@ -193,13 +193,18 @@ full design.
   location whose `missing_since` is `NULL` — since a queue is a promise to
   act later and the library moves underneath it; no such location (the
   book was pruned, or every copy is currently missing) fails the job with
-  a fixed "the file is no longer in the library" reason. Before reading
+  a fixed "the file is no longer in the library" reason. A failure to read
+  the index *itself* is reported separately ("could not read the library
+  index — try again"), never folded into that one: a storage error says
+  nothing about whether the book is still there, and claiming otherwise is
+  a confident lie about a file that is probably fine. Before reading
   the file, its size is stat'd against `resend.MaxAttachmentSize`, failing
   with both sizes named ("14.2 MB exceeds the 28 MB limit") so an
   oversized file is never loaded into memory and the failure reason always
   has the numbers; the transport call itself runs under a per-job
   `context.WithTimeout(ctx, resend.SendTimeout)`. A transport error's text
-  is recorded verbatim (truncated to `maxFailureReason`, 500 bytes) as the
+  is recorded verbatim (truncated to `maxFailureReason`, 500 bytes, on a
+  UTF-8 boundary) as the
   failure reason — Resend's API errors already read as sentences. Two
   rules are easy to get backwards and are deliberate: **interrupted jobs
   fail, they never requeue** — a job in flight when `Run`'s `ctx` is
@@ -212,6 +217,17 @@ full design.
   `queued`, so the log keeps the fact that the first attempt failed, and
   `MarkSend*`'s `status = 'sending'` guard never has to reason about an
   in-place transition out of a terminal state.
+  The line those two rules are drawn along is *whether the outcome is
+  known*, and the terminal writes follow it: a send Resend accepted, and a
+  failure decided locally (file gone, oversized, unreadable, index
+  unreadable, or a transport answer that is a rejection), are both
+  definite, so `MarkSendDelivered`/`fail` write under
+  `context.WithoutCancel` plus a short `markTimeout` — a shutdown landing
+  in that gap must not cost a verdict already reached, or recovery
+  rewrites a delivered book as failed and invites a duplicate send. Only
+  the genuinely unknown case, a transport call abandoned mid-flight (its
+  error arrives with `ctx` already cancelled), skips the write and leaves
+  the row `sending` for startup recovery to surface.
 - `internal/scanner` — walks the library directory and syncs it into
   `internal/storage`. Cheap path+size+mtime check (against `book_files`)
   skips unchanged files; content hash (SHA-256) is a book's identity, so
@@ -472,7 +488,12 @@ full design.
   `hx-post` is unrelated and survives every state, keeping "Send
   again"/"Retry" htmx-enhanced. With zero saved recipients the "+ add
   address" `<details>` renders open and the `<select>` is omitted — the
-  first-run state. `POST /books/{id}/send` accepts `recipient` (an
+  first-run state; it also renders open after a rejected address, with
+  `SendNewAddress`/`SendNewLabel` carrying the typed values back so the
+  fix is an edit rather than a retype. That rejection path re-reads
+  `LatestSend` rather than rendering a nil state: nothing was queued, so
+  retracting a Delivered or Failed result the user is looking at would
+  make the page contradict itself over a typo that changed nothing. `POST /books/{id}/send` accepts `recipient` (an
   address from the picker) or `new_address`/`new_label`
   (whichever's non-blank wins), answers an `HX-Request` (without
   `HX-History-Restore-Request`, the same rule search's fragment split
@@ -485,6 +506,18 @@ full design.
   a mismatched pairing 404s instead of leaking one book's send status
   under another's page; it needs no `Vary` at all, since it serves one
   body to every caller.
+  The send POST — the only state-changing route in the app — is wrapped in
+  `sameSiteOnly`, which rejects a request whose `Sec-Fetch-Site` the
+  browser reports as anything but `same-origin` or `none`. There is no
+  login here, so a request's network position is the only thing between
+  the collection and everyone else: any page in the user's browser can
+  reach a LAN or localhost server its author cannot, and a form-encoded
+  POST needs no CORS preflight to do it — with the attachment's
+  destination address sitting in the request body. A request carrying no
+  fetch metadata at all is allowed through, since a client that sends
+  none (curl, a script, a browser predating the header) isn't the
+  ambient-authority vector this guards, and failing closed there would
+  cost the UI for no security gain.
 - `cmd/server` — entrypoint. `main` sets up logging and a
   `signal.NotifyContext` (SIGINT/SIGTERM) and calls `run(ctx) error`, so
   every failure path has one exit point (`slog.Error` + `os.Exit(1)`).

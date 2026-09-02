@@ -410,3 +410,79 @@ func TestWorkerCancellationLeavesRowSendingForRecovery(t *testing.T) {
 		t.Errorf("Status after recovery = %q, want failed", recovered.Status)
 	}
 }
+
+func TestWorkerRecordsDeliveryEvenIfCancelledOnTheWayBack(t *testing.T) {
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
+	sendID, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	// Resend accepts the message and the process is told to shut down in
+	// the same breath. Unlike an abandoned request, this outcome is not
+	// ambiguous — the book arrived, and the row has to say so, or startup
+	// recovery reports a delivered send as failed and invites a duplicate.
+	stub := &stubTransport{sendFunc: func(context.Context, string, resend.Attachment) (string, error) {
+		cancel()
+		return "msg-1", nil
+	}}
+
+	New(db, stub, libraryDir).drain(ctx)
+
+	got, err := db.GetSend(context.Background(), sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.Status != storage.SendDelivered {
+		t.Errorf("Status = %q, want delivered — the send completed before cancellation", got.Status)
+	}
+	if got.ProviderMessageID != "msg-1" {
+		t.Errorf("ProviderMessageID = %q, want msg-1", got.ProviderMessageID)
+	}
+}
+
+func TestWorkerStorageFailureDoesNotClaimTheFileIsGone(t *testing.T) {
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
+	sendID, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+	if _, err := db.ClaimNextSend(context.Background(), time.Now()); err != nil {
+		t.Fatalf("ClaimNextSend: %v", err)
+	}
+	send, err := db.GetSend(context.Background(), sendID)
+	if err != nil {
+		t.Fatalf("GetSend: %v", err)
+	}
+
+	stub := &stubTransport{sendFunc: func(context.Context, string, resend.Attachment) (string, error) {
+		t.Error("transport was called despite the file lookup failing")
+		return "", nil
+	}}
+	// A dead context makes the book_files lookup fail while the file is
+	// still sitting on disk — the shape of any storage failure, and the
+	// one case where "the file is no longer in the library" would be a
+	// confident lie about a book that is perfectly fine.
+	cancel()
+	New(db, stub, libraryDir).process(ctx, send)
+
+	got, err := db.GetSend(context.Background(), sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.Status != storage.SendFailed {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+	if got.FailureReason != lookupFailedReason {
+		t.Errorf("FailureReason = %q, want %q", got.FailureReason, lookupFailedReason)
+	}
+}

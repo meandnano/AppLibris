@@ -73,8 +73,21 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 
 		page := bookDetailPage{ID: id, SendEnabled: true}
 		if errors.Is(err, service.ErrInvalidAddress) {
+			// Nothing was queued, so the control has to come back showing
+			// the state it already had — re-reading it rather than passing
+			// nil, which would retract a Delivered or Failed result the
+			// user is looking at over a typo that changed nothing. The
+			// typed values ride along so the fix is an edit, not a retype.
 			page.SendError = "That doesn't look like an email address."
-			applySendState(&page, nil)
+			page.SendNewAddress = r.FormValue("new_address")
+			page.SendNewLabel = r.FormValue("new_label")
+			latest, lErr := svc.LatestSend(r.Context(), id)
+			if lErr != nil {
+				slog.Error("load send state failed", "id", id, "error", lErr)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			applySendState(&page, latest)
 		} else {
 			applySendState(&page, state)
 		}

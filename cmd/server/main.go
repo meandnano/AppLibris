@@ -208,8 +208,8 @@ func run(ctx context.Context) error {
 }
 
 // waitForBackground cancels the background goroutine driven by cancel and
-// waits for done to close, up to deadline, warning (naming name in the
-// message) if it doesn't. Shared by the scan loop and the send-to-Kindle
+// waits for done to close, up to deadline, warning (naming name as the
+// task attribute) if it doesn't. Shared by the scan loop and the send-to-Kindle
 // worker, which run on the same cancellable scanCtx: the caller must not
 // close the database until every call sharing that ctx has returned, or a
 // goroutine that missed its deadline could still write onto a closed
@@ -220,7 +220,7 @@ func waitForBackground(cancel context.CancelFunc, done <-chan struct{}, deadline
 	select {
 	case <-done:
 	case <-deadline:
-		slog.Warn(name + " did not exit before shutdown deadline")
+		slog.Warn("background task did not exit before shutdown deadline", "task", name)
 	}
 }
 
