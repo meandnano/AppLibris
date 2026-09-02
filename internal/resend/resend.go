@@ -2,6 +2,7 @@
 // DESIGN.md's chosen transport for send-to-Kindle. It is a thin wrapper
 // over the single POST /emails endpoint, not a general mail abstraction:
 // there is no Sender interface, because nothing else implements one yet.
+// Its caller is internal/sender's queue worker.
 package resend
 
 import (
@@ -13,9 +14,25 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 const defaultBaseURL = "https://api.resend.com"
+
+// SendTimeout bounds the whole Send exchange, including the attachment
+// upload: net/http.Client.Timeout covers connect, write and read together,
+// not just a connect deadline, so it must not be re-tuned as if it were
+// one. A 28MB attachment (MaxAttachmentSize) inflates to ~37MB of base64,
+// which needs roughly four minutes to upload on a 1.5 Mbit/s domestic
+// uplink — five minutes is the smallest round number that doesn't fail a
+// legitimate large send on a slow line. Dial and TLS-handshake bounds
+// already come from http.DefaultTransport, which NewClient's Client keeps.
+//
+// internal/sender's worker derives its own per-job context deadline from
+// this same constant, which is what actually makes a send abandonable at
+// shutdown; the Client's Timeout here is the backstop for a caller that
+// passes context.Background().
+const SendTimeout = 5 * time.Minute
 
 // MaxAttachmentSize is the largest attachment Send will attempt. Resend
 // caps a whole message (headers, JSON, and the base64-encoded attachment)
@@ -46,13 +63,16 @@ type Client struct {
 }
 
 // NewClient builds a Client that authenticates with apiKey and sends as
-// from.
+// from. It owns its own *http.Client with SendTimeout set, rather than
+// using http.DefaultClient, which has no timeout at all — see SendTimeout's
+// doc comment for why that timeout covers the whole request, not just a
+// connect deadline.
 func NewClient(apiKey, from string) *Client {
 	return &Client{
 		apiKey:     apiKey,
 		from:       from,
 		baseURL:    defaultBaseURL,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: SendTimeout},
 	}
 }
 
@@ -81,8 +101,19 @@ type errorResponse struct {
 // Send emails a to a single recipient. The subject is always "Convert" —
 // Amazon requires it to accept and convert an EPUB attachment for Kindle,
 // and it's otherwise ignored, so there's no reason to make it
-// caller-configurable. On success it returns Resend's message id, for a
-// future send_log to correlate against delivery/bounce webhooks.
+// caller-configurable. On success it returns Resend's message id, for the
+// send_log row it's persisted onto to later correlate against a
+// delivery/bounce webhook, if one is ever added.
+//
+// The whole attachment is held in memory as raw bytes, a base64 string, the
+// marshaled JSON body and an io.Reader over it, all at once — roughly 3.3x
+// MaxAttachmentSize (~100MB) at the ceiling. Deliberately left as-is rather
+// than reworked into an io.Pipe/base64.NewEncoder stream: internal/sender
+// runs a single worker, so there is only ever one send in flight, making
+// this a bound on the whole process rather than a per-request multiplier,
+// and the worker stats the file against MaxAttachmentSize before reading it
+// at all, so the worst case only occurs for a file that will actually be
+// sent. Revisit on measurement, not as a reflex.
 func (c *Client) Send(ctx context.Context, to string, a Attachment) (id string, err error) {
 	if len(a.Content) > MaxAttachmentSize {
 		return "", fmt.Errorf("%w: %s is %d bytes, max %d", ErrAttachmentTooLarge, a.Filename, len(a.Content), MaxAttachmentSize)
@@ -92,6 +123,7 @@ func (c *Client) Send(ctx context.Context, to string, a Attachment) (id string, 
 		From:    c.from,
 		To:      []string{to},
 		Subject: "Convert",
+		Text:    "Sent from the library.",
 		Attachments: []attachmentPayload{{
 			Filename: a.Filename,
 			Content:  base64.StdEncoding.EncodeToString(a.Content),

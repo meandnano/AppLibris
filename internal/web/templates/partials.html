@@ -136,3 +136,77 @@
   {{end}}
 </div>
 {{end}}
+
+{{/* send-control renders bookDetailPage's send-to-Kindle slot: plate 06's
+     four states (idle, sending, delivered, failed) plus a fifth for
+     RESEND_API_KEY/RESEND_FROM being unset. It's the whole swap target for
+     both the send POST and the status poll (id="send", matching #book-grid's
+     pattern of an id distinct from its styling class) — form and status
+     share one region because the states replace each other rather than
+     coexisting, and the poll's own hx-get lives on the status div but
+     targets this outer element so the whole thing is what gets replaced.
+
+     The button's label/emphasis and whether the picker is disabled are
+     computed once in book.go's applySendState, the same discipline
+     searchSummary applies to the results line — this template only
+     branches on which literal block to show, not how to phrase it. */}}
+{{define "send-control"}}
+<div class="send detail__send" id="send">
+  {{if not .SendEnabled}}
+  <p class="send__disabled">Sending is not configured</p>
+  {{else}}
+  <form class="send__form" method="post" action="/books/{{.ID}}/send" hx-post="/books/{{.ID}}/send" hx-target="#send" hx-swap="outerHTML">
+    {{if .SendError}}
+    <p class="send__error">{{.SendError}}</p>
+    {{end}}
+    <div class="send__row">
+      {{if .Recipients}}
+      <select class="send__picker" name="recipient"{{if .SendPending}} disabled{{end}}>
+        {{$send := .Send}}
+        {{range .Recipients}}
+        <option value="{{.Address}}"{{if and $send (eq $send.Recipient .Address)}} selected{{end}}>{{if .Label}}{{.Label}} — {{end}}{{.Address}}</option>
+        {{end}}
+      </select>
+      {{end}}
+      <button class="send__button {{if .SendButtonPrimary}}send__button--primary{{else}}send__button--secondary{{end}}" type="submit"{{if .SendPending}} disabled{{end}}>
+        {{if .SendPending}}<span class="send__spinner" aria-hidden="true"></span>{{end}}
+        {{.SendButtonLabel}}
+      </button>
+    </div>
+
+    {{if not .Send}}
+    <p class="send__hint">Not sent yet</p>
+    {{end}}
+
+    {{if not .SendPending}}
+    <details class="send__add"{{if not .Recipients}} open{{end}}>
+      <summary>+ add address</summary>
+      <div class="send__add-row">
+        <input class="send__add-input" type="email" name="new_address" placeholder="name@kindle.com">
+        <input class="send__add-input" type="text" name="new_label" placeholder="label (optional)">
+      </div>
+    </details>
+    {{end}}
+  </form>
+
+  {{if .Send}}
+  {{if eq .Send.Status "delivered"}}
+  <div class="send__status send__status--ok">
+    <span class="send__status-label">Delivered</span>
+    <span class="send__status-detail">{{.SendAt}} · to {{.Send.Recipient}}</span>
+  </div>
+  {{else if eq .Send.Status "failed"}}
+  <div class="send__status send__status--err">
+    <span class="send__status-label">Failed</span>
+    <span class="send__status-detail">{{.Send.FailureReason}} · {{.SendAt}}</span>
+  </div>
+  {{else}}
+  <div class="send__status send__status--pending" hx-get="{{.SendPollURL}}" hx-trigger="load delay:2s" hx-swap="outerHTML" hx-target="#send">
+    <span class="send__status-label">Sending</span>
+    <span class="send__status-detail">queued {{.SendAt}} · to {{.Send.Recipient}}</span>
+  </div>
+  {{end}}
+  {{end}}
+  {{end}}
+</div>
+{{end}}

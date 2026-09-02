@@ -16,17 +16,22 @@ import (
 // Routes builds the web UI's HTTP handler. coversDir is the directory the
 // scanner writes stored cover thumbnails into; it is served read-only under
 // /covers/ so the library grid can reference a cover by URL rather than by
-// the absolute on-disk path storage keeps.
+// the absolute on-disk path storage keeps. sendEnabled reflects whether
+// cmd/server found RESEND_API_KEY and RESEND_FROM both set — send-to-Kindle
+// routes still register either way, so a stale open tab gets a "not
+// configured" explanation instead of a 404, but POST 503s until they are.
 //
 // This mux owns 404s for everything under /: cmd/server mounts it behind its
 // own outer catch-all so /healthz can live alongside the UI, but every
 // pattern below matches an exact path or a specific prefix, so a request
 // that matches none of them falls through to ServeMux's own 404 rather than
 // being narrowed on the outer mount.
-func Routes(svc *service.Service, coversDir string) http.Handler {
+func Routes(svc *service.Service, coversDir string, sendEnabled bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", libraryHandler(svc))
-	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc))
+	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled))
+	mux.HandleFunc("POST /books/{id}/send", sendHandler(svc, sendEnabled))
+	mux.HandleFunc("GET /books/{id}/sends/{sendID}", sendStatusHandler(svc, sendEnabled))
 	mux.Handle("GET /static/", staticHandler())
 	mux.Handle("GET /covers/", coversHandler(coversDir))
 	return mux

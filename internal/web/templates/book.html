@@ -52,11 +52,9 @@
         {{end}}
       </div>
 
-      {{/* Send-to-Kindle mounts here once the job model exists — kept in
-           plate 03's source position (above the description, "it is the
-           reason the page gets opened") but empty and collapsed, since
-           there's nothing to swap into it yet. */}}
-      <div class="detail__send"></div>
+      {{/* Kept in plate 03's source position — above the description, "it
+           is the reason the page gets opened". */}}
+      {{template "send-control" .}}
 
       {{if .Description}}
       <p class="detail__description">{{.Description}}</p>

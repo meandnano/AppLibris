@@ -38,3 +38,34 @@ func TestRunReturnsPromptlyOnOccupiedAddress(t *testing.T) {
 		t.Fatal("run did not return within 5s of an occupied address — scan cleanup may be hanging")
 	}
 }
+
+// The same promptness bound as above, but with sending configured: the
+// worker also runs on scanCtx and must join the same bounded
+// waitForBackground wait, or a serving failure would hang shutdown behind
+// an idle worker that never notices cancellation.
+func TestRunReturnsPromptlyOnOccupiedAddressWithSendingEnabled(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a port: %v", err)
+	}
+	defer l.Close()
+
+	t.Setenv("ADDR", l.Addr().String())
+	t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "library.db"))
+	t.Setenv("LIBRARY_DIR", t.TempDir())
+	t.Setenv("COVERS_DIR", t.TempDir())
+	t.Setenv("RESEND_API_KEY", "test-key")
+	t.Setenv("RESEND_FROM", "kindle@example.com")
+
+	done := make(chan error, 1)
+	go func() { done <- run(context.Background()) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run: want an error from the occupied address, got nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s of an occupied address — sender worker cleanup may be hanging")
+	}
+}

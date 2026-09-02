@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -281,5 +282,122 @@ func TestGetBookUnknownIDReturnsNilNil(t *testing.T) {
 	}
 	if detail != nil {
 		t.Errorf("GetBook(unknown) = %+v, want nil", detail)
+	}
+}
+
+func TestQueueSendInvalidAddressQueuesNothing(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "Book", SortTitle: "Book", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	state, err := svc.QueueSend(ctx, id, "not-an-address", "")
+	if !errors.Is(err, ErrInvalidAddress) {
+		t.Fatalf("QueueSend error = %v, want ErrInvalidAddress", err)
+	}
+	if state != nil {
+		t.Errorf("QueueSend = %+v, want nil on error", state)
+	}
+
+	recipients, err := svc.Recipients(ctx)
+	if err != nil {
+		t.Fatalf("Recipients: %v", err)
+	}
+	if len(recipients) != 0 {
+		t.Errorf("Recipients = %+v, want none saved for a rejected address", recipients)
+	}
+}
+
+func TestQueueSendValidAddressCreatesRecipientAndCallsNotify(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	notifyCount := 0
+	svc.Notify = func() { notifyCount++ }
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "Piranesi", SortTitle: "Piranesi", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	// A display name in the pasted address must not end up stored — only
+	// the mailbox does.
+	state, err := svc.QueueSend(ctx, id, "Reader <reader@kindle.com>", "Mine")
+	if err != nil {
+		t.Fatalf("QueueSend: %v", err)
+	}
+	if state == nil {
+		t.Fatal("QueueSend = nil, want the queued state")
+	}
+	if state.Status != string(storage.SendQueued) {
+		t.Errorf("Status = %q, want queued", state.Status)
+	}
+	if state.Recipient != "reader@kindle.com" {
+		t.Errorf("Recipient = %q, want the display name stripped", state.Recipient)
+	}
+	if notifyCount != 1 {
+		t.Errorf("Notify called %d times, want exactly 1", notifyCount)
+	}
+
+	recipients, err := svc.Recipients(ctx)
+	if err != nil {
+		t.Fatalf("Recipients: %v", err)
+	}
+	if len(recipients) != 1 || recipients[0].Address != "reader@kindle.com" || recipients[0].Label != "Mine" {
+		t.Errorf("Recipients = %+v, want one entry for reader@kindle.com labeled Mine", recipients)
+	}
+
+	latest, err := svc.LatestSend(ctx, id)
+	if err != nil {
+		t.Fatalf("LatestSend: %v", err)
+	}
+	if latest == nil || latest.ID != state.ID {
+		t.Errorf("LatestSend = %+v, want the just-queued send %+v", latest, state)
+	}
+
+	got, err := svc.SendState(ctx, state.ID)
+	if err != nil {
+		t.Fatalf("SendState: %v", err)
+	}
+	if got == nil || got.ID != state.ID {
+		t.Errorf("SendState = %+v, want the queued send", got)
+	}
+}
+
+func TestQueueSendUnknownBookReturnsNilNil(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	state, err := svc.QueueSend(ctx, 99999, "reader@kindle.com", "")
+	if err != nil {
+		t.Fatalf("QueueSend(unknown book): %v", err)
+	}
+	if state != nil {
+		t.Errorf("QueueSend(unknown book) = %+v, want nil", state)
+	}
+}
+
+func TestLatestSendUnsentBookReturnsNilNil(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "Book", SortTitle: "Book", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	latest, err := svc.LatestSend(ctx, id)
+	if err != nil {
+		t.Fatalf("LatestSend: %v", err)
+	}
+	if latest != nil {
+		t.Errorf("LatestSend(never sent) = %+v, want nil", latest)
 	}
 }
