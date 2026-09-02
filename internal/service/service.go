@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"library/internal/storage"
 )
@@ -98,6 +99,93 @@ func (s *Service) SearchBooks(ctx context.Context, query string) (SearchResult, 
 // filter.
 func (s *Service) CountBooks(ctx context.Context) (int, error) {
 	return s.db.CountBooks(ctx)
+}
+
+// BookDetail is what the book detail page needs.
+type BookDetail struct {
+	ID            int64
+	Title         string
+	Authors       []string
+	Publisher     string
+	PublishedDate string
+	Language      string
+	ISBN          string
+	Description   string
+	CoverPath     string
+	Format        string
+	FileSize      int64
+	HasFileSize   bool
+	AddedAt       time.Time
+	Locations     []FileLocation
+}
+
+// FileLocation is one of a book's physical file locations, as the detail
+// page needs it — just enough to list it and flag it if it's within its
+// missing-file grace period.
+type FileLocation struct {
+	Path    string
+	Missing bool
+}
+
+// GetBook assembles one book's full detail, or nil, nil if id doesn't
+// exist — "absent" is not an error at this layer, consistent with the
+// storage finders; the web handler turns it into a 404.
+//
+// FileSize is taken from the book's first location rather than carried
+// per-location: every location of one book is byte-identical by
+// construction (content hash is identity), so their sizes are equal, and
+// showing a size per path would imply a difference that cannot exist. A
+// book can't actually be observed with zero locations — the last
+// location's deletion prunes the book in the same transaction — but if
+// that race is ever hit anyway, this renders no size rather than erroring.
+// HasFileSize is what says so: without it a book with no location is
+// indistinguishable from one whose file is genuinely zero bytes, and the
+// page would claim "0 B" for a size it does not actually know.
+func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
+	book, err := s.db.FindBookByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if book == nil {
+		return nil, nil
+	}
+
+	authors, err := s.db.ListAuthorsForBook(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	files, err := s.db.ListBookFiles(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	var fileSize int64
+	hasFileSize := len(files) > 0
+	locations := make([]FileLocation, len(files))
+	for i, f := range files {
+		if i == 0 {
+			fileSize = f.FileSize
+		}
+		locations[i] = FileLocation{Path: f.FilePath, Missing: f.MissingSince.Valid}
+	}
+
+	return &BookDetail{
+		ID:            book.ID,
+		Title:         book.Title,
+		Authors:       authors,
+		Publisher:     book.Publisher,
+		PublishedDate: book.PublishedDate,
+		Language:      book.Language,
+		ISBN:          book.ISBN,
+		Description:   book.Description,
+		CoverPath:     book.CoverPath,
+		Format:        book.Format,
+		FileSize:      fileSize,
+		HasFileSize:   hasFileSize,
+		AddedAt:       book.AddedAt,
+		Locations:     locations,
+	}, nil
 }
 
 // summarize attaches authors to books and shapes both into BookSummary.

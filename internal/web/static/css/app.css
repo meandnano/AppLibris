@@ -350,10 +350,22 @@ a:hover {
 }
 
 .card {
+  min-width: 0;
+}
+
+.card__link {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-width: 0;
+  color: inherit;
+}
+
+.card__link:hover {
+  text-decoration: none;
+}
+
+.card__link:hover .card__title {
+  color: var(--accent);
 }
 
 /* Covers vary in aspect ratio, so they hang from a fixed-height shelf and
@@ -450,6 +462,217 @@ a:hover {
   color: var(--fg-muted);
   font-size: 14px;
   text-wrap: pretty;
+}
+
+/* ---------- book detail ---------- */
+
+/* SCREENS.md 03 gives this page its own page padding (40px 44px 48px),
+   distinct from the grid page's — an override rather than changing .page
+   itself, which the grid page also uses. */
+.page--detail {
+  padding: 40px 44px 48px;
+}
+
+.back-link {
+  display: inline-block;
+  margin-bottom: 24px;
+  font-size: 13.5px;
+  color: var(--accent);
+}
+
+.detail {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 44px;
+}
+
+.detail__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.detail__cover {
+  display: block;
+  width: 100%;
+  aspect-ratio: 0.66;
+  object-fit: cover;
+  border: 1px solid var(--rule);
+  background: var(--bg-sunken);
+}
+
+.detail__cover--missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.facts {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--rule-faint);
+}
+
+.facts__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rule-faint);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.facts__row dt {
+  color: var(--fg-faint);
+}
+
+.facts__row dd {
+  margin: 0;
+}
+
+.facts__format {
+  text-transform: uppercase;
+}
+
+.locations summary {
+  cursor: pointer;
+  color: var(--accent);
+  border-bottom: 1px dotted var(--accent);
+}
+
+.locations summary::-webkit-details-marker {
+  display: none;
+}
+
+.locations__list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  word-break: break-all;
+}
+
+.locations__missing {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+.detail__main {
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+  min-width: 0;
+}
+
+.detail__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.detail__title {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 40px;
+  line-height: 1.08;
+  letter-spacing: -0.015em;
+  max-width: 26ch;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
+.detail__author {
+  margin: 0;
+  font-size: 15px;
+  color: var(--fg-muted);
+}
+
+.detail__author--unknown {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+.detail__send:empty {
+  display: none;
+}
+
+.detail__description {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.55;
+  color: var(--fg);
+  max-width: 62ch;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
+.detail__description--empty {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-style: italic;
+  color: var(--fg-faint);
+}
+
+.detail__meta {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 44px;
+  border-top: 1px solid var(--rule);
+}
+
+.detail__meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--rule-faint);
+}
+
+.detail__meta-row dt {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+
+.detail__meta-row dd {
+  margin: 0;
+  font-size: 13.5px;
+}
+
+.detail__meta-isbn dd {
+  font-family: var(--mono);
+}
+
+.detail__meta-empty,
+.facts__empty {
+  color: var(--fg-faint);
+}
+
+/* Stacks under 700px, cover rail first — a page-specific breakpoint
+   distinct from the grid's 640px one below. */
+@media (max-width: 700px) {
+  .detail {
+    grid-template-columns: 1fr;
+  }
+
+  .detail__rail {
+    max-width: 240px;
+  }
 }
 
 /* ---------- small screens ---------- */

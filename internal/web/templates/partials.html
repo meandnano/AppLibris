@@ -104,20 +104,22 @@
   <ul class="grid">
     {{range .Books}}
     <li class="card">
-      <div class="card__shelf">
-        {{if .CoverURL}}
-        <img class="card__cover" src="{{.CoverURL}}" alt="" loading="lazy" decoding="async">
+      <a class="card__link" href="/books/{{.ID}}">
+        <div class="card__shelf">
+          {{if .CoverURL}}
+          <img class="card__cover" src="{{.CoverURL}}" alt="" loading="lazy" decoding="async">
+          {{else}}
+          <div class="card__cover card__cover--missing"><span>no cover</span></div>
+          {{end}}
+        </div>
+        <h2 class="card__title">{{.Title}}</h2>
+        {{if .AuthorLine}}
+        <p class="card__author">{{.AuthorLine}}</p>
         {{else}}
-        <div class="card__cover card__cover--missing"><span>no cover</span></div>
+        <p class="card__author card__author--unknown">Author unknown</p>
         {{end}}
-      </div>
-      <h2 class="card__title">{{.Title}}</h2>
-      {{if .AuthorLine}}
-      <p class="card__author">{{.AuthorLine}}</p>
-      {{else}}
-      <p class="card__author card__author--unknown">Author unknown</p>
-      {{end}}
-      <p class="card__meta"><span class="badge">{{.Format}}</span></p>
+        <p class="card__meta"><span class="badge">{{.Format}}</span></p>
+      </a>
     </li>
     {{end}}
   </ul>

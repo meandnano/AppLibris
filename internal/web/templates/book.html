@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+{{template "document-head" .}}
+<body>
+{{template "site-header" .}}
+
+<main class="page page--detail">
+  <a class="back-link" href="/">&larr; Library</a>
+  <div class="detail">
+    <div class="detail__rail">
+      {{if .CoverURL}}
+      <img class="detail__cover" src="{{.CoverURL}}" alt="" decoding="async">
+      {{else}}
+      <div class="detail__cover detail__cover--missing"><span>no cover</span></div>
+      {{end}}
+      <dl class="facts">
+        <div class="facts__row">
+          <dt>format</dt>
+          <dd class="facts__format">{{.Format}}</dd>
+        </div>
+        <div class="facts__row">
+          <dt>size</dt>
+          {{if .FileSizeHuman}}
+          <dd title="{{.FileSizeBytesText}}">{{.FileSizeHuman}}</dd>
+          {{else}}
+          <dd><span class="facts__empty">&mdash;</span></dd>
+          {{end}}
+        </div>
+        <div class="facts__row">
+          <dt>locations</dt>
+          <dd>
+            <details class="locations">
+              <summary>{{len .Locations}} {{if eq (len .Locations) 1}}path{{else}}paths{{end}}</summary>
+              <ul class="locations__list">
+                {{range .Locations}}
+                <li>{{.Path}}{{if .Missing}} <span class="locations__missing">missing</span>{{end}}</li>
+                {{end}}
+              </ul>
+            </details>
+          </dd>
+        </div>
+      </dl>
+    </div>
+
+    <div class="detail__main">
+      <div class="detail__heading">
+        <h1 class="detail__title">{{.Title}}</h1>
+        {{if .AuthorLine}}
+        <p class="detail__author">{{.AuthorLine}}</p>
+        {{else}}
+        <p class="detail__author detail__author--unknown">Author unknown</p>
+        {{end}}
+      </div>
+
+      {{/* Send-to-Kindle mounts here once the job model exists — kept in
+           plate 03's source position (above the description, "it is the
+           reason the page gets opened") but empty and collapsed, since
+           there's nothing to swap into it yet. */}}
+      <div class="detail__send"></div>
+
+      {{if .Description}}
+      <p class="detail__description">{{.Description}}</p>
+      {{else}}
+      <p class="detail__description detail__description--empty">No description</p>
+      {{end}}
+
+      <dl class="detail__meta">
+        <div class="detail__meta-row">
+          <dt>publisher</dt>
+          <dd>{{if .Publisher}}{{.Publisher}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</dd>
+        </div>
+        <div class="detail__meta-row">
+          <dt>published</dt>
+          <dd>{{if .PublishedDate}}{{.PublishedDate}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</dd>
+        </div>
+        <div class="detail__meta-row">
+          <dt>language</dt>
+          <dd>{{if .Language}}{{.Language}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</dd>
+        </div>
+        <div class="detail__meta-row detail__meta-isbn">
+          <dt>isbn</dt>
+          <dd>{{if .ISBN}}{{.ISBN}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</dd>
+        </div>
+        <div class="detail__meta-row">
+          <dt>added</dt>
+          <dd>{{.AddedAt}}</dd>
+        </div>
+      </dl>
+    </div>
+  </div>
+</main>
+
+{{template "site-scripts" .}}
+</body>
+</html>
