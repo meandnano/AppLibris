@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"library/internal/service"
 )
@@ -43,23 +44,30 @@ type bookCard struct {
 }
 
 // libraryPage is the data library.html (and its book-grid fragment) render
-// against. Count feeds the masthead, which only ever appears on a full
-// page — never the book-grid fragment a live search swaps in — so it's
-// the library's total size on a full-page render (never the
-// search-filtered count, which lives separately in Books/search__count,
-// so the masthead reads the same whether this search was typed live or
-// landed on by a shared/bookmarked ?q= link) but is left as the cheaper
-// filtered count on a fragment render, where nothing reads it. Query and
-// Searching distinguish "browsing the whole library" from "typed
-// something, however it resolved" — a blank Books with Searching true is
-// the no-results state; a blank Books with Searching false is the
-// empty-library state, and the two need different treatment.
+// against. Count is always the library's total size, never the
+// search-filtered count: the masthead shows it, and so does the results
+// line inside the fragment ("4 of 1,284"), which is why the fragment pays
+// for it too. CountText is that number with thousands grouped, since the
+// mockups render it that way in both places and one screen must not show
+// the same number two ways; Count itself stays around for pluralization.
+//
+// SearchSummary is the whole results line, composed in the handler so the
+// template stays logic-free. Query and Searching distinguish "browsing the
+// whole library" from "typed something, however it resolved" — a blank
+// Books with Searching true is the no-results state; a blank Books with
+// Searching false is the empty-library state, and the two need different
+// treatment. LibraryEmpty drives plate 02e's dimmed, inert search control:
+// with nothing indexed there is nothing to search, and an input that
+// invites typing would be a lie.
 type libraryPage struct {
-	Title     string
-	Count     int
-	Books     []bookCard
-	Query     string
-	Searching bool
+	Title         string
+	Count         int
+	CountText     string
+	Books         []bookCard
+	Query         string
+	Searching     bool
+	SearchSummary string
+	LibraryEmpty  bool
 }
 
 // libraryHandler serves both the full library page and, for a live search
@@ -92,20 +100,20 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 		// reports whether what came back was a search — which is not the
 		// same as the query looking non-blank, since input that sanitizes
 		// to nothing (a lone control character, say) is no search either.
-		books, searching, err := svc.SearchBooks(r.Context(), query)
+		result, err := svc.SearchBooks(r.Context(), query)
 		if err != nil {
 			slog.Error("list books failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		books := result.Books
 
-		// The masthead count Count feeds is only ever rendered on a full
-		// page — never on the book-grid fragment a live search swaps in —
-		// so a fragment response has no use for the library's total and
-		// isn't worth an extra query for it on every keystroke. len(books)
-		// is already the total whenever not searching.
+		// The library total is needed on both kinds of render, not just
+		// the full page: the masthead shows it, and so does the results
+		// line the fragment carries ("4 of 1,284"). When nothing is
+		// filtering it out, the books already in hand are that total.
 		total := len(books)
-		if searching && !fragment {
+		if result.Searched {
 			total, err = svc.CountBooks(r.Context())
 			if err != nil {
 				slog.Error("count books failed", "error", err)
@@ -125,7 +133,16 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 			}
 		}
 
-		page := libraryPage{Title: "Library", Count: total, Books: cards, Query: query, Searching: searching}
+		page := libraryPage{
+			Title:         "Library",
+			Count:         total,
+			CountText:     formatCount(total),
+			Books:         cards,
+			Query:         query,
+			Searching:     result.Searched,
+			SearchSummary: searchSummary(len(cards), total, result.Fields),
+			LibraryEmpty:  total == 0,
+		}
 
 		templateName := "library.html"
 		if fragment {
@@ -161,4 +178,52 @@ func coverURL(coverPath string) string {
 		return ""
 	}
 	return "/covers/" + filepath.Base(coverPath)
+}
+
+// formatCount renders n with thousands grouped by commas ("1,284"), the
+// form the mockups use everywhere a library count appears. Hand-rolled
+// rather than pulled from golang.org/x/text: this is the only place the
+// project formats a number, the counts are non-negative, and the locale is
+// not a question a single-user self-hosted server needs to answer.
+func formatCount(n int) string {
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	lead := len(s) % 3
+	if lead > 0 {
+		b.WriteString(s[:lead])
+	}
+	for i := lead; i < len(s); i += 3 {
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}
+
+// searchSummary composes the results line plate 02c specifies — "4 of
+// 1,284 · matched title, author" — in the handler, so the template holds
+// no formatting logic. fields are books_fts column names; "authors"
+// becomes "author" because the line reads as prose, not as a schema.
+// Returns "" when nothing matched, since the no-matches block says its own
+// piece instead.
+func searchSummary(matched, total int, fields []string) string {
+	if matched == 0 {
+		return ""
+	}
+	summary := formatCount(matched) + " of " + formatCount(total)
+	if len(fields) == 0 {
+		return summary
+	}
+	named := make([]string, len(fields))
+	for i, f := range fields {
+		if f == "authors" {
+			f = "author"
+		}
+		named[i] = f
+	}
+	return summary + " · matched " + strings.Join(named, ", ")
 }

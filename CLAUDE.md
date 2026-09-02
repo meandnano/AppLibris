@@ -62,7 +62,11 @@ full design.
   rescan) before that guarantee holds, since a pre-existing `books` row
   never passes through `syncBookFTSTx` on its own. `SearchBooks(ctx, query)`
   joins against it and orders by `sort_title`, not relevance — see
-  `internal/web` below for why. `query` must already be a valid FTS5
+  `internal/web` below for why. `MatchedSearchFields(ctx, query)` reports
+  which of the four columns produced hits, for the results line that names
+  them; it is one round trip of four `EXISTS`, each scoped with FTS5's
+  `{col} : (expr)` filter — the parentheses are load-bearing, since
+  without them the filter binds to the first term only. `query` must already be a valid FTS5
   `MATCH` expression; `SanitizeFTSQuery` (also `internal/storage`, no DB
   access) is the one place raw user input becomes one, by quoting and
   prefix-terming every whitespace-separated token so no input, however
@@ -174,15 +178,18 @@ full design.
   as a second thin transport alongside `internal/web`. `ListBooks` and
   `SearchBooks` both assemble `internal/storage`'s books and authors into a
   `BookSummary` per book via a shared unexported `summarize` helper.
-  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first; a query
-  that sanitizes to nothing is treated as `ListBooks` — the empty search
-  box and a freshly-loaded page are the same state, so callers don't
-  special-case it — and its second return value reports which of the two
-  happened. That bool exists because "sanitizes to nothing" is wider than
-  "looks blank": control characters are stripped, so `?q=%00` is a
-  non-blank query that is nonetheless no search, and a transport deriving
-  its own "searching" flag from the raw query would render a result count
-  over the whole unfiltered library. `CountBooks` returns the library's total size,
+  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first and returns
+  a `SearchResult` — the books, whether a search actually ran, and which
+  indexed fields matched. A query that sanitizes to nothing is treated as
+  `ListBooks`, so the empty search box and a freshly-loaded page are the
+  same state and callers don't special-case it; `Searched` reports which
+  of the two happened, because "sanitizes to nothing" is wider than "looks
+  blank" (control characters are stripped, so `?q=%00` is a non-blank
+  query that is nonetheless no search) and a transport deriving its own
+  flag from the raw query would render a result count over the whole
+  unfiltered library. `Fields` is fetched only when something matched —
+  with no results there are no fields to name, and the no-matches state
+  names the searched fields itself. `CountBooks` returns the library's total size,
   independent of any search filter — what the masthead shows, kept
   separate from however many a search matched.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
@@ -246,14 +253,37 @@ full design.
   The search box itself lives only in the full-page render, never in the
   fragment: `hx-target="#book-grid"` with `hx-swap="outerHTML"` means only
   the grid is ever replaced, so a keystroke mid-request is never lost to a
-  render. `hx-push-url="true"` keeps the URL shareable. With JavaScript
+  render. `hx-push-url="true"` keeps the URL shareable.
+  The row is translated from plate 01 of the handoff (`ui-handoff/` on the
+  `init` branch), which draws it as part of the top chrome — the masthead's
+  ground and edges, closed by a `--rule-faint` hairline — rather than as a
+  block inside the page body, so `library.html` renders `search-bar`
+  between the masthead and `<main>`. Three affordances there resolve in the
+  browser rather than per keystroke, since the input is never re-rendered:
+  a `clear ×` link (plain `href="/"`, hidden by CSS while the box shows its
+  placeholder), the `/` shortcut hint (`search.js` binds the key and only
+  then unhides the hint, so it never advertises a shortcut that isn't
+  bound — with JS off, or with the control dimmed, it stays hidden), and
+  the `filtering …` status line. That status line is rendered *inside*
+  `<main>` above the grid, not in the form: it swaps places with the
+  results count, so it has to share the count's container and margins or
+  the grid jumps on every keystroke. Plate 02e's empty-library state dims
+  and disables the whole control — with nothing indexed there is nothing to
+  search. Its "Scan library" button and library path are the one part of
+  that plate not built, tracked in
+  `docs/backlog/2026090203-empty-library-scan-action.md`. With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
   drift out of sync. A `q` that sanitizes to nothing is "not
   searching" — the plain grid, no result count, same as before this query
   parameter existed; that covers blank and whitespace-only input and also
   input stripped to nothing, such as a lone control character. A `q` that
-  does search renders either the count-and-filtered-grid state
+  does search renders either the results state — a mono line reading
+  `4 of 1,284 · matched title, author`, the match count against the
+  library total (grouped by thousands, as the masthead's count is, since
+  one screen must not show the same number two ways) followed by the
+  fields that actually matched, composed in the handler so the template
+  holds no formatting logic — and the filtered grid,
   or a distinct `search__empty` block (`Nothing matches "<query>"`, the
   query HTML-escaped by `html/template`) if nothing matched — kept visually
   and structurally separate from the "No books yet" empty-library block,

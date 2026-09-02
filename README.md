@@ -15,6 +15,11 @@ in both directions (searching "tokarczuk" finds a stored "Tokarczuk", and
 vice versa). Typing an ISBN finds the book regardless of whether it's
 punctuated with hyphens or not.
 
+Press `/` anywhere on the page to jump to the search box, and `clear ×`
+inside it goes back to the unfiltered library. When a search matches, a
+line above the grid says how many books of how many, and which fields
+matched — so a hit on a description or an ISBN isn't a mystery.
+
 Filtering is live via [htmx](https://htmx.org): each keystroke fires a
 debounced request that swaps in just the matching grid, so the page never
 does a full reload while you type. With JavaScript disabled, the same
