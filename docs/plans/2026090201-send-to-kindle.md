@@ -33,15 +33,21 @@ edges — the send *history* view, recipient *management*, delivery
 webhooks and automatic retries are all cut below (see Scope), each for a
 reason DESIGN.md or UI.md already supplies.
 
-**Dependencies — both are open PRs, and both must land first.**
+**Dependencies — both have landed; this is written against master.**
 
-- `#28` (`docs/plans/2026090106-full-text-search.md`) vendors htmx and
-  establishes the partial-swap pattern. The send control is the second of
-  the three interactions DESIGN.md allocates htmx to, and it reuses that
-  pattern wholesale: the `HX-Request` split, the fragment-rendering
-  parameter on `render`, the `Vary` discipline.
-- `#29` (`docs/plans/2026090107-book-detail-page.md`) is where the
-  control mounts. That plan deliberately left the slot in place and
+- `#28` (`docs/plans/completed/2026090106-full-text-search.md`) vendored
+  htmx and established the partial-swap pattern. The send control is the
+  second of the three interactions DESIGN.md allocates htmx to, and it
+  reuses that pattern wholesale: the fragment-versus-full-page split, the
+  fragment-rendering parameter on `render`, the `Vary` discipline.
+  Note what that split actually keys on after #28's review round — not
+  `HX-Request` alone, but `HX-Request` *without*
+  `HX-History-Restore-Request`, since htmx sets both on the request it
+  issues when the user goes Back past its history cache and then swaps
+  the response into the whole body. Any new route here that serves two
+  bodies at one URL copies that rule and names both headers in `Vary`.
+- `#29` (`docs/plans/completed/2026090107-book-detail-page.md`) is where
+  the control mounts. That plan deliberately left the slot in place and
   empty:
 
   ```html
@@ -105,8 +111,10 @@ Out of scope, each with its reason:
 
 House rules unchanged: one statement per file,
 `YYYYMMDDNN_description.sql`, applied in filename order, each in its own
-transaction. `#28` takes `2026090102`/`2026090103`; these start a new day
-and cannot collide with either open PR.
+transaction. Master's newest is `2026090103` (#28's FTS trigger); these
+start a new day, and migrations number independently of plans and backlog
+files, so `2026090202`/`2026090203` already existing under
+`docs/backlog/` is not a clash.
 
 1. `2026090201_create_recipients_table.sql`
 
@@ -314,7 +322,7 @@ attachment resident.
 **Processing one job:**
 
 1. `ClaimNextSend`. Nil means the queue is empty — go back to waiting.
-2. Resolve a file. `ListBookFiles(bookID)` (added by `#29`), take the
+2. Resolve a file. `ListBookFiles(bookID)` (on master since #29), take the
    first location whose `missing_since` is NULL, join it onto
    `libraryDir`. No such location — the book was pruned, or every copy is
    marked missing — fails the job with "the file is no longer in the
@@ -326,6 +334,18 @@ attachment resident.
    the backstop it is; this one exists so an oversized file is never
    loaded into memory at all, and so the user gets the size in the
    failure reason.
+
+   Format that sentence with a plain `fmt.Sprintf("%.1f MB", float64(n)/(1<<20))`
+   rather than reaching for a general byte formatter. #29 added
+   `humanSize`, but it is unexported in `internal/web` and belongs to
+   that page's rail; a worker in `internal/sender` cannot call it, and
+   copying it here would be the same duplication #29's review took out of
+   the detail page. It would also be complexity for nothing: everything
+   `humanSize` does is choose a unit, and both numbers in this sentence
+   are megabytes by construction — the limit is 28MB, so a file that
+   fails this check is between 28MB and whatever the filesystem holds,
+   never bytes and never kilobytes. If a size ever needs rendering
+   somewhere else, that is the point to give it a shared home, not now.
 4. `os.ReadFile`, then `transport.Send` under a per-job
    `context.WithTimeout(ctx, sendTimeout)`.
 5. `MarkSendDelivered` with the returned message id, or `MarkSendFailed`
@@ -454,7 +474,17 @@ Two routes, both under the existing detail page:
   another book's send.
 
 **Markup.** A new `send-control` template in `partials.html`, rendered
-into `#send` — the element `#29` left as `<div class="detail__send">`.
+into the element `#29` left behind as `<div class="detail__send"></div>`.
+Two small things that element needs first, both consequences of how #29
+actually landed:
+
+- **It has a class, not an id**, so there is nothing for `hx-target` to
+  point at. Give it `id="send"` and keep the class for styling, matching
+  how the grid is `#book-grid` with its own classes.
+- **`bookDetailPage.ID` is gone.** #29's review removed it as assigned
+  but never read; the send form's `action="/books/{id}/send"` is the
+  first thing that needs it, so it comes back with a caller this time.
+
 The whole control is one swap target: form and status are the same
 region, because plate 06's states replace each other rather than
 coexisting.
@@ -482,10 +512,20 @@ plain form POST, and the handler answers a non-`HX-Request` POST with
 picks the job up from `LatestSend`. Progressive enhancement falls out of
 the same handler, exactly as search's does.
 
-`bookDetailPage` gains a `Send` view-model field so a page loaded while a
-send is in flight starts polling immediately, and one loaded after a
-completed send shows its outcome rather than a bare button. Both routes
-set `Vary: HX-Request`, following `#28`.
+`bookDetailPage` gains a `Send *service.SendState` field so a page loaded
+while a send is in flight starts polling immediately, and one loaded
+after a completed send shows its outcome rather than a bare button. The
+service type goes in as it comes, not copied into a per-page struct:
+#29's review removed exactly such a pass-through (`bookLocationView`,
+which duplicated `service.FileLocation` field-for-field under the same
+names), and `Locations` on that same view model is the precedent to
+follow.
+
+`POST /books/{id}/send` answers htmx with a fragment and everyone else
+with a 303, so it names both headers in `Vary` per the rule above. The
+poll route needs no `Vary` at all — it serves one body to every caller,
+and a header that varies nothing is noise a later reader has to reason
+about.
 
 **When sending is unconfigured** (`RESEND_API_KEY` or `RESEND_FROM`
 unset), `Routes` takes `sendEnabled bool`; the slot renders a single
