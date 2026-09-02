@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -104,6 +105,41 @@ func TestSearchBooksAndsTokensAcrossColumns(t *testing.T) {
 	}
 }
 
+// SearchBooks orders by sort_title, not relevance (DESIGN.md: the UI
+// filters the grid in place, and reordering it while the user is still
+// typing would be jarring) — every other SearchBooks test here returns at
+// most one row, which can't tell that apart from an unordered or
+// relevance-ordered result set.
+func TestSearchBooksOrdersBySortTitleNotInsertionOrder(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// Inserted out of title order, all sharing a token so one query
+	// matches all three.
+	titles := []string{"Zebra Handbook", "Mango Handbook", "Apple Handbook"}
+	for i, title := range titles {
+		if _, err := db.CreateBook(ctx, Book{
+			ContentHash: fmt.Sprintf("hash-%d", i), Title: title, SortTitle: title, Format: "epub",
+		}, nil); err != nil {
+			t.Fatalf("CreateBook %q: %v", title, err)
+		}
+	}
+
+	books, err := db.SearchBooks(ctx, SanitizeFTSQuery("Handbook"))
+	if err != nil {
+		t.Fatalf("SearchBooks: %v", err)
+	}
+	if len(books) != 3 {
+		t.Fatalf("SearchBooks(Handbook) = %+v, want 3 matches", books)
+	}
+
+	got := []string{books[0].Title, books[1].Title, books[2].Title}
+	want := []string{"Apple Handbook", "Mango Handbook", "Zebra Handbook"}
+	if got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Errorf("SearchBooks(Handbook) order = %v, want sort_title order %v", got, want)
+	}
+}
+
 func TestDeletingBookViaOrphanPruneRemovesFTSRow(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -167,6 +203,68 @@ func TestDeletingBookViaPruneMissingFilesRemovesFTSRow(t *testing.T) {
 	}
 
 	assertFTSCount(t, db, 0)
+}
+
+// A raw NUL survives quoting (SanitizeFTSQuery only doubles `"`), and an
+// embedded NUL inside an otherwise well-formed quoted string still makes
+// SQLite's FTS5 parser reject the whole MATCH expression as an
+// unterminated string — reproduced directly against the real books_fts
+// table, not a scratch one, since that's the table an actual search hits.
+func TestSearchBooksHandlesNULDerivedQueries(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := db.CreateBook(ctx, Book{ContentHash: "hash-1", Title: "Hello World", SortTitle: "Hello World"}, nil); err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	// A pure-NUL query sanitizes to blank, which storage.SearchBooks isn't
+	// contractually meant to receive (blank is service.SearchBooks's job to
+	// intercept) — this only pins that a *sanitized* embedded-NUL query,
+	// the shape that would actually reach here, doesn't error.
+	q := SanitizeFTSQuery("hel\x00lo world")
+	books, err := db.SearchBooks(ctx, q)
+	if err != nil {
+		t.Fatalf("SearchBooks(%q): %v — a NUL-derived query must never reach MATCH invalidly", q, err)
+	}
+	if len(books) != 1 {
+		t.Errorf("SearchBooks(%q) = %d books, want 1", q, len(books))
+	}
+}
+
+func TestSearchBooksFindsISBNRegardlessOfSourceFormat(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// internal/epub normalizes to bare digits; internal/fb2 stores the
+	// hyphenated form verbatim. Both must be findable by either query shape.
+	epubID, err := db.CreateBook(ctx, Book{ContentHash: "hash-epub", Title: "EPUB Sourced", SortTitle: "EPUB Sourced", ISBN: "9780857059985"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook epub-shaped: %v", err)
+	}
+	fb2ID, err := db.CreateBook(ctx, Book{ContentHash: "hash-fb2", Title: "FB2 Sourced", SortTitle: "FB2 Sourced", ISBN: "978-0-85705-998-5"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook fb2-shaped: %v", err)
+	}
+
+	for _, query := range []string{"9780857059985", "978-0-85705-998-5"} {
+		t.Run(query, func(t *testing.T) {
+			books, err := db.SearchBooks(ctx, SanitizeFTSQuery(query))
+			if err != nil {
+				t.Fatalf("SearchBooks(%q): %v", query, err)
+			}
+			ids := make(map[int64]bool, len(books))
+			for _, b := range books {
+				ids[b.ID] = true
+			}
+			if !ids[epubID] {
+				t.Errorf("query %q did not find the EPUB-sourced (normalized-storage) book", query)
+			}
+			if !ids[fb2ID] {
+				t.Errorf("query %q did not find the FB2-sourced (hyphenated-storage) book", query)
+			}
+		})
+	}
 }
 
 func assertFTSCount(t *testing.T, db *DB, want int) {

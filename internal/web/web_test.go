@@ -184,6 +184,73 @@ func TestSearchFragmentOmitsFullPageChromeAndSetsVary(t *testing.T) {
 	}
 }
 
+// Vary: HX-Request has to be on both halves of the contract to mean
+// anything: it exists so a cache keys the full page and the fragment
+// separately, which only works if a cache that stored the full page first
+// (never having seen HX-Request) still knows to treat a later
+// HX-Request-bearing request for the same URL as a different response.
+// Pinning it on only one branch would pass even if the header were moved
+// inside the other.
+func TestVarySetOnBothFullPageAndFragmentResponses(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	full := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
+	fullRec := httptest.NewRecorder()
+	handler.ServeHTTP(fullRec, full)
+	if got := fullRec.Header().Get("Vary"); got != "HX-Request" {
+		t.Errorf("full-page GET /?q=Piranesi Vary = %q, want %q", got, "HX-Request")
+	}
+
+	fragment := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
+	fragment.Header.Set("HX-Request", "true")
+	fragmentRec := httptest.NewRecorder()
+	handler.ServeHTTP(fragmentRec, fragment)
+	if got := fragmentRec.Header().Get("Vary"); got != "HX-Request" {
+		t.Errorf("fragment GET /?q=Piranesi (HX-Request) Vary = %q, want %q", got, "HX-Request")
+	}
+}
+
+// A change to the search input's htmx attributes (a typo'd trigger, a
+// dropped hx-target) would leave every other test in this file green,
+// since they all drive libraryHandler directly rather than checking what
+// actually reaches the browser. This pins the rendered markup itself: the
+// script that makes any of it work, and the attributes search-as-you-type
+// depends on — debounce, partial target, whole-element swap, URL
+// tracking, and the request-in-flight indicator.
+func TestSearchBarHTMXWiringContract(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=Pira", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `<script src="/static/js/htmx.min.js" defer></script>`) {
+		t.Error("body missing the htmx script tag — none of the hx-* attributes below do anything without it")
+	}
+
+	for _, want := range []string{
+		`hx-get="/"`,
+		`hx-trigger="input changed delay:300ms, search"`,
+		`hx-target="#book-grid"`,
+		`hx-swap="outerHTML"`,
+		`hx-push-url="true"`,
+		`hx-indicator="closest form"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("search input missing %s — body = %q", want, body)
+		}
+	}
+
+	// The input's own value attribute specifically, not just the query
+	// appearing somewhere on the page — it's also echoed, escaped, in the
+	// no-results heading when a query matches nothing, so a substring
+	// check against the whole body can't tell the two apart.
+	if !strings.Contains(body, `value="Pira"`) {
+		t.Errorf("search input's value attribute is not %q; body = %q", "Pira", body)
+	}
+}
+
 func TestSearchNoResultsIsDistinctFromEmptyLibrary(t *testing.T) {
 	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
 
@@ -216,6 +283,25 @@ func TestSearchBlankQueryIsIdleNotSearching(t *testing.T) {
 		}
 		if strings.Contains(body, "search__count") {
 			t.Errorf("GET %s body = %q, want no result count on the idle/unfiltered grid", path, body)
+		}
+	}
+}
+
+// A raw NUL byte in the query string (curl --data-urlencode 'q=%00', or
+// anything else that can put %00 in a URL) must not 500 the search route:
+// SanitizeFTSQuery strips control characters before they can reach FTS5's
+// MATCH parser, which otherwise rejects an embedded NUL as an unterminated
+// string.
+func TestSearchHandlesNULInQueryParam(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	for _, rawQuery := range []string{"q=%00", "q=hel%00lo"} {
+		req := httptest.NewRequest(http.MethodGet, "/?"+rawQuery, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET /?%s status = %d, want 200 (not a 500 from an unsanitized NUL reaching MATCH)", rawQuery, rec.Code)
 		}
 	}
 }

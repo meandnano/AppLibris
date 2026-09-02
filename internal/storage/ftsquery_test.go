@@ -54,6 +54,10 @@ func TestSanitizeFTSQueryNeverProducesAnInvalidExpression(t *testing.T) {
 		"NEAR(foo, bar)",
 		"col:foo",
 		"a b c d e f g",
+		"\x00",
+		"hel\x00lo",
+		"\x00\x00\x00",
+		"\x01\x02\x1f",
 	}
 	for _, in := range inputs {
 		t.Run(in, func(t *testing.T) {
@@ -84,5 +88,55 @@ func TestSanitizeFTSQueryDoublesEmbeddedQuotes(t *testing.T) {
 	want := `"say""hi"*`
 	if got != want {
 		t.Errorf("SanitizeFTSQuery = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeFTSQueryStripsControlCharacters(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"\x00", ""},              // nothing left once NUL is stripped: blank, not an error
+		{"hel\x00lo", `"hello"*`}, // NUL stripped from the middle of a token, not just dropped whole
+		{"\x00\x00\x00", ""},
+		{"a\x01b\x02c", `"abc"*`}, // any C0 control character, not just NUL
+	}
+	for _, c := range cases {
+		if got := SanitizeFTSQuery(c.in); got != c.want {
+			t.Errorf("SanitizeFTSQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSanitizeFTSQueryNormalizesISBNShapedInput(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"9780857059985", `"9780857059985"*`},
+		{"978-0-85705-998-5", `"9780857059985"*`},
+		{"978 0 85705 998 5", `"9780857059985"*`},
+		{"0-306-40615-2", `"0306406152"*`},
+		{"030640615X", `"030640615X"*`},
+		{"0-306-40615-x", `"030640615X"*`}, // lower-case check character upper-cased
+	}
+	for _, c := range cases {
+		if got := SanitizeFTSQuery(c.in); got != c.want {
+			t.Errorf("SanitizeFTSQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSanitizeFTSQueryDoesNotTreatOrdinaryNumbersAsISBNs(t *testing.T) {
+	// Too short/long to be ISBN-10 or ISBN-13, so these fall through to the
+	// ordinary per-word path rather than the ISBN one.
+	cases := []struct {
+		in, want string
+	}{
+		{"1984", `"1984"*`},
+		{"12345678901234", `"12345678901234"*`},
+	}
+	for _, c := range cases {
+		if got := SanitizeFTSQuery(c.in); got != c.want {
+			t.Errorf("SanitizeFTSQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

@@ -44,10 +44,13 @@ type bookCard struct {
 }
 
 // libraryPage is the data library.html (and its book-grid fragment) render
-// against. Count is always the library's total size, shown in the
-// masthead — never the search-filtered count, which lives separately in
-// Books/search__count so the masthead reads the same whether this search
-// was typed live or landed on by a shared/bookmarked ?q= link. Query and
+// against. Count feeds the masthead, which only ever appears on a full
+// page — never the book-grid fragment a live search swaps in — so it's
+// the library's total size on a full-page render (never the
+// search-filtered count, which lives separately in Books/search__count,
+// so the masthead reads the same whether this search was typed live or
+// landed on by a shared/bookmarked ?q= link) but is left as the cheaper
+// filtered count on a fragment render, where nothing reads it. Query and
 // Searching distinguish "browsing the whole library" from "typed
 // something, however it resolved" — a blank Books with Searching true is
 // the no-results state; a blank Books with Searching false is the
@@ -74,23 +77,30 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 
 		query := r.URL.Query().Get("q")
 		searching := strings.TrimSpace(query) != ""
+		fragment := r.Header.Get("HX-Request") != ""
 
-		var books []service.BookSummary
-		var err error
-		total := 0
-		if searching {
-			books, err = svc.SearchBooks(r.Context(), query)
-			if err == nil {
-				total, err = svc.CountBooks(r.Context())
-			}
-		} else {
-			books, err = svc.ListBooks(r.Context())
-			total = len(books)
-		}
+		// SearchBooks already treats a blank query as ListBooks, so this
+		// covers both cases without repeating that check here.
+		books, err := svc.SearchBooks(r.Context(), query)
 		if err != nil {
 			slog.Error("list books failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+
+		// The masthead count Count feeds is only ever rendered on a full
+		// page — never on the book-grid fragment a live search swaps in —
+		// so a fragment response has no use for the library's total and
+		// isn't worth an extra query for it on every keystroke. len(books)
+		// is already the total whenever not searching.
+		total := len(books)
+		if searching && !fragment {
+			total, err = svc.CountBooks(r.Context())
+			if err != nil {
+				slog.Error("count books failed", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		cards := make([]bookCard, len(books))
@@ -107,7 +117,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 		page := libraryPage{Title: "Library", Count: total, Books: cards, Query: query, Searching: searching}
 
 		templateName := "library.html"
-		if r.Header.Get("HX-Request") != "" {
+		if fragment {
 			templateName = "book-grid"
 		}
 		if err := render(w, templateName, page); err != nil {

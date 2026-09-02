@@ -271,13 +271,23 @@ func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string)
 // edit. Must run after both the book row and its author links exist, since
 // the FTS row needs to see the authors; it must be called from inside a
 // DB.Write callback — see DB.Write's contract.
+//
+// The indexed isbn is books.isbn with hyphens and spaces stripped, not the
+// column's own value verbatim: internal/epub normalizes a stored ISBN to
+// bare digits, but internal/fb2 does not, so books.isbn holds either shape
+// depending on which parser found it. Indexing the normalized form (and
+// having SanitizeFTSQuery normalize an ISBN-shaped query the same way)
+// means a search matches a book regardless of which format its ISBN
+// happened to arrive in. books.isbn itself — the display value — is
+// untouched.
 func syncBookFTSTx(ctx context.Context, tx *sql.Tx, bookID int64) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM books_fts WHERE rowid = ?`, bookID); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO books_fts (rowid, title, authors, description, isbn)
-		SELECT b.id, b.title, coalesce(group_concat(a.name, ' '), ''), b.description, b.isbn
+		SELECT b.id, b.title, coalesce(group_concat(a.name, ' '), ''), b.description,
+			replace(replace(b.isbn, '-', ''), ' ', '')
 		FROM books b
 		LEFT JOIN book_authors ba ON ba.book_id = b.id
 		LEFT JOIN authors a ON a.id = ba.author_id

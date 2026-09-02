@@ -56,8 +56,11 @@ full design.
   inside the same `DB.Write` transaction as `createBookTx`, right after it
   (`CreateBook`, `CreateBookWithFile`) so the FTS row can see the authors.
   No other write method touches an indexed column, so nothing else calls
-  it. No backfill migration exists or ever will: every row is created
-  through the synced path by construction. `SearchBooks(ctx, query)`
+  it. No backfill migration exists or ever will — a row created after
+  this migration is synced by construction, but a database that predates
+  it needs a one-time manual reset (delete the file, let the next sweep
+  rescan) before that guarantee holds, since a pre-existing `books` row
+  never passes through `syncBookFTSTx` on its own. `SearchBooks(ctx, query)`
   joins against it and orders by `sort_title`, not relevance — see
   `internal/web` below for why. `query` must already be a valid FTS5
   `MATCH` expression; `SanitizeFTSQuery` (also `internal/storage`, no DB
@@ -214,9 +217,9 @@ full design.
   write failure past that point (almost always the client disconnecting)
   is logged inside `render` rather than returned — a handler reacting to
   it with `http.Error` would double-write onto an already-committed
-  response. Book detail, search, inline metadata editing and
-  send-to-Kindle are designed but not built — each needs backing features
-  that don't exist yet.
+  response. Book detail, inline metadata editing and send-to-Kindle are
+  designed but not built — each needs backing features that don't exist
+  yet.
 - Search-as-you-type is `GET /{$}` extended, not a separate route: a `q`
   parameter narrows the grid, and htmx (vendored at
   `internal/web/static/js/htmx.min.js`, version pinned in a comment at the
