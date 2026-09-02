@@ -43,6 +43,34 @@ full design.
   index. Every timestamp column is written as fixed-width UTC RFC 3339 text
   (`sqliteTimeLayout`/`formatTime` in `internal/storage`), so SQLite's own
   date functions and a plain `ORDER BY` both work on it.
+- `books_fts` is an FTS5 virtual table (`title`, `authors`, `description`,
+  `isbn`, `tokenize='unicode61 remove_diacritics 2'`) — a plain table, not
+  `content='books'`, since `authors` isn't a books column to begin with
+  (it's assembled from a join) and a contentless table can't support the
+  delete-by-rowid the sync below needs. Sync is asymmetric on purpose:
+  deletion is a trigger (`books_fts_after_delete`, since books die on
+  several independent Go paths and every future one dies for free too),
+  while insert/update is the package-internal `syncBookFTSTx(ctx, tx,
+  bookID)` — recomputes the row from scratch via a `group_concat` join
+  over `book_authors`/`authors` rather than tracking deltas, and runs
+  inside the same `DB.Write` transaction as `createBookTx`, right after it
+  (`CreateBook`, `CreateBookWithFile`) so the FTS row can see the authors.
+  No other write method touches an indexed column, so nothing else calls
+  it. No backfill migration exists or ever will — a row created after
+  this migration is synced by construction, but a database that predates
+  it needs a one-time manual reset (delete the file, let the next sweep
+  rescan) before that guarantee holds, since a pre-existing `books` row
+  never passes through `syncBookFTSTx` on its own. `SearchBooks(ctx, query)`
+  joins against it and orders by `sort_title`, not relevance — see
+  `internal/web` below for why. `MatchedSearchFields(ctx, query)` reports
+  which of the four columns produced hits, for the results line that names
+  them; it is one round trip of four `EXISTS`, each scoped with FTS5's
+  `{col} : (expr)` filter — the parentheses are load-bearing, since
+  without them the filter binds to the first term only. `query` must already be a valid FTS5
+  `MATCH` expression; `SanitizeFTSQuery` (also `internal/storage`, no DB
+  access) is the one place raw user input becomes one, by quoting and
+  prefix-terming every whitespace-separated token so no input, however
+  adversarial, can reach `MATCH` unescaped.
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
   ISBN, description, publisher, publication date) from the OPF package
   inside the zip, and extracts the declared cover image (EPUB3
@@ -147,9 +175,23 @@ full design.
   logged at Warn.
 - `internal/service` — the layer beneath HTTP handlers DESIGN.md's
   "Layering for a future API" calls for, so a future `/api/v1` can reuse it
-  as a second thin transport alongside `internal/web`. One method so far:
-  `ListBooks`, assembling `internal/storage`'s books and authors into a
-  `BookSummary` per book.
+  as a second thin transport alongside `internal/web`. `ListBooks` and
+  `SearchBooks` both assemble `internal/storage`'s books and authors into a
+  `BookSummary` per book via a shared unexported `summarize` helper.
+  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first and returns
+  a `SearchResult` — the books, whether a search actually ran, and which
+  indexed fields matched. A query that sanitizes to nothing is treated as
+  `ListBooks`, so the empty search box and a freshly-loaded page are the
+  same state and callers don't special-case it; `Searched` reports which
+  of the two happened, because "sanitizes to nothing" is wider than "looks
+  blank" (control characters are stripped, so `?q=%00` is a non-blank
+  query that is nonetheless no search) and a transport deriving its own
+  flag from the raw query would render a result count over the whole
+  unfiltered library. `Fields` is fetched only when something matched —
+  with no results there are no fields to name, and the no-matches state
+  names the searched fields itself. `CountBooks` returns the library's total size,
+  independent of any search filter — what the masthead shows, kept
+  separate from however many a search matched.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
@@ -187,9 +229,65 @@ full design.
   write failure past that point (almost always the client disconnecting)
   is logged inside `render` rather than returned — a handler reacting to
   it with `http.Error` would double-write onto an already-committed
-  response. Book detail, search, inline metadata editing and
-  send-to-Kindle are designed but not built — each needs backing features
-  that don't exist yet.
+  response. Book detail, inline metadata editing and send-to-Kindle are
+  designed but not built — each needs backing features that don't exist
+  yet.
+- Search-as-you-type is `GET /{$}` extended, not a separate route: a `q`
+  parameter narrows the grid, and htmx (vendored at
+  `internal/web/static/js/htmx.min.js`, version pinned in a comment at the
+  top of the file) turns each keystroke into a debounced (`delay:300ms`)
+  partial request. Whether a request gets the full page or just the
+  `book-grid` fragment (a named template in `templates/partials.html`,
+  alongside the new `search-bar`) depends on the `HX-Request` header htmx
+  sets — but on that header *without* `HX-History-Restore-Request`, not on
+  `HX-Request` alone. htmx sets both on the request it issues when the user
+  goes Back to a URL that has dropped out of its history cache (ten
+  entries, and `hx-push-url` pushes one per keystroke, so this is ordinary
+  Back-button use), and it swaps that response into the whole document
+  body — so answering it with the fragment replaces the masthead, search
+  bar and scripts with a bare grid that can no longer search. Both headers
+  are therefore named in `Vary: HX-Request, HX-History-Restore-Request`:
+  this one URL serves different bodies depending on both, and without the
+  header a cache or the browser's back-forward cache could serve one where
+  another was wanted.
+  The search box itself lives only in the full-page render, never in the
+  fragment: `hx-target="#book-grid"` with `hx-swap="outerHTML"` means only
+  the grid is ever replaced, so a keystroke mid-request is never lost to a
+  render. `hx-push-url="true"` keeps the URL shareable.
+  The row is translated from plate 01 of the handoff (`ui-handoff/` on the
+  `init` branch), which draws it as part of the top chrome — the masthead's
+  ground and edges, closed by a `--rule-faint` hairline — rather than as a
+  block inside the page body, so `library.html` renders `search-bar`
+  between the masthead and `<main>`. Three affordances there resolve in the
+  browser rather than per keystroke, since the input is never re-rendered:
+  a `clear ×` link (plain `href="/"`, hidden by CSS while the box shows its
+  placeholder), the `/` shortcut hint (`search.js` binds the key and only
+  then unhides the hint, so it never advertises a shortcut that isn't
+  bound — with JS off, or with the control dimmed, it stays hidden), and
+  the `filtering …` status line. That status line is rendered *inside*
+  `<main>` above the grid, not in the form: it swaps places with the
+  results count, so it has to share the count's container and margins or
+  the grid jumps on every keystroke. Plate 02e's empty-library state dims
+  and disables the whole control — with nothing indexed there is nothing to
+  search. Its "Scan library" button and library path are the one part of
+  that plate not built, tracked in
+  `docs/backlog/2026090203-empty-library-scan-action.md`. With JavaScript
+  off, the same `<form method="get">` degrades to a normal navigation
+  hitting the identical handler, so there is no separate no-JS path to
+  drift out of sync. A `q` that sanitizes to nothing is "not
+  searching" — the plain grid, no result count, same as before this query
+  parameter existed; that covers blank and whitespace-only input and also
+  input stripped to nothing, such as a lone control character. A `q` that
+  does search renders either the results state — a mono line reading
+  `4 of 1,284 · matched title, author`, the match count against the
+  library total (grouped by thousands, as the masthead's count is, since
+  one screen must not show the same number two ways) followed by the
+  fields that actually matched, composed in the handler so the template
+  holds no formatting logic — and the filtered grid,
+  or a distinct `search__empty` block (`Nothing matches "<query>"`, the
+  query HTML-escaped by `html/template`) if nothing matched — kept visually
+  and structurally separate from the "No books yet" empty-library block,
+  since the two call for different next actions.
 - `cmd/server` — entrypoint. `main` sets up logging and a
   `signal.NotifyContext` (SIGINT/SIGTERM) and calls `run(ctx) error`, so
   every failure path has one exit point (`slog.Error` + `os.Exit(1)`).
@@ -224,7 +322,7 @@ full design.
   used everywhere else via `slog`'s package-level functions against that
   default logger.
 
-Still missing from DESIGN.md: the book detail page, search, inline metadata
+Still missing from DESIGN.md: the book detail page, inline metadata
 editing and send-to-Kindle (designed, not built), metadata provider
 enrichment (Open Library / Google Books), the filesystem watcher (the
 periodic rescan is the only live-update mechanism so far), near-duplicate

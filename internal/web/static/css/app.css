@@ -151,13 +151,194 @@ a:hover {
   color: var(--fg);
 }
 
-/* ---------- grid ---------- */
+/* ---------- search ---------- */
 
 .page {
   max-width: 1500px;
   margin: 0 auto;
   padding: 32px 32px 96px;
 }
+
+/* ---------- search ---------- */
+
+/* Plate 01 draws this as part of the top chrome — same ground and edges as
+   the masthead, closed by a --rule-faint hairline — not as a block floating
+   in the page body. */
+.search {
+  padding: 22px 32px 14px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--rule-faint);
+}
+
+.search__row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.search__box {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  padding: 11px 14px;
+}
+
+/* htmx puts htmx-request on the closest form (hx-indicator="closest
+   form") for the duration of a search request — the accent highlight and
+   spinner are pure CSS reactions to that class, since the input itself is
+   never re-rendered by the swap. */
+.search.htmx-request .search__box {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.search__icon {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-faint);
+}
+
+.search.htmx-request .search__icon {
+  color: var(--accent);
+}
+
+.search__input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 14px;
+  color: var(--fg);
+}
+
+.search__input:focus {
+  outline: none;
+}
+
+.search__input::placeholder {
+  color: var(--fg-faint);
+}
+
+/* The clear affordance belongs to a box that has something in it. Keying
+   on :placeholder-shown means it follows what the user typed without the
+   input being re-rendered — which it never is, by design. */
+.search__clear {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-decoration: none;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+
+.search__clear:hover {
+  color: var(--fg);
+  border-bottom-color: var(--fg);
+}
+
+.search__input:placeholder-shown ~ .search__clear {
+  display: none;
+}
+
+.search__spinner {
+  display: none;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--rule);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+}
+
+.search.htmx-request .search__spinner {
+  display: block;
+  animation: search-spin 0.7s linear infinite;
+}
+
+/* Only shown once search.js has bound the key, so the hint never promises
+   a shortcut that isn't there. */
+.search__shortcut {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+  border: 1px solid var(--rule);
+  padding: 4px 7px;
+}
+
+/* "filtering …" and the results count are the same line in the same box —
+   only ever one of them at a time, with identical metrics, so a search
+   starting doesn't move the grid under the reader's eyes. */
+.search__status,
+.search__count {
+  margin: 12px 0;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.search__status {
+  display: none;
+  color: var(--fg-faint);
+}
+
+.search.htmx-request + .page .search__status {
+  display: block;
+}
+
+.search.htmx-request + .page .search__count {
+  display: none;
+}
+
+/* Plate 02e: nothing indexed, so the control is inert and says so. */
+.search--disabled .search__box {
+  border-color: var(--rule-faint);
+  background: var(--bg-sunken);
+  opacity: 0.55;
+}
+
+.search--disabled .search__input {
+  cursor: not-allowed;
+}
+
+@keyframes search-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.search__count {
+  color: var(--fg-muted);
+}
+
+.search__empty {
+  border: 1px dashed var(--rule);
+  padding: 40px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.search__empty-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 21px;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
+.search__empty-body {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+/* ---------- grid ---------- */
 
 .grid {
   list-style: none;
@@ -287,6 +468,10 @@ a:hover {
   .masthead__left,
   .masthead__right {
     gap: 16px;
+  }
+
+  .search {
+    padding: 16px 16px 12px;
   }
 
   .page {
