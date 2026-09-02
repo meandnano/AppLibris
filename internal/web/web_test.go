@@ -179,10 +179,15 @@ func TestSearchFragmentOmitsFullPageChromeAndSetsVary(t *testing.T) {
 	if !strings.Contains(body, "Piranesi") {
 		t.Errorf("HX-Request response = %q, want it to contain the matching book", body)
 	}
-	if got := rec.Header().Get("Vary"); got != "HX-Request" {
-		t.Errorf("GET /?q=Piranesi Vary = %q, want %q", got, "HX-Request")
+	if got := rec.Header().Get("Vary"); got != wantVary {
+		t.Errorf("GET /?q=Piranesi Vary = %q, want %q", got, wantVary)
 	}
 }
+
+// wantVary is every request header that changes this URL's body: HX-Request
+// picks the fragment, and HX-History-Restore-Request takes it back off a
+// request that carries both.
+const wantVary = "HX-Request, HX-History-Restore-Request"
 
 // Vary: HX-Request has to be on both halves of the contract to mean
 // anything: it exists so a cache keys the full page and the fragment
@@ -197,16 +202,16 @@ func TestVarySetOnBothFullPageAndFragmentResponses(t *testing.T) {
 	full := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
 	fullRec := httptest.NewRecorder()
 	handler.ServeHTTP(fullRec, full)
-	if got := fullRec.Header().Get("Vary"); got != "HX-Request" {
-		t.Errorf("full-page GET /?q=Piranesi Vary = %q, want %q", got, "HX-Request")
+	if got := fullRec.Header().Get("Vary"); got != wantVary {
+		t.Errorf("full-page GET /?q=Piranesi Vary = %q, want %q", got, wantVary)
 	}
 
 	fragment := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
 	fragment.Header.Set("HX-Request", "true")
 	fragmentRec := httptest.NewRecorder()
 	handler.ServeHTTP(fragmentRec, fragment)
-	if got := fragmentRec.Header().Get("Vary"); got != "HX-Request" {
-		t.Errorf("fragment GET /?q=Piranesi (HX-Request) Vary = %q, want %q", got, "HX-Request")
+	if got := fragmentRec.Header().Get("Vary"); got != wantVary {
+		t.Errorf("fragment GET /?q=Piranesi (HX-Request) Vary = %q, want %q", got, wantVary)
 	}
 }
 
@@ -303,6 +308,186 @@ func TestSearchHandlesNULInQueryParam(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Errorf("GET /?%s status = %d, want 200 (not a 500 from an unsanitized NUL reaching MATCH)", rawQuery, rec.Code)
 		}
+	}
+}
+
+// htmx sends HX-Request on a history-restore request as well as on a live
+// search, but the two want different bodies: a restore swaps whatever comes
+// back into the whole document body, so answering it with the book-grid
+// fragment replaces the masthead, the search bar and the scripts with a
+// bare grid that can no longer search — recoverable only by a manual
+// reload. htmx marks that request HX-History-Restore-Request; this pins
+// that the handler tells the two apart. Reachable by ordinary Back-button
+// use: hx-push-url pushes a URL per keystroke and htmx's history cache
+// holds ten.
+func TestHistoryRestoreRequestGetsFullPageNotFragment(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
+	req.Header.Set("HX-Request", "true")
+	req.Header.Set("HX-History-Restore-Request", "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history-restore GET /?q=Piranesi status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"<html", "<head", `id="search-form"`, "htmx.min.js"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("history-restore response is missing %q — htmx swaps this into the whole body, so it must be a full page", want)
+		}
+	}
+	if !strings.Contains(body, "Piranesi") {
+		t.Error("history-restore response = missing the matching book")
+	}
+	if got := rec.Header().Get("Vary"); got != wantVary {
+		t.Errorf("history-restore Vary = %q, want %q — the header decides the body, so it has to be named here", got, wantVary)
+	}
+}
+
+// A query that is non-blank but sanitizes to nothing — control characters
+// are stripped before anything else — is not a search, and the page must
+// not claim otherwise. Deriving "searching" from the raw query instead of
+// from what the service actually did renders the results line ("3 of 3 ·
+// matched …") over the entire unfiltered library.
+func TestControlCharacterQueryRendersIdleNotSearchResults(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=%00", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=%%00 status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "matched") {
+		t.Error("GET /?q=%00 rendered the search count line; a query that sanitizes to nothing is not a search")
+	}
+	if strings.Contains(body, "search__empty") {
+		t.Error("GET /?q=%00 rendered the no-results block; the library is not empty and no search ran")
+	}
+	if !strings.Contains(body, "Piranesi") {
+		t.Error("GET /?q=%00 dropped the library listing; it should render the idle grid")
+	}
+}
+
+// Plate 02c specifies the results line exactly: "4 of 1,284 · matched
+// title, author" — the match count against the library total, then the
+// indexed fields that produced the hits, so a match on a description or an
+// ISBN isn't a mystery. A bare "N books matched" loses both halves.
+func TestSearchResultsLineNamesTotalAndMatchedFields(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	books := []struct{ title, author, description, isbn string }{
+		{"The Left Hand of Darkness", "Ursula K. Le Guin", "A novel about winter", "9780857059985"},
+		{"The Dispossessed", "Ursula K. Le Guin", "", ""},
+		{"Piranesi", "Susanna Clarke", "", ""},
+	}
+	for i, b := range books {
+		if _, err := db.CreateBook(context.Background(), storage.Book{
+			ContentHash: fmt.Sprintf("hash-%d", i), Title: b.title, SortTitle: b.title,
+			Description: b.description, ISBN: b.isbn, Format: "epub",
+		}, []string{b.author}); err != nil {
+			t.Fatalf("CreateBook %d: %v", i, err)
+		}
+	}
+	handler := Routes(service.New(db), t.TempDir())
+
+	for _, tc := range []struct{ query, want string }{
+		{"le+guin", "2 of 3 · matched author"},
+		{"winter", "1 of 3 · matched description"},
+		{"9780857059985", "1 of 3 · matched isbn"},
+		{"piranesi", "1 of 3 · matched title"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/?q="+tc.query, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		want := `<p class="search__count">` + tc.want + `</p>`
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("GET /?q=%s results line missing %q", tc.query, want)
+		}
+	}
+}
+
+// Counts are grouped in the mockups wherever they appear, and the results
+// line quotes the same number the masthead does — rendering it two ways on
+// one screen would be worse than rendering it plainly in both.
+func TestCountsAreGroupedByThousands(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{{0, "0"}, {7, "7"}, {999, "999"}, {1000, "1,000"}, {1284, "1,284"}, {12840, "12,840"}, {1234567, "1,234,567"}} {
+		if got := formatCount(tc.n); got != tc.want {
+			t.Errorf("formatCount(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// Plate 02c/02d put a "clear ×" affordance in the input and plate 01 puts a
+// "/" shortcut hint beside it. Neither can be rendered per keystroke — the
+// input is never re-rendered — so both are markup the browser resolves:
+// CSS hides the clear link while the box is empty, and search.js unhides
+// the hint once it has bound the key.
+func TestSearchBarCarriesClearAndShortcutAffordances(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<a class="search__clear" href="/">clear ×</a>`,
+		`<kbd class="search__shortcut" data-search-shortcut hidden>/</kbd>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("search bar missing %q", want)
+		}
+	}
+	// The status line sits outside the form, in the same box as the count.
+	if !strings.Contains(body, `<p class="search__status" role="status">filtering …</p>`) {
+		t.Error("page missing the filtering status line")
+	}
+	for _, want := range []string{
+		`<script src="/static/js/search.js" defer></script>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("search bar missing %q", want)
+		}
+	}
+}
+
+// Plate 02e: with nothing indexed there is nothing to search, so the
+// control is dimmed and inert rather than inviting a query that could only
+// ever come back empty.
+func TestEmptyLibraryDisablesTheSearchControl(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	handler := Routes(service.New(db), t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "search--disabled") {
+		t.Error("empty library: search form missing the search--disabled class")
+	}
+	if !strings.Contains(body, "data-search-input disabled") {
+		t.Error("empty library: search input is not disabled")
+	}
+	if !strings.Contains(body, "No books yet") {
+		t.Error("empty library: missing the empty-library block")
 	}
 }
 

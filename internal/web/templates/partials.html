@@ -28,7 +28,7 @@
     </nav>
   </div>
   <div class="masthead__right">
-    <span class="masthead__count">{{.Count}} {{if eq .Count 1}}book{{else}}books{{end}}</span>
+    <span class="masthead__count">{{.CountText}} {{if eq .Count 1}}book{{else}}books{{end}}</span>
     <button class="masthead__theme" type="button" data-theme-toggle>Dark mode</button>
   </div>
 </header>
@@ -37,6 +37,7 @@
 {{define "site-scripts"}}
 <script src="/static/js/theme.js" defer></script>
 <script src="/static/js/htmx.min.js" defer></script>
+<script src="/static/js/search.js" defer></script>
 {{end}}
 
 {{/* The input is never itself re-rendered by htmx — only #book-grid below
@@ -45,19 +46,47 @@
      part of the book-grid fragment a search request swaps in. With
      JavaScript disabled this degrades to a plain form GET: the same
      handler serves both, so no separate no-JS path exists to fall out of
-     sync. */}}
+     sync.
+
+     Plate 01 puts this row in the top chrome rather than in the page body:
+     directly under the masthead, sharing its edges, closed by a
+     --rule-faint hairline. Plate 02e dims it when the library is empty —
+     there is nothing to search, so the control says so instead of
+     inviting a query that can only ever return nothing. */}}
 {{define "search-bar"}}
-<form class="search" id="search-form" action="/" method="get" role="search">
-  <div class="search__box">
-    <span class="search__icon" aria-hidden="true">⌕</span>
-    <input class="search__input" type="search" name="q" value="{{.Query}}"
-           placeholder="Search title or author" aria-label="Search title or author"
-           hx-get="/" hx-trigger="input changed delay:300ms, search"
-           hx-target="#book-grid" hx-swap="outerHTML" hx-push-url="true"
-           hx-indicator="closest form">
-    <span class="search__spinner" aria-hidden="true"></span>
+<form class="search{{if .LibraryEmpty}} search--disabled{{end}}" id="search-form" action="/" method="get" role="search">
+  <div class="search__row">
+    <div class="search__box">
+      <span class="search__icon" aria-hidden="true">⌕</span>
+      <input class="search__input" type="search" name="q" value="{{.Query}}"
+             placeholder="Search title or author" aria-label="Search title or author"
+             data-search-input{{if .LibraryEmpty}} disabled{{end}}
+             hx-get="/" hx-trigger="input changed delay:300ms, search"
+             hx-target="#book-grid" hx-swap="outerHTML" hx-push-url="true"
+             hx-indicator="closest form">
+      {{/* A plain link, not a scripted button: clearing the search is
+           navigating to the unfiltered library, which is what "/" already
+           is. CSS hides it while the input is empty (:placeholder-shown),
+           so it appears and disappears without the input being
+           re-rendered. */}}
+      <a class="search__clear" href="/">clear ×</a>
+      <span class="search__spinner" aria-hidden="true"></span>
+    </div>
+    {{/* Hidden until search.js binds the shortcut — a hint for a key that
+         does nothing would be worse than no hint. */}}
+    <kbd class="search__shortcut" data-search-shortcut hidden>/</kbd>
   </div>
 </form>
+{{end}}
+
+{{/* "filtering …" replaces the results count for the duration of a
+     request, so it has to sit in the same box the count does — same
+     container, same margins — or the grid jumps every time a keystroke
+     fires. It can't live inside #book-grid, which is the swap target and
+     is only replaced once the response lands, so it goes just above it,
+     driven by the htmx-request class on the form. */}}
+{{define "search-status"}}
+<p class="search__status" role="status">filtering …</p>
 {{end}}
 
 {{/* The count line and the no-results block live inside this fragment,
@@ -70,7 +99,7 @@
 <div id="book-grid">
   {{if .Books}}
   {{if .Searching}}
-  <p class="search__count">{{len .Books}} {{if eq (len .Books) 1}}book{{else}}books{{end}} matched</p>
+  <p class="search__count">{{.SearchSummary}}</p>
   {{end}}
   <ul class="grid">
     {{range .Books}}

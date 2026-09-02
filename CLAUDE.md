@@ -62,7 +62,11 @@ full design.
   rescan) before that guarantee holds, since a pre-existing `books` row
   never passes through `syncBookFTSTx` on its own. `SearchBooks(ctx, query)`
   joins against it and orders by `sort_title`, not relevance — see
-  `internal/web` below for why. `query` must already be a valid FTS5
+  `internal/web` below for why. `MatchedSearchFields(ctx, query)` reports
+  which of the four columns produced hits, for the results line that names
+  them; it is one round trip of four `EXISTS`, each scoped with FTS5's
+  `{col} : (expr)` filter — the parentheses are load-bearing, since
+  without them the filter binds to the first term only. `query` must already be a valid FTS5
   `MATCH` expression; `SanitizeFTSQuery` (also `internal/storage`, no DB
   access) is the one place raw user input becomes one, by quoting and
   prefix-terming every whitespace-separated token so no input, however
@@ -184,10 +188,18 @@ full design.
   as a second thin transport alongside `internal/web`. `ListBooks` and
   `SearchBooks` both assemble `internal/storage`'s books and authors into a
   `BookSummary` per book via a shared unexported `summarize` helper.
-  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first; a blank or
-  whitespace-only query is treated as `ListBooks` — the empty search box
-  and a freshly-loaded page are the same state, so callers don't
-  special-case it. `CountBooks` returns the library's total size,
+  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first and returns
+  a `SearchResult` — the books, whether a search actually ran, and which
+  indexed fields matched. A query that sanitizes to nothing is treated as
+  `ListBooks`, so the empty search box and a freshly-loaded page are the
+  same state and callers don't special-case it; `Searched` reports which
+  of the two happened, because "sanitizes to nothing" is wider than "looks
+  blank" (control characters are stripped, so `?q=%00` is a non-blank
+  query that is nonetheless no search) and a transport deriving its own
+  flag from the raw query would render a result count over the whole
+  unfiltered library. `Fields` is fetched only when something matched —
+  with no results there are no fields to name, and the no-matches state
+  names the searched fields itself. `CountBooks` returns the library's total size,
   independent of any search filter — what the masthead shows, kept
   separate from however many a search matched. `GetBook` assembles one
   `BookDetail` for the detail page (nil, nil on an unknown id, same
@@ -209,7 +221,7 @@ full design.
   the mux's own 404 handles every other unmatched path (`GET /books/{id}`
   is now a real route below, but the mux still 404s a non-numeric or
   unknown id under it); `GET /static/` serves the embedded stylesheet and
-  theme script; `GET /covers/` serves the scanner's stored cover thumbnails out of
+  scripts; `GET /covers/` serves the scanner's stored cover thumbnails out of
   `COVERS_DIR` (runtime data, so it's passed into `Routes` rather than
   embedded). Both mounts wrap their filesystem in `noDirFS` so a directory
   with no `index.html` 404s instead of `http.FileServer` generating a
@@ -247,18 +259,51 @@ full design.
   partial request. Whether a request gets the full page or just the
   `book-grid` fragment (a named template in `templates/partials.html`,
   alongside the new `search-bar`) depends on the `HX-Request` header htmx
-  sets, so the handler always sets `Vary: HX-Request` — the same URL now
-  serves two different bodies, and without the header a cache or the
-  browser's back-forward cache could serve one where the other was wanted.
+  sets — but on that header *without* `HX-History-Restore-Request`, not on
+  `HX-Request` alone. htmx sets both on the request it issues when the user
+  goes Back to a URL that has dropped out of its history cache (ten
+  entries, and `hx-push-url` pushes one per keystroke, so this is ordinary
+  Back-button use), and it swaps that response into the whole document
+  body — so answering it with the fragment replaces the masthead, search
+  bar and scripts with a bare grid that can no longer search. Both headers
+  are therefore named in `Vary: HX-Request, HX-History-Restore-Request`:
+  this one URL serves different bodies depending on both, and without the
+  header a cache or the browser's back-forward cache could serve one where
+  another was wanted.
   The search box itself lives only in the full-page render, never in the
   fragment: `hx-target="#book-grid"` with `hx-swap="outerHTML"` means only
   the grid is ever replaced, so a keystroke mid-request is never lost to a
-  render. `hx-push-url="true"` keeps the URL shareable. With JavaScript
+  render. `hx-push-url="true"` keeps the URL shareable.
+  The row is translated from plate 01 of the handoff (`ui-handoff/` on the
+  `init` branch), which draws it as part of the top chrome — the masthead's
+  ground and edges, closed by a `--rule-faint` hairline — rather than as a
+  block inside the page body, so `library.html` renders `search-bar`
+  between the masthead and `<main>`. Three affordances there resolve in the
+  browser rather than per keystroke, since the input is never re-rendered:
+  a `clear ×` link (plain `href="/"`, hidden by CSS while the box shows its
+  placeholder), the `/` shortcut hint (`search.js` binds the key and only
+  then unhides the hint, so it never advertises a shortcut that isn't
+  bound — with JS off, or with the control dimmed, it stays hidden), and
+  the `filtering …` status line. That status line is rendered *inside*
+  `<main>` above the grid, not in the form: it swaps places with the
+  results count, so it has to share the count's container and margins or
+  the grid jumps on every keystroke. Plate 02e's empty-library state dims
+  and disables the whole control — with nothing indexed there is nothing to
+  search. Its "Scan library" button and library path are the one part of
+  that plate not built, tracked in
+  `docs/backlog/2026090203-empty-library-scan-action.md`. With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
-  drift out of sync. A blank or whitespace-only `q` is "not searching" —
-  the plain grid, no result count, same as before this query parameter
-  existed; a non-blank `q` renders either the count-and-filtered-grid state
+  drift out of sync. A `q` that sanitizes to nothing is "not
+  searching" — the plain grid, no result count, same as before this query
+  parameter existed; that covers blank and whitespace-only input and also
+  input stripped to nothing, such as a lone control character. A `q` that
+  does search renders either the results state — a mono line reading
+  `4 of 1,284 · matched title, author`, the match count against the
+  library total (grouped by thousands, as the masthead's count is, since
+  one screen must not show the same number two ways) followed by the
+  fields that actually matched, composed in the handler so the template
+  holds no formatting logic — and the filtered grid,
   or a distinct `search__empty` block (`Nothing matches "<query>"`, the
   query HTML-escaped by `html/template`) if nothing matched — kept visually
   and structurally separate from the "No books yet" empty-library block,
@@ -267,11 +312,14 @@ full design.
   `library.html`). `r.PathValue("id")` is parsed with `strconv.ParseInt`;
   a non-numeric id and an unknown one both plain 404 (`http.NotFound`),
   indistinguishable on purpose — neither is a client error worth its own
-  page. Every grid card in `book-grid` is now wrapped in `<a
-  href="/books/{{.ID}}">`. Metadata renders field-granular (one element
-  per field, not one blob) so a future inline-edit step connects markup
-  rather than redesigning it: empty optional fields (publisher, published
-  date, language, ISBN) render as visible em-dash rows rather than being
+  page. Every grid card in `book-grid` is wrapped in `<a
+  href="/books/{{.ID}}">`. Its masthead is the shared `site-header`
+  partial, so `bookDetailPage` carries the same `Count`/`CountText` pair
+  `libraryPage` does — the partial renders one and pluralizes on the
+  other. Metadata renders field-granular (one element per field, not one
+  blob) so a future inline-edit step connects markup rather than
+  redesigning it: empty optional fields (publisher, published date,
+  language, ISBN) render as visible em-dash rows rather than being
   dropped — a hidden field can't be filled in, and sparse metadata is the
   common FB2 case — while an empty author or description gets its own
   italic `--fg-faint` line ("Author unknown" / "No description") instead

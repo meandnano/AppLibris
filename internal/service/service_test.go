@@ -76,12 +76,15 @@ func TestSearchBooksBlankQueryReturnsFullList(t *testing.T) {
 	}
 
 	for _, q := range []string{"", "   ", "\t"} {
-		books, err := svc.SearchBooks(ctx, q)
+		result, err := svc.SearchBooks(ctx, q)
 		if err != nil {
 			t.Fatalf("SearchBooks(%q): %v", q, err)
 		}
-		if len(books) != 1 {
-			t.Errorf("SearchBooks(%q) = %d books, want the full list (1)", q, len(books))
+		if result.Searched {
+			t.Errorf("SearchBooks(%q) reported a search; a query that sanitizes to nothing is not one", q)
+		}
+		if len(result.Books) != 1 {
+			t.Errorf("SearchBooks(%q) = %d books, want the full list (1)", q, len(result.Books))
 		}
 	}
 }
@@ -99,15 +102,21 @@ func TestSearchBooksMatchReturnsSummaryWithAuthors(t *testing.T) {
 		t.Fatalf("CreateBook unrelated: %v", err)
 	}
 
-	books, err := svc.SearchBooks(ctx, "Piranesi")
+	result, err := svc.SearchBooks(ctx, "Piranesi")
 	if err != nil {
 		t.Fatalf("SearchBooks: %v", err)
 	}
-	if len(books) != 1 || books[0].ID != matchID {
-		t.Fatalf("SearchBooks(Piranesi) = %+v, want exactly the matching book", books)
+	if !result.Searched {
+		t.Error("SearchBooks(Piranesi) reported no search, want a search")
 	}
-	if len(books[0].Authors) != 1 || books[0].Authors[0] != "Susanna Clarke" {
-		t.Errorf("SearchBooks result Authors = %v, want [Susanna Clarke]", books[0].Authors)
+	if len(result.Books) != 1 || result.Books[0].ID != matchID {
+		t.Fatalf("SearchBooks(Piranesi) = %+v, want exactly the matching book", result.Books)
+	}
+	if len(result.Books[0].Authors) != 1 || result.Books[0].Authors[0] != "Susanna Clarke" {
+		t.Errorf("SearchBooks result Authors = %v, want [Susanna Clarke]", result.Books[0].Authors)
+	}
+	if len(result.Fields) != 1 || result.Fields[0] != "title" {
+		t.Errorf("SearchBooks result Fields = %v, want [title] — the title is what matched", result.Fields)
 	}
 }
 

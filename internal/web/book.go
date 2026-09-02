@@ -19,11 +19,14 @@ type bookLocationView struct {
 
 // bookDetailPage is the data book.html renders against. Title doubles as
 // the browser tab title (via document-head) and the on-page heading — the
-// book's own title, unlike libraryPage's constant "Library". Count is the
-// masthead's library-wide total, same contract as libraryPage.Count.
+// book's own title, unlike libraryPage's constant "Library". Count and
+// CountText are the masthead's library-wide total, same contract as
+// libraryPage's — the shared site-header partial renders CountText and
+// pluralizes on Count, so both have to be here or the masthead breaks.
 type bookDetailPage struct {
 	Title             string
 	Count             int
+	CountText         string
 	ID                int64
 	CoverURL          string
 	Format            string
@@ -76,6 +79,7 @@ func bookDetailHandler(svc *service.Service) http.HandlerFunc {
 		page := bookDetailPage{
 			Title:             detail.Title,
 			Count:             count,
+			CountText:         formatCount(count),
 			ID:                detail.ID,
 			CoverURL:          coverURL(detail.CoverPath),
 			Format:            detail.Format,

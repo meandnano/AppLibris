@@ -155,6 +155,46 @@ func (db *DB) SearchBooks(ctx context.Context, query string) ([]Book, error) {
 	return scanBooks(rows)
 }
 
+// ftsColumns are the books_fts columns, in the order MatchedSearchFields
+// reports them — the order the results line names them in, which is the
+// order a reader scans for ("title" before "isbn"), not the schema's.
+var ftsColumns = []string{"title", "authors", "description", "isbn"}
+
+// MatchedSearchFields reports which books_fts columns produced a match for
+// query, across the result set as a whole rather than per book — the
+// "matched title, author" half of the results line, which exists so a hit
+// on a description or an ISBN doesn't look like a mystery.
+//
+// One round trip: four EXISTS over the same index the search itself used,
+// each scoped to a single column with FTS5's `{col} : (expr)` filter. The
+// parentheses matter — without them the filter binds to the first term
+// only, so a two-word query would report the wrong columns. query must
+// already be a valid MATCH expression, as for SearchBooks.
+func (db *DB) MatchedSearchFields(ctx context.Context, query string) ([]string, error) {
+	args := make([]any, len(ftsColumns))
+	for i, col := range ftsColumns {
+		args[i] = "{" + col + "} : (" + query + ")"
+	}
+
+	var title, authors, description, isbn bool
+	if err := db.read.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM books_fts WHERE books_fts MATCH ?),
+		       EXISTS(SELECT 1 FROM books_fts WHERE books_fts MATCH ?),
+		       EXISTS(SELECT 1 FROM books_fts WHERE books_fts MATCH ?),
+		       EXISTS(SELECT 1 FROM books_fts WHERE books_fts MATCH ?)`,
+		args...).Scan(&title, &authors, &description, &isbn); err != nil {
+		return nil, err
+	}
+
+	var matched []string
+	for i, hit := range []bool{title, authors, description, isbn} {
+		if hit {
+			matched = append(matched, ftsColumns[i])
+		}
+	}
+	return matched, nil
+}
+
 // ListBookAuthors returns every book's author names, keyed by book id, in
 // each book's own credited order — author_id order (first-sight-in-the-
 // library order) is not the same thing once an author is shared between
