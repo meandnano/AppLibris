@@ -1,5 +1,11 @@
 # Step: Send to Kindle
 
+This is the **send-control half** of DESIGN.md's remaining “Web UI:
+inline editing, send control” work. The independent inline-editing half is
+planned in `docs/plans/2026090204-inline-metadata-editing.md`; neither step
+depends on the other, and each remains a complete vertical slice rather than
+sharing half-built schema or handlers across an implementation boundary.
+
 ## Context
 
 This is the feature the project exists for. DESIGN.md's opening line —
@@ -103,8 +109,10 @@ Out of scope, each with its reason:
   Note that `delivered` therefore means "Resend accepted the message",
   not "arrived on the device" — the state name is DESIGN.md's and is kept
   rather than renamed, so say so in the column comment.
-- **Field provenance and inline editing**, unchanged from `#29`: still
-  gated on provider design, still not this step.
+- **Field provenance and inline editing**, unchanged from `#29`: still not
+  this step. `docs/plans/2026090204-inline-metadata-editing.md` supplies the
+  provenance prerequisite and carries that feature through its own storage,
+  service, htmx and no-JavaScript paths.
 - **Streaming the attachment body** — considered and rejected below.
 
 ## Schema: five migrations
@@ -435,7 +443,7 @@ type RecipientOption struct{ Address, Label string }
 
 func (s *Service) Recipients(ctx) ([]RecipientOption, error)
 func (s *Service) QueueSend(ctx, bookID int64, address, newLabel string) (*SendState, error)
-func (s *Service) SendState(ctx, sendID int64) (*SendState, error)
+func (s *Service) SendState(ctx, bookID, sendID int64) (*SendState, error)
 func (s *Service) LatestSend(ctx, bookID int64) (*SendState, error)
 ```
 
@@ -465,13 +473,15 @@ render":
 
 ## Web transport
 
-Two routes, both under the existing detail page:
+Two route shapes, both under the existing detail page:
 
 - `POST /books/{id}/send` — form-encoded `recipient` (an address from the
   picker) or `new_address` + `new_label`. Renders the status fragment.
 - `GET /books/{id}/sends/{sendID}` — the status fragment, for polling.
   Scoped under the book so a wrong pairing 404s rather than showing
-  another book's send.
+  another book's send. `Service.SendState` takes both ids and storage's
+  lookup includes both in its `WHERE` clause; checking only `sendID` and
+  discarding the enclosing route id would make the apparent scoping cosmetic.
 
 **Markup.** A new `send-control` template in `partials.html`, rendered
 into the element `#29` left behind as `<div class="detail__send"></div>`.
@@ -501,10 +511,12 @@ coexisting.
   re-arms its own poll each time it comes back non-terminal, and the
   terminal fragments carry no `hx-*` at all, so polling stops by
   construction — nothing has to remember to cancel it.
-- *delivered* — the confirmation, plus a plain "Send again" that renders
-  the idle control back into the slot.
-- *failed* — the reason, and a retry that is the idle form pre-selected
-  to the same address. No new route: retry is the ordinary POST.
+- *delivered* — the confirmation plus the same recipient picker and a
+  "Send again" submit button. It posts a new send directly; there is no
+  otherwise-unaccounted-for route whose only job is to redisplay idle state.
+- *failed* — the reason plus the same picker and a "Retry" submit button,
+  pre-selected to the failed row's address. No new route: retry is the
+  ordinary POST and creates a new log row.
 
 The form posts with `hx-post` and `hx-target="#send"`; without JS it is a
 plain form POST, and the handler answers a non-`HX-Request` POST with
@@ -512,10 +524,12 @@ plain form POST, and the handler answers a non-`HX-Request` POST with
 picks the job up from `LatestSend`. Progressive enhancement falls out of
 the same handler, exactly as search's does.
 
-`bookDetailPage` gains a `Send *service.SendState` field so a page loaded
+`bookDetailPage` gains `Send *service.SendState` and recipient options so a page loaded
 while a send is in flight starts polling immediately, and one loaded
 after a completed send shows its outcome rather than a bare button. The
-service type goes in as it comes, not copied into a per-page struct:
+send state goes in as it comes; the handler shapes recipient labels and
+selection into the render model because terminal states still contain the
+picker. Do not copy service types field-for-field merely to rename nothing:
 #29's review removed exactly such a pass-through (`bookLocationView`,
 which duplicated `service.FileLocation` field-for-field under the same
 names), and `Locations` on that same view model is the precedent to
@@ -598,7 +612,8 @@ a real database.
 
 `internal/service`: an invalid address returns `ErrInvalidAddress` and
 queues nothing; a valid one creates the recipient and the job and calls
-`Notify` exactly once; `QueueSend` on an unknown book returns `nil, nil`.
+`Notify` exactly once; `QueueSend` on an unknown book returns `nil, nil`;
+`SendState` returns nil for a real send id paired with the wrong book id.
 
 `internal/web`: POST enqueues and returns the sending fragment (asserting
 it carries `hx-get`); the poll fragment for a terminal send carries no
