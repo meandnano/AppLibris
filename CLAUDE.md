@@ -171,10 +171,12 @@ full design.
   as a second thin transport alongside `internal/web`. `ListBooks` and
   `SearchBooks` both assemble `internal/storage`'s books and authors into a
   `BookSummary` per book via a shared unexported `summarize` helper.
-  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first; a query
-  that sanitizes to nothing (blank, or built only of whitespace/quotes/
-  operators) is treated as `ListBooks` — the empty search box and a
-  freshly-loaded page are the same state, so callers don't special-case it.
+  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first; a blank or
+  whitespace-only query is treated as `ListBooks` — the empty search box
+  and a freshly-loaded page are the same state, so callers don't
+  special-case it. `CountBooks` returns the library's total size,
+  independent of any search filter — what the masthead shows, kept
+  separate from however many a search matched.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build

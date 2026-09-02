@@ -44,10 +44,14 @@ type bookCard struct {
 }
 
 // libraryPage is the data library.html (and its book-grid fragment) render
-// against. Query and Searching distinguish "browsing the whole library"
-// from "typed something, however it resolved" — a blank Books with
-// Searching true is the no-results state; a blank Books with Searching
-// false is the empty-library state, and the two need different treatment.
+// against. Count is always the library's total size, shown in the
+// masthead — never the search-filtered count, which lives separately in
+// Books/search__count so the masthead reads the same whether this search
+// was typed live or landed on by a shared/bookmarked ?q= link. Query and
+// Searching distinguish "browsing the whole library" from "typed
+// something, however it resolved" — a blank Books with Searching true is
+// the no-results state; a blank Books with Searching false is the
+// empty-library state, and the two need different treatment.
 type libraryPage struct {
 	Title     string
 	Count     int
@@ -73,10 +77,15 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 
 		var books []service.BookSummary
 		var err error
+		total := 0
 		if searching {
 			books, err = svc.SearchBooks(r.Context(), query)
+			if err == nil {
+				total, err = svc.CountBooks(r.Context())
+			}
 		} else {
 			books, err = svc.ListBooks(r.Context())
+			total = len(books)
 		}
 		if err != nil {
 			slog.Error("list books failed", "error", err)
@@ -95,7 +104,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 			}
 		}
 
-		page := libraryPage{Title: "Library", Count: len(cards), Books: cards, Query: query, Searching: searching}
+		page := libraryPage{Title: "Library", Count: total, Books: cards, Query: query, Searching: searching}
 
 		templateName := "library.html"
 		if r.Header.Get("HX-Request") != "" {

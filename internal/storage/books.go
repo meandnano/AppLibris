@@ -119,6 +119,15 @@ func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
 	return scanBooks(rows)
 }
 
+// CountBooks returns the total number of books, independent of any search
+// filter — the library-wide count a masthead shows, as distinct from how
+// many a search matched.
+func (db *DB) CountBooks(ctx context.Context) (int, error) {
+	var n int
+	err := db.read.QueryRowContext(ctx, `SELECT count(*) FROM books`).Scan(&n)
+	return n, err
+}
+
 // SearchBooks returns every book whose books_fts row matches query, ordered
 // by sort_title rather than relevance — DESIGN.md's search UI filters the
 // grid in place rather than opening a results page, and reordering a grid

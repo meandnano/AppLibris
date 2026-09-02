@@ -119,6 +119,48 @@ func TestSearchFullPageRendersFilteredGridWithEchoedQuery(t *testing.T) {
 	}
 }
 
+// The masthead count must stay the library's total size on a full-page
+// search render, not the filtered result count — otherwise a shared or
+// bookmarked ?q= link, or a plain page reload, reports a misleadingly
+// small library size. It also must agree with what the swapped fragment
+// shows once a live search settles: a stale masthead frozen at some other
+// number would be just as misleading as a wrong one.
+func TestSearchFullPageMastheadCountStaysLibraryTotal(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for i, title := range []string{"Piranesi", "Flights", "One Hundred Years of Solitude"} {
+		if _, err := db.CreateBook(context.Background(), storage.Book{
+			ContentHash: fmt.Sprintf("hash-%d", i),
+			Title:       title,
+			SortTitle:   title,
+			Format:      "epub",
+		}, nil); err != nil {
+			t.Fatalf("CreateBook %q: %v", title, err)
+		}
+	}
+
+	handler := Routes(service.New(db), t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=Piranesi status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "3 books") {
+		t.Errorf("GET /?q=Piranesi masthead count missing/wrong in body: %q, want it to contain %q", body, "3 books")
+	}
+	if strings.Contains(body, "1 book<") {
+		t.Errorf("GET /?q=Piranesi masthead shows the filtered count (1) instead of the library total (3): %q", body)
+	}
+}
+
 func TestSearchFragmentOmitsFullPageChromeAndSetsVary(t *testing.T) {
 	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
 

@@ -38,11 +38,13 @@ func (s *Service) ListBooks(ctx context.Context) ([]BookSummary, error) {
 }
 
 // SearchBooks returns every book matching query, with its authors attached,
-// ordered by sort_title. A query that sanitizes to nothing searchable — an
-// empty string, or one built only of whitespace, quotes or operators — is
-// treated as no search at all: the empty search box and a freshly-loaded
-// page are the same state, so the handler needs no special-casing between
-// them.
+// ordered by sort_title. A blank or whitespace-only query — the state
+// SanitizeFTSQuery reports by returning "" — is treated as no search at
+// all: the empty search box and a freshly-loaded page are the same state,
+// so the handler needs no special-casing between them. Anything else, even
+// input that's only punctuation or an FTS5 keyword like AND, still becomes
+// a literal search term rather than degrading to "no search" — see
+// SanitizeFTSQuery.
 func (s *Service) SearchBooks(ctx context.Context, query string) ([]BookSummary, error) {
 	sanitized := storage.SanitizeFTSQuery(query)
 	if sanitized == "" {
@@ -54,6 +56,12 @@ func (s *Service) SearchBooks(ctx context.Context, query string) ([]BookSummary,
 		return nil, err
 	}
 	return s.summarize(ctx, books)
+}
+
+// CountBooks returns the total number of books, independent of any search
+// filter.
+func (s *Service) CountBooks(ctx context.Context) (int, error) {
+	return s.db.CountBooks(ctx)
 }
 
 // summarize attaches authors to books and shapes both into BookSummary.

@@ -249,6 +249,25 @@ func TestListBooks(t *testing.T) {
 	}
 }
 
+func TestCountBooks(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if n, err := db.CountBooks(ctx); err != nil || n != 0 {
+		t.Fatalf("CountBooks on an empty library = %d, %v; want 0, nil", n, err)
+	}
+
+	for _, hash := range []string{"hash-a", "hash-b", "hash-c"} {
+		if _, err := db.CreateBook(ctx, Book{ContentHash: hash, Title: hash, SortTitle: hash}, nil); err != nil {
+			t.Fatalf("CreateBook %s: %v", hash, err)
+		}
+	}
+
+	if n, err := db.CountBooks(ctx); err != nil || n != 3 {
+		t.Errorf("CountBooks = %d, %v; want 3, nil", n, err)
+	}
+}
+
 func TestListBookAuthors(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

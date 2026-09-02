@@ -109,3 +109,24 @@ func TestSearchBooksMatchReturnsSummaryWithAuthors(t *testing.T) {
 		t.Errorf("SearchBooks result Authors = %v, want [Susanna Clarke]", books[0].Authors)
 	}
 }
+
+func TestCountBooksIsUnaffectedBySearchFilter(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	if _, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "Piranesi", SortTitle: "Piranesi", Format: "epub"}, nil); err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-2", Title: "Unrelated", SortTitle: "Unrelated", Format: "epub"}, nil); err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	count, err := svc.CountBooks(ctx)
+	if err != nil {
+		t.Fatalf("CountBooks: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("CountBooks = %d, want 2 (the library total, not a search-filtered count)", count)
+	}
+}
