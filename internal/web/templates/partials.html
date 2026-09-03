@@ -38,6 +38,7 @@
 <script src="/static/js/theme.js" defer></script>
 <script src="/static/js/htmx.min.js" defer></script>
 <script src="/static/js/search.js" defer></script>
+<script src="/static/js/edit.js" defer></script>
 {{end}}
 
 {{/* The input is never itself re-rendered by htmx — only #book-grid below
@@ -208,5 +209,81 @@
   {{end}}
   {{end}}
   {{end}}
+</div>
+{{end}}
+
+{{/* The editable-field partials below are one pattern in four placements:
+     a read view that links to its own editor, or the editor itself. Each
+     is its own swap target (data-editable-field, and an id so a fragment
+     response can be matched to it), so a keystroke in one field never
+     re-renders another — and the read view is an <a> with both an href and
+     an hx-get, so the same markup works with htmx and without it.
+
+     Value and Display are deliberately different fields: the control edits
+     the stored form (authors one per line), the read view shows the
+     readable one ("A, B & C"). */}}
+
+{{define "edit-actions"}}
+<div class="editable__actions">
+  <button class="button button--primary" type="submit">Save</button>
+  <a class="button button--secondary" href="{{.BookURL}}" hx-get="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML" data-edit-cancel>Cancel</a>
+  {{if .Multiline}}<span class="editable__hint">&#8984;/ctrl + &#9166; save &middot; esc cancel</span>{{else}}<span class="editable__hint">&#9166; save &middot; esc cancel</span>{{end}}
+</div>
+{{if .Error}}<p class="editable__error" role="alert">{{.Error}}</p>{{end}}
+{{end}}
+
+{{define "book-field-title"}}
+<div id="book-field-title" class="editable editable--title{{if .Edit}} editable--editing{{end}}" data-editable-field data-field="title">
+  {{if .Edit}}
+  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML">
+    <input class="editable__control detail__title" type="text" name="value" value="{{.Value}}" required maxlength="1024" autofocus aria-label="Title">
+    {{template "edit-actions" .}}
+  </form>
+  {{else}}
+  <h1 class="detail__title"><a class="editable__read" href="{{.BookURL}}?edit=title" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{.Display}}</span><span class="editable__label">edit</span></a></h1>
+  {{end}}
+</div>
+{{end}}
+
+{{define "book-field-authors"}}
+<div id="book-field-authors" class="editable editable--authors{{if .Edit}} editable--editing{{end}}" data-editable-field data-field="authors">
+  {{if .Edit}}
+  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML">
+    <textarea class="editable__control editable__control--authors" name="value" rows="3" autofocus aria-label="Authors" placeholder="{{.Placeholder}}">{{.Value}}</textarea>
+    {{template "edit-actions" .}}
+  </form>
+  {{else}}
+  <p class="detail__author{{if not .Display}} detail__author--unknown{{end}}"><a class="editable__read" href="{{.BookURL}}?edit=authors" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}Author unknown &mdash; add one{{end}}</span><span class="editable__label">edit</span></a></p>
+  {{end}}
+</div>
+{{end}}
+
+{{define "book-field-description"}}
+<div id="book-field-description" class="editable editable--description{{if .Edit}} editable--editing{{end}}" data-editable-field data-field="description">
+  {{if .Edit}}
+  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML">
+    <label class="editable__section-label" for="description-value">Description</label>
+    <textarea id="description-value" class="editable__control detail__description" name="value" rows="5" autofocus aria-label="Description" placeholder="{{.Placeholder}}">{{.Value}}</textarea>
+    {{template "edit-actions" .}}
+  </form>
+  {{else}}
+  <a class="editable__read detail__description{{if not .Display}} detail__description--empty{{end}}" href="{{.BookURL}}?edit=description" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}No description &mdash; add one{{end}}</span><span class="editable__label">edit</span></a>
+  {{end}}
+</div>
+{{end}}
+
+{{define "book-field-meta"}}
+<div id="book-field-{{.Field}}" class="detail__meta-row editable editable--meta{{if .Edit}} editable--editing{{end}}{{if .Mono}} detail__meta-isbn{{end}}" data-editable-field data-field="{{.Field}}">
+  <dt>{{.Label}}</dt>
+  <dd>
+    {{if .Edit}}
+    <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML">
+      <input class="editable__control{{if .Mono}} editable__control--mono{{end}}" type="text" name="value" value="{{.Value}}" maxlength="4096" autofocus aria-label="{{.Label}}" placeholder="{{.Placeholder}}">
+      {{template "edit-actions" .}}
+    </form>
+    {{else}}
+    <a class="editable__read" href="{{.BookURL}}?edit={{.Field}}" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</span><span class="editable__label">edit</span></a>
+    {{end}}
+  </dd>
 </div>
 {{end}}

@@ -359,6 +359,9 @@ func createBookTx(ctx context.Context, tx *sql.Tx, b Book, authorNames []string)
 		}
 		position++
 	}
+	if err := setEmbeddedFieldSourcesTx(ctx, tx, id, b, authorNames); err != nil {
+		return 0, err
+	}
 	return id, nil
 }
 

@@ -535,14 +535,6 @@ func filenameTitle(path, suffix string) string {
 	return base
 }
 
-// leadingArticles are stripped from a title to derive its sort form, longest
-// first so "An Ideal Husband" doesn't lose only its "A".
-//
-// English only. Guessing articles across languages ("Der", "La", "El")
-// mis-files any title that legitimately starts with one of those words, and
-// the collection is mostly English.
-var leadingArticles = []string{"the ", "an ", "a "}
-
 // sortTitle derives the form a title files under: one leading article
 // removed and the rest case folded, so "The Hobbit" sorts under H and
 // "apple book" sorts among the A's rather than after every capitalised
@@ -552,23 +544,7 @@ var leadingArticles = []string{"the ", "an ", "a "}
 // Lot" and "1984" file under "'" and "1", which is the "before A" bucket a
 // reader scanning alphabetically expects.
 func sortTitle(title string) string {
-	trimmed := strings.TrimSpace(title)
-
-	stripped := trimmed
-	for _, article := range leadingArticles {
-		// Strictly longer, so a title that *is* an article ("A") keeps it.
-		if len(stripped) > len(article) && strings.EqualFold(stripped[:len(article)], article) {
-			stripped = strings.TrimSpace(stripped[len(article):])
-			break
-		}
-	}
-
-	// Never return empty: a blank sort_title files the book above the
-	// whole library.
-	if stripped == "" {
-		return strings.ToLower(trimmed)
-	}
-	return strings.ToLower(stripped)
+	return storage.SortTitle(title)
 }
 
 func hashFile(path string) (string, error) {

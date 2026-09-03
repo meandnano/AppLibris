@@ -44,41 +44,18 @@
 
     <div class="detail__main">
       <div class="detail__heading">
-        <h1 class="detail__title">{{.Title}}</h1>
-        {{if .AuthorLine}}
-        <p class="detail__author">{{.AuthorLine}}</p>
-        {{else}}
-        <p class="detail__author detail__author--unknown">Author unknown</p>
-        {{end}}
+        {{template "book-field-title" .TitleField}}
+        {{template "book-field-authors" .AuthorsField}}
       </div>
 
       {{/* Kept in plate 03's source position — above the description, "it
            is the reason the page gets opened". */}}
       {{template "send-control" .}}
 
-      {{if .Description}}
-      <p class="detail__description">{{.Description}}</p>
-      {{else}}
-      <p class="detail__description detail__description--empty">No description</p>
-      {{end}}
+      {{template "book-field-description" .DescriptionField}}
 
       <dl class="detail__meta">
-        <div class="detail__meta-row">
-          <dt>publisher</dt>
-          <dd>{{if .Publisher}}{{.Publisher}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</dd>
-        </div>
-        <div class="detail__meta-row">
-          <dt>published</dt>
-          <dd>{{if .PublishedDate}}{{.PublishedDate}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</dd>
-        </div>
-        <div class="detail__meta-row">
-          <dt>language</dt>
-          <dd>{{if .Language}}{{.Language}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</dd>
-        </div>
-        <div class="detail__meta-row detail__meta-isbn">
-          <dt>isbn</dt>
-          <dd>{{if .ISBN}}{{.ISBN}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</dd>
-        </div>
+        {{range .MetadataFields}}{{template "book-field-meta" .}}{{end}}
         <div class="detail__meta-row">
           <dt>added</dt>
           <dd>{{.AddedAt}}</dd>

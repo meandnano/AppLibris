@@ -43,6 +43,30 @@ full design.
   index. Every timestamp column is written as fixed-width UTC RFC 3339 text
   (`sqliteTimeLayout`/`formatTime` in `internal/storage`), so SQLite's own
   date functions and a plain `ORDER BY` both work on it.
+- `field_sources` (`internal/storage/metadata.go`) records where each of the
+  seven editable fields' current value came from — `embedded` when the
+  scanner read it out of the file, `manual` once a person has edited it.
+  Nothing reads it yet, and that is the point: DESIGN.md forbids shipping
+  manual editing before provenance, because the provider-enrichment step
+  that comes later would otherwise overwrite hand-fixed values with no way
+  to tell they were hand-fixed. Writing it now is what makes every book
+  edited in the meantime carry its marker when that consumer arrives.
+  Provenance is set at creation (`setEmbeddedFieldSourcesTx`, called from
+  `createBookTx` inside the same transaction as the book, its author links
+  and its FTS row — an invariant, not a backfill-only repair) and on every
+  edit. The rule that is easy to get backwards: **a cleared field stays
+  `manual`.** An empty value with a `manual` source is a decision someone
+  made, not metadata that is missing, and a resolver that infers
+  provenance from emptiness would undo it. `UpdateBookField` writes one
+  scalar, `UpdateBookAuthors` replaces the whole author list, and both
+  update the value, its provenance and the FTS row in one transaction —
+  `UpdateBookField` refuses `authors` outright (`ErrInvalidMetadataField`)
+  since that lives in a join table. Both return `(false, nil)` for an
+  unknown book, the same absent-isn't-an-error contract as the finders.
+  `SortTitle` also lives here rather than in `internal/scanner`, because
+  two callers now derive that column — the scanner on first sight of a
+  file, and a title edit — and a second copy of the rule is a library that
+  sorts differently depending on how a title arrived.
 - `books_fts` is an FTS5 virtual table (`title`, `authors`, `description`,
   `isbn`, `tokenize='unicode61 remove_diacritics 2'`) — a plain table, not
   `content='books'`, since `authors` isn't a books column to begin with
@@ -319,6 +343,20 @@ full design.
   `HasFileSize` is what carries that: without it a book with no location
   is indistinguishable from one whose file is genuinely zero bytes, and
   the page claims `0 B` for a size it doesn't know.
+  `UpdateBookMetadata` is the editing entry point: it maps a field name
+  onto `storage`'s enum, normalizes the submitted value (trimmed; title
+  required; per-field byte limits, with `MaxDescriptionBytes` exported
+  because `internal/web` sizes its request-body cap from it), writes it,
+  and returns the reloaded `BookDetail` rather than an echo of the input —
+  so the caller renders canonical data and normalization is visible. The
+  `authors` field takes a different path from the six scalars:
+  `normalizeAuthors` splits on newlines, trims, drops blanks and links a
+  name credited twice only once, since the textarea is free text and a
+  repeat is a slip. A rejected value is a `metadataValidationError`
+  wrapping `ErrInvalidMetadata`, carrying the sentence the field shows —
+  `MetadataValidationMessage` unwraps it — so a bad value is a field
+  error, never a 500. An unknown book id returns `nil, nil`, `GetBook`'s
+  contract.
   The send-to-Kindle surface follows the same layering: `Recipients`
   shapes `storage.ListRecipients` into picker options; `QueueSend` is
   where the business rules live, per DESIGN.md's "parse request, call
@@ -378,8 +416,10 @@ full design.
   write failure past that point (almost always the client disconnecting)
   is logged inside `render` rather than returned — a handler reacting to
   it with `http.Error` would double-write onto an already-committed
-  response. Inline metadata editing is designed but not built — it needs
-  backing features that don't exist yet.
+  response. `renderStatus` is the same thing with an explicit status code,
+  for the one case that needs a rendered body and a non-200 together: a
+  rejected edit answering 422 with the editor and its message, where an
+  `http.Error` would swap the editor away and lose what was typed.
 - Search-as-you-type is `GET /{$}` extended, not a separate route: a `q`
   parameter narrows the grid, and htmx (vendored at
   `internal/web/static/js/htmx.min.js`, version pinned in a comment at the
@@ -446,15 +486,16 @@ full design.
   `libraryPage` does — the partial renders one and pluralizes on the
   other. Its `Locations` is `service.FileLocation` as it comes: the
   template reads `Path` and `Missing` under those names, so a per-page
-  copy of the same two fields would be a rename of nothing. Metadata renders field-granular (one element per field, not one
-  blob) so a future inline-edit step connects markup rather than
-  redesigning it: empty optional fields (publisher, published date,
-  language, ISBN — and file size, when the book has no location to take
-  one from) render as visible em-dash rows rather than being
-  dropped — a hidden field can't be filled in, and sparse metadata is the
-  common FB2 case — while an empty author or description gets its own
-  italic `--fg-faint` line ("Author unknown" / "No description") instead
-  of an em dash, since those aren't table rows. `PublishedDate` renders
+  copy of the same two fields would be a rename of nothing. Metadata renders
+  field-granular — one element per field, not one blob — which is what let
+  the inline editors connect to existing markup rather than redesign it:
+  empty optional fields (publisher, published date, language, ISBN — and
+  file size, when the book has no location to take one from) render as
+  visible em-dash rows rather than being dropped — a hidden field can't be
+  filled in, and sparse metadata is the common FB2 case — while an empty
+  author or description gets its own italic `--fg-faint` line, now phrased
+  as the invitation it became ("Author unknown — add one") instead of an
+  em dash, since those aren't table rows. `PublishedDate` renders
   exactly as stored, never parsed — it's free-text from embedded metadata
   (sometimes a year, sometimes a full date) and parsing it would lie
   confidently. A book's locations show as a count with a dotted-underline
@@ -493,7 +534,8 @@ full design.
   fix is an edit rather than a retype. That rejection path re-reads
   `LatestSend` rather than rendering a nil state: nothing was queued, so
   retracting a Delivered or Failed result the user is looking at would
-  make the page contradict itself over a typo that changed nothing. `POST /books/{id}/send` accepts `recipient` (an
+  make the page contradict itself over a typo that changed nothing.
+  `POST /books/{id}/send` accepts `recipient` (an
   address from the picker) or `new_address`/`new_label`
   (whichever's non-blank wins), answers an `HX-Request` (without
   `HX-History-Restore-Request`, the same rule search's fragment split
@@ -506,9 +548,36 @@ full design.
   a mismatched pairing 404s instead of leaking one book's send status
   under another's page; it needs no `Vary` at all, since it serves one
   body to every caller.
-  The send POST — the only state-changing route in the app — is wrapped in
-  `sameSiteOnly`, which rejects a request whose `Sec-Fetch-Site` the
-  browser reports as anything but `same-origin` or `none`. There is no
+- Inline metadata editing is `GET`/`POST /books/{id}/metadata/{field}`
+  (`internal/web/metadata.go`), one route per field rather than one form
+  per page: each field is its own swap target, so a keystroke in one never
+  re-renders another. `makeFieldViews` builds all seven from one place, so
+  a whole-page render and a single-field fragment cannot drift; each view
+  carries `Value` (what the control edits — authors newline-separated) and
+  `Display` (what the read view shows — "A, B & C") separately, because
+  the stored form and the readable one differ. The read view is an `<a>`
+  with both an `href` and an `hx-get`, and the editor a `<form>` with both
+  an `action` and an `hx-post`, so there is one markup path rather than a
+  no-JS path that drifts: without htmx the `GET` redirects to
+  `/books/{id}?edit={field}`, which renders the whole page with that
+  editor open, and the `POST` 303s back to the book. An unrecognised
+  `?edit=` value opens nothing rather than 400ing — it names no resource.
+  Two details are load-bearing and easy to undo. **The 422 needs client
+  cooperation**: a rejected value answers 422 with the editor and its
+  message, but htmx swaps only 2xx by default, so `edit.js` opts 422 in
+  via `htmx:beforeSwap`, scoped to `[data-editable-field]` — without that
+  listener the response is silently dropped and pressing Save appears to
+  do nothing. **The body cap is derived, not chosen**:
+  `maxMetadataFormBody` is `3 × service.MaxDescriptionBytes + 1024`,
+  because the service limits decoded bytes while `MaxBytesReader` bounds
+  the encoded body, and form-urlencoding triples non-ASCII text — a cap
+  set near the decoded limit rejects a Cyrillic or CJK description at
+  under a third of the advertised size. Over the cap is still a field
+  error, not a bare 413.
+  The send POST and every metadata POST — the app's only state-changing
+  routes — are wrapped in `sameSiteOnly`, which rejects a request whose
+  `Sec-Fetch-Site` the browser reports as anything but `same-origin` or
+  `none`. There is no
   login here, so a request's network position is the only thing between
   the collection and everyone else: any page in the user's browser can
   reach a LAN or localhost server its author cannot, and a form-encoded
@@ -561,8 +630,8 @@ full design.
   used everywhere else via `slog`'s package-level functions against that
   default logger.
 
-Still missing from DESIGN.md: inline metadata editing (designed, not
-built), metadata provider enrichment (Open Library / Google Books), the
+Still missing from DESIGN.md: metadata provider enrichment (Open Library
+/ Google Books) — the consumer `field_sources` is waiting for — the
 filesystem watcher (the periodic rescan is the only live-update mechanism
 so far), the send history view, recipient management beyond the inline
 add-address control, near-duplicate detection, and format conversion.
