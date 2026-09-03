@@ -193,14 +193,20 @@ func (w *Watcher) Refresh() {
 		case w.registered[path] == key:
 			return nil // same directory, still watched
 		default:
-			// The name now belongs to a different directory, so re-register
-			// it. Adding a path whose inode has changed supersedes the watch
-			// filed under it, which is what stops the departed inode
-			// reporting under a name it has given up; removing first would
-			// only add the hazard of inotify reusing the freed descriptor.
+			// The name now belongs to a different directory. Release what is
+			// filed under it *before* re-adding, while the descriptor is
+			// still reachable: adding a path whose inode has changed drops
+			// the superseded watch from fsnotify's own map — enough to stop
+			// its events being delivered — but never calls inotify_rm_watch,
+			// so the kernel goes on holding it and no later Remove or
+			// WatchList can find it again. Each replacement would otherwise
+			// spend another watch from a per-user budget a large library is
+			// already sized against.
+			//
 			// Forget the stale identity now rather than after a successful
 			// Add: if the Add fails, a registration that still matches would
 			// make the next refresh think this name was fine.
+			w.fsw.Remove(path)
 			delete(w.registered, path)
 		}
 		if err := w.fsw.Add(path); err != nil {

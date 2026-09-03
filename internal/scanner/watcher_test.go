@@ -555,3 +555,113 @@ func TestWatcherRefreshStopsWatchingADirectoryThatLeftTheLibrary(t *testing.T) {
 		})
 	}
 }
+
+// inotifyWatchCount reports how many inotify watches this process holds in
+// the kernel, across every inotify descriptor it has open.
+//
+// /proc is the only place a leaked watch is visible. fsnotify's WatchList
+// reports its own bookkeeping, and a watch that has fallen out of that map
+// while staying alive in the kernel is exactly the failure being tested —
+// so asking the library would answer with the assumption under test.
+func inotifyWatchCount(t *testing.T) int {
+	t.Helper()
+	const fdinfo = "/proc/self/fdinfo"
+	entries, err := os.ReadDir(fdinfo)
+	if err != nil {
+		t.Skipf("no %s on this platform: %v", fdinfo, err)
+	}
+	total := 0
+	for _, e := range entries {
+		// A descriptor can close under us — including the one this read
+		// opens — so a vanished entry is ordinary, not a failure.
+		b, err := os.ReadFile(filepath.Join(fdinfo, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "inotify ") {
+				total++
+			}
+		}
+	}
+	return total
+}
+
+// Refresh must release the watches it stops using, in the kernel and not
+// merely in fsnotify's map.
+//
+// fsnotify's updatePath drops a superseded descriptor from its own map
+// without calling inotify_rm_watch, so re-adding a path whose inode changed
+// leaves the previous watch alive and no longer reachable through Remove or
+// WatchList. Events from it are discarded, which is why the delivery
+// assertions elsewhere pass either way — but each round spends another
+// watch from a per-user budget a library of any size is already sized
+// against.
+func TestWatcherRefreshReleasesTheKernelWatchesItStopsUsing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace bool
+	}{
+		{"a name taken by a fresh tree", true},
+		{"a name that leaves the tree", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, outside := t.TempDir(), t.TempDir()
+			series := filepath.Join(dir, "author", "series")
+			if err := os.MkdirAll(series, 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+
+			trigger := make(chan struct{}, 1)
+			w, err := NewWatcher(dir, testSettle, trigger)
+			if err != nil {
+				t.Fatalf("NewWatcher: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go w.Run(ctx)
+			waitForPokeToSettle(t, trigger)
+
+			baseline := inotifyWatchCount(t)
+
+			// The departed trees are kept, so nothing is released by their
+			// inodes being freed: only an explicit removal can account for
+			// them.
+			const rounds = 8
+			for i := range rounds {
+				author := filepath.Join(dir, "author")
+				if !tc.replace {
+					// Nothing takes the name back, so each round needs a
+					// tree of its own to watch and then lose.
+					author = filepath.Join(dir, fmt.Sprintf("author%d", i))
+					if err := os.MkdirAll(filepath.Join(author, "series"), 0o755); err != nil {
+						t.Fatalf("MkdirAll: %v", err)
+					}
+					w.Refresh()
+				}
+				if err := os.Rename(author, filepath.Join(outside, fmt.Sprintf("author%d", i))); err != nil {
+					t.Fatalf("Rename: %v", err)
+				}
+				if tc.replace {
+					if err := os.MkdirAll(series, 0o755); err != nil {
+						t.Fatalf("MkdirAll: %v", err)
+					}
+				}
+				w.Refresh()
+				// The moved directory's own watch is released by fsnotify
+				// from its event loop, on IN_MOVE_SELF, so let that land
+				// before counting.
+				waitForPokeToSettle(t, trigger)
+			}
+
+			after := inotifyWatchCount(t)
+			// The library is the shape it started as, so the count should be
+			// too. A couple of watches of slack keeps this about a per-round
+			// leak rather than the exact bookkeeping of one refresh.
+			if after > baseline+2 {
+				t.Errorf("inotify watches grew from %d to %d over %d rounds: "+
+					"the watches Refresh stopped using were not released", baseline, after, rounds)
+			}
+		})
+	}
+}

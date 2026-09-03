@@ -360,10 +360,16 @@ full design.
   number the deleted one had (ext4 does, reproducibly), which reads as
   unchanged for a watch the kernel has already dropped. Together they are
   exact, because an inode number only becomes reusable once its inode is
-  freed and freeing it drops the watch filed under that name. Re-adding a
-  path whose inode changed is what supersedes the stale watch — fsnotify
-  drops the old descriptor itself — so `Refresh` never removes first,
-  which would only risk inotify reusing the freed descriptor. It cannot
+  freed and freeing it drops the watch filed under that name. A superseded
+  watch is released explicitly, before the re-add: fsnotify's `updatePath`
+  drops the old descriptor from its own map — enough to stop its events
+  being delivered, which is why an event-delivery test passes either way —
+  but never calls `inotify_rm_watch`, so the kernel keeps the watch and no
+  later `Remove` or `WatchList` can reach it, spending one watch from a
+  per-user budget per replacement. Removing first is safe because inotify
+  allocates descriptors cyclically rather than handing back the one just
+  freed, so the `IN_IGNORED` it queues cannot land on the fresh watch. It
+  cannot
   cover the fourth — losing *every* watch, when the library directory
   itself is replaced by an unmount and remount — because a sweep only
   calls `Refresh` after something pokes it, and a watcher with no watches
