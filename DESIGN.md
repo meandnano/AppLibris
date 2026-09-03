@@ -18,9 +18,16 @@ Design decisions favour simplicity over generality throughout.
 
 ## Implementation status
 
-This document is the design, not a progress report — but it has outrun the
-code far enough that reading it without a map is misleading. Each section
-below carries a **Status** note. This table is the summary.
+This document is the design, not a progress report — but it once outran
+the code far enough that reading it without a map was misleading, and the
+map has been worth keeping since. Each section below carries a **Status**
+note. This table is the summary.
+
+The gap has largely closed: the primary flow this project exists for —
+see the library, send a book to a Kindle — works end to end, and the two
+features that were blocking each other (editing waiting on provenance,
+sending waiting on the job model) have both shipped. What remains unbuilt
+is real but no longer load-bearing.
 
 Legend: **Built** — done and in use. **Partial** — some of it exists, the
 note says which. **Not built** — designed here, no code yet.
@@ -31,22 +38,26 @@ note says which. **Not built** — designed here, no code yet.
 | FTS5 index | Built |
 | Library directory, covers directory | Built |
 | Scanner: startup sweep, periodic rescan, cheap check, hash identity | Built |
-| Scanner: filesystem watcher | Not built — the periodic rescan is the only live-update mechanism |
+| Scanner: filesystem watcher | Not built — the periodic rescan is the only live-update mechanism; planned in `docs/plans/2026090205-filesystem-watcher.md` |
 | Scanner: missing-file handling | Built — mark, grace period, then prune |
 | Duplicate detection (byte-identical) | Partial — the data model holds multiple locations; the UI doesn't flag them |
 | Embedded metadata | Built — EPUB and FB2 (including `.fb2.zip`), all schema columns populated |
 | Covers | Built — extracted, stored atomically, regenerated when missing |
-| Metadata providers, chain, provenance | Not built |
+| Metadata providers, chain | Not built |
+| Metadata provenance | Partial — recorded on every create and edit; nothing reads it until providers exist |
 | Books / authors / book_files schema | Built |
-| Recipients, send log, field sources schema | Not built |
-| Send to Kindle: Resend transport + size limit | Built, but nothing calls it |
-| Send to Kindle: job model, recipient picker | Not built |
+| Recipients, send log, field sources schema | Built |
+| Send to Kindle: Resend transport + size limit | Built |
+| Send to Kindle: job model, recipient picker | Built |
+| Send to Kindle: history view, recipient management | Not built |
 | Web UI: server-side templates, embedded CSS, service layer | Built |
 | Web UI: library grid | Built |
 | Web UI: htmx, search, book detail | Built |
-| Web UI: inline editing, send control | Not built |
+| Web UI: inline metadata editing | Built |
+| Web UI: send control | Built |
 | Format conversion, near-duplicate detection, programmatic API | Not built — deferred by design |
 | Authentication | Not built, by design |
+| Cross-site guard on state-changing routes | Built — `Sec-Fetch-Site`, see Authentication |
 
 Known defects in what *is* built are tracked as step plans under
 `docs/plans/`, and lower-priority ones under `docs/backlog/`. Where a
@@ -195,7 +206,7 @@ Enrichment is **optional and never blocks a book from appearing in the library.*
 The scanner and index are the source of truth; enrichment is a background job
 queue running against existing records.
 
-**Status: Embedded is built; providers are not.**
+**Status: Embedded and provenance are built; providers are not.**
 
 `internal/epub` reads title, authors, language, ISBN, description,
 publisher and publication date from the OPF package, and extracts the
@@ -207,12 +218,28 @@ including covers, `.fb2.zip` archives, and declared-but-wrong XML
 encodings. Author order as the source file lists it is preserved through
 to display.
 
-Everything below in this section — the provider chain, the provider
-interface, compile-time registration, the resolver, and field provenance —
-is **design only. None of it is built.** Provenance in
-particular gates two other features: without it, re-running enrichment
-would clobber hand-edited values, which is the failure this design calls
-out and the reason inline metadata editing shouldn't ship before it.
+**Provenance is now built**; the provider chain, the provider interface,
+compile-time registration and the resolver remain design only.
+
+Provenance shipped first precisely because this section said it had to:
+it gates inline metadata editing, which is now built on top of it. A
+`field_sources` row records `embedded` or `manual` per field, written
+inside the same transaction as the book it describes and updated on every
+edit. It is deliberately write-only for now — nothing reads a source until
+there is a resolver to consult one — and that is the point rather than an
+oversight: a book edited today has to carry its marker by the time the
+enrichment step arrives, or that step overwrites hand-fixed values with no
+way to tell they were hand-fixed.
+
+The rule the future resolver must honour, and the one easiest to get
+backwards: **a cleared field stays `manual`.** An empty value with a
+`manual` source is a decision someone made, not metadata that is missing.
+A resolver inferring provenance from emptiness would undo exactly the
+edits this table exists to protect.
+
+There is no backfill migration and there never was one. The service has
+not been deployed, so no database predates the table; provenance is
+established at creation instead.
 
 ### Provider chain
 
@@ -287,7 +314,7 @@ clobbering a hand-fixed value.
 failure reason. Storing the address as a string rather than an FK means deleting
 a recipient never orphans or rewrites history.
 
-**Status: books and authors are built; the rest is not.**
+**Status: Built, all of it.**
 
 `books`, `authors` and the `book_authors` join table exist as described,
 with two columns the table above doesn't show: `books.cover_retry` (a
@@ -309,9 +336,28 @@ missing-file handling — per location.
 `derived_from` exists as a column but is unused, since conversion doesn't
 exist yet.
 
-**Field sources**, **Recipients** and **Send log** are not built. All three
-are prerequisites for features described later in this document, and none of
-those features can start without them.
+**Field sources**, **Recipients** and **Send log** are now built, and each
+carries one decision worth recording here because it is not obvious from
+the field list above.
+
+`recipients.address` is `COLLATE NOCASE` with a unique index, so re-adding
+an address that differs only in case returns the existing row rather than
+failing — that is a user slip, not an error.
+
+`send_log.book_id` is the schema's one non-cascading foreign key: `ON
+DELETE SET NULL`, with `book_title` denormalised beside it. Every other
+foreign key here cascades because those rows are meaningless without their
+book, but a send log entry is *the record that a thing happened*, and the
+scanner deletes books routinely. Cascading would erase the evidence a book
+was ever sent, which defeats the history's whole purpose of answering "did
+I already put this on the Kindle?". `status` carries a `CHECK` closing it
+to the four states below, so a typo in a Go constant fails at the write
+rather than producing a job no worker ever claims.
+
+`field_sources` keys on `(book_id, field)` with a closed `CHECK` on
+`field` and a deliberately open `source` column — `embedded` and `manual`
+are the sources today, while provider names are compile-time registrations
+that do not exist yet.
 
 ### Deferred
 
@@ -385,19 +431,69 @@ the most recently used. Adding a new address is possible inline from the same
 control but is deliberately secondary — with two addresses in practice, the
 common path should be two clicks. No separate management UI.
 
-**Status: the transport is built; the feature is not.**
+**Status: Built.** The primary action this project exists for is reachable
+from the app.
 
-`internal/resend` sends one attachment through Resend's API and enforces the
-~28MB limit derived above, before attempting the send, with the arithmetic
-in a comment as this document asks. **Nothing calls it.** There is no
-`RESEND_API_KEY`/`RESEND_FROM` wiring in the server, no recipients or
-send-log schema, no job queue, and no UI — so the primary action this whole
-project exists for is, today, not reachable from the app.
+`internal/resend` sends one attachment through Resend's API and enforces
+the ~28MB limit derived above before attempting the send, with the
+arithmetic in a comment as this document asks. `internal/sender` is the
+queue worker: a single `Worker` claims `send_log` rows one at a time, in
+queue order, and hands each to a transport. `cmd/server` wires it when
+both `RESEND_API_KEY` and `RESEND_FROM` are set; either one missing logs a
+warning naming it and disables sending, because browsing must still work
+on a dev machine with neither.
 
-Three separate prerequisites stand between here and a working send, and
-they are independent of each other: the `recipients`/`send_log` schema, the
-queued-job model with its `queued → sending → delivered | failed` states,
-and the recipient-picker UI.
+One worker, deliberately. Concurrency buys nothing at a handful of sends a
+week, and it is what keeps the attachment a bound on the whole process
+rather than a per-request multiplier — the send body is held unstreamed in
+memory, so a second in-flight send would double that.
+
+**Resolution happens at send time, not enqueue time.** A queue is a
+promise to act later and the library moves underneath it, so the worker
+resolves the book to a file when it claims the job. No location left
+(pruned, or every copy currently missing) fails the job; a failure to read
+the *index* is reported separately, because a storage error says nothing
+about whether the book is still there.
+
+Two rules are easy to get backwards and are deliberate:
+
+- **Interrupted jobs fail; they never requeue.** A job in flight when the
+  process dies is left `sending`, and startup recovery fails it rather
+  than putting it back on the queue. Which side of the request it died on
+  is unknowable, and requeueing risks a silent duplicate delivery, while
+  failing surfaces the ambiguity and leaves retry a click away.
+- **Retry is a new row.** The retry button enqueues again rather than
+  mutating the failed row back to `queued`, so the log keeps the fact that
+  the first attempt failed — which is what makes it a history rather than
+  a status field.
+
+The line those two are drawn along is whether the outcome is *known*. A
+send Resend accepted, and a failure decided locally, are both definite, so
+the terminal write happens on a context detached from shutdown — losing a
+verdict already reached would let recovery rewrite a delivered book as
+failed and invite a duplicate send. Only the genuinely unknown case, a
+transport call abandoned mid-flight, is left for startup recovery.
+
+The recipient picker works as described: saved addresses ordered by
+`last_used_at DESC`, so the default is simply the first option and no
+ordering logic lives in the transport. `last_used_at` is bumped at
+enqueue, not on delivery — "most recently used" means "the one I last
+chose", and a failed send must not silently reset the default to a
+different address. Adding an address inline is secondary as intended,
+except with zero saved recipients, where it is the only thing shown.
+
+Not built: **the send history view**. The job model and log that make it
+possible are in place, and the detail page shows a book's own most recent
+send, but there is no page listing sends across the library — so "did I
+already put this on the Kindle?" is answerable per book and not yet in
+general. Recipient management is a subtler gap. "No separate
+management UI" above is a decision and still the right one — but its
+consequence was not thought through: a mistyped address, once saved, is
+permanent and sits in the picker forever, because saving happens as a side
+effect of sending and nothing can remove a row. That is a defect of this
+design rather than of its implementation, and the fix is probably a delete
+affordance on the picker rather than the management screen this section
+rules out.
 
 The packaging blocker is gone: the image moved from `scratch` to
 `distroless/static`, which carries the CA bundle the HTTPS call to Resend
@@ -413,10 +509,10 @@ htmx is used only where dynamism is actually needed:
 
 - search-as-you-type against the FTS5 index
 - the send-to-Kindle button swapping into a status indicator that polls the job
-- inline metadata editing on a book row
+- inline metadata editing, per field, on the book detail page
 
-**Status: Partial — the library grid, search and book detail are built;
-the send control and inline editing are not.**
+**Status: Built.** All three htmx interactions this section names now
+exist.
 
 Built: `internal/web` serves the library grid at `GET /` and a book
 detail page at `GET /books/{id}`, with templates, CSS and a theme script
@@ -433,16 +529,36 @@ page matches only `/` exactly and the mux owns its 404s
 `/books/{id}` is now that route — a non-numeric or unknown id 404s rather
 than silently rendering the whole library.
 
-htmx is vendored (`docs/plans/completed/2026090106-full-text-search.md`)
-and, of the three interactions this section names, search-as-you-type is
-built: a `q` parameter narrows the grid via an htmx partial swap, `Vary:
-HX-Request` since the same URL serves a full page or just the fragment,
-and the same handler degrades to a plain form GET with JS off. Not
-built: the send control, still blocked on the job model, and inline
-metadata editing, still blocked on field provenance — the detail page
-leaves both their designed positions empty and collapsed rather than
-mocking them. The multi-location badge on the grid is also still unbuilt,
-though the detail page shows a book's locations directly now
+htmx is vendored (`docs/plans/completed/2026090106-full-text-search.md`).
+Search-as-you-type narrows the grid through a partial swap on a `q`
+parameter; the send control swaps into a status box that polls until the
+job reaches a terminal state, then stops by construction because a
+terminal fragment carries no trigger; and inline editing swaps one field
+at a time between a read view and its editor.
+
+Every one of the three degrades without JavaScript, and by the same
+method: one markup path rather than a parallel no-JS path that drifts. A
+read affordance is an `<a>` carrying both an `href` and an `hx-get`, an
+editor is a `<form>` carrying both an `action` and an `hx-post`, and the
+plain-navigation response is a whole page rather than a fragment.
+
+Two corrections to what this section used to claim:
+
+- The `Vary` header is `HX-Request, HX-History-Restore-Request`, not
+  `HX-Request` alone. htmx sets both on the request it issues restoring a
+  history entry that has fallen out of its cache, and swaps *that*
+  response into the whole document body — so answering it with a fragment
+  strips the page down to it. Both headers therefore decide the response
+  and both have to be named.
+- **A rejected inline edit answers 200, not 4xx.** The vendored htmx does
+  not swap a 4xx, so an honest status on a fragment leaves the editor
+  untouched and makes Save look like it did nothing. The full-page path
+  keeps its 422, where nothing swallows it. This is the one place the UI
+  trades an accurate status code for a working interaction, and it is
+  worth stating rather than rediscovering.
+
+The multi-location badge on the grid is still unbuilt, though the detail
+page shows a book's locations directly now
 (`docs/plans/completed/2026090107-book-detail-page.md`), which delivers
 most of that item's value anyway.
 
@@ -457,9 +573,15 @@ transport over the same service calls, and no business logic ends up trapped
 inside a template handler.
 
 **Status: Built.** `internal/service` sits beneath `internal/web` as
-described, and the handlers are thin over it: `ListBooks`, `SearchBooks`,
-`CountBooks` and `GetBook` are as much as the grid and detail pages need
-so far. The `/api/v1` transport itself remains deferred.
+described, and the handlers are thin over it. The surface has grown with
+each feature rather than the handlers growing logic: `ListBooks`,
+`SearchBooks`, `CountBooks` and `GetBook` for browsing;
+`UpdateBookMetadata` for editing, which owns the validation and
+normalisation rules; and `Recipients`, `QueueSend`, `SendState` and
+`LatestSend` for sending, where `QueueSend` owns address parsing and the
+enqueue. The `/api/v1` transport itself remains deferred — but the layer
+it would sit on has now been exercised by two features rather than
+asserted by one.
 
 ## Authentication
 
@@ -477,6 +599,23 @@ content hash in the library was surface nobody asked for.) If this
 server is ever exposed beyond a trusted network, this section is the
 first thing that has to change, and several others follow it.
 
+**One qualification, added when the first state-changing routes shipped.**
+"Trust the network" is a claim about who can *reach* the server, and a
+browser breaks it: any page the user visits can issue a form POST to a
+LAN or localhost address its author cannot reach, with no CORS preflight
+in the way. With no login, network position is the only thing standing
+between the collection and everyone else, and a send POST carries the
+destination address in its body. Every state-changing route — the send and
+the metadata edits — therefore rejects a request the browser itself
+reports as cross-site, via `Sec-Fetch-Site`. A request carrying no fetch
+metadata is allowed through: a client that sends none is not the
+ambient-authority vector this guards, and failing closed there would cost
+the UI for no security gain.
+
+This is not authentication and does not weaken the case for having none.
+It closes the one hole that "internal network only" does not actually
+cover.
+
 ## Deferred list
 
 - Series
@@ -490,7 +629,12 @@ first thing that has to change, and several others follow it.
 
 Worth keeping distinct from the rest of this document: *deferred* is not the
 same as *not yet built*. Everything in this list was consciously ruled out
-of scope. The filesystem watcher, the send job model and provider
-enrichment are all unbuilt but **not** deferred — they are in scope and
-simply haven't been reached. Only the six items above are decisions
-rather than backlog.
+of scope. The filesystem watcher, provider enrichment, the send history
+view and the multi-location badge are all unbuilt but **not** deferred —
+they are in scope and simply haven't been reached. Only the six items
+above are decisions rather than backlog.
+
+The send job model has left that "in scope, not reached" set: it is built.
+Provider enrichment is now the largest thing still designed here and
+absent from the code, and it is the one with a prerequisite already
+waiting on it — the provenance rows being written today exist for it.
