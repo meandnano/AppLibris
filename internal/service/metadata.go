@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"library/internal/storage"
 )
@@ -49,13 +48,13 @@ func (s *Service) UpdateBookMetadata(ctx context.Context, bookID int64, update M
 		var names []string
 		names, err = normalizeAuthors(update.Value)
 		if err == nil {
-			exists, err = s.db.UpdateBookAuthors(ctx, bookID, names, time.Now())
+			exists, err = s.db.UpdateBookAuthors(ctx, bookID, names, s.now())
 		}
 	} else {
 		var value string
 		value, err = normalizeField(field, update.Value)
 		if err == nil {
-			exists, err = s.db.UpdateBookField(ctx, bookID, field, value, time.Now())
+			exists, err = s.db.UpdateBookField(ctx, bookID, field, value, s.now())
 		}
 	}
 	if err != nil {
@@ -81,8 +80,22 @@ const (
 	maxAuthors          = 100
 )
 
+// MaxMetadataValueBytes is the largest single submitted value any field
+// will accept, exported so internal/web can size its request-body cap from
+// one number rather than guessing. It is the author list, not the
+// description: 100 names of 1 KiB each, plus a separating newline apiece,
+// outweighs 64 KiB of prose.
+const MaxMetadataValueBytes = maxAuthors * (maxAuthorNameBytes + 1)
+
 func normalizeField(field storage.MetadataField, value string) (string, error) {
 	value = strings.TrimSpace(value)
+	// Only description is multiline. A browser's text input cannot produce
+	// a newline, but the check belongs here rather than in the markup: the
+	// same method is what a future API calls, and a stored line break would
+	// break every single-line rendering of the field downstream.
+	if field != storage.FieldDescription && strings.ContainsAny(value, "\r\n") {
+		return "", metadataValidationError{message: "This field cannot contain line breaks"}
+	}
 	if field == storage.FieldTitle {
 		// The one required field: a book with no title is unfindable in a
 		// list sorted by title, and sort_title is derived from it.

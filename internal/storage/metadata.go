@@ -151,7 +151,22 @@ func (db *DB) UpdateBookAuthors(ctx context.Context, bookID int64, names []strin
 		if _, err := tx.ExecContext(ctx, `DELETE FROM book_authors WHERE book_id = ?`, bookID); err != nil {
 			return err
 		}
-		for position, name := range names {
+		// Deduplicated here, not just by the caller: book_authors is keyed
+		// on (book_id, author_id), so a name credited twice would violate
+		// the primary key and roll the whole update back. createBookTx
+		// applies the same first-occurrence rule, and this is the public
+		// operation that mirrors it — a direct caller must not be able to
+		// fail the write with input the creation path accepts. Positions
+		// stay contiguous, since they are the order the book lists its
+		// authors in, not the index of the submitted line.
+		seen := make(map[string]bool, len(names))
+		position := 0
+		for _, name := range names {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+
 			authorID, err := findOrCreateAuthor(ctx, tx, name)
 			if err != nil {
 				return err
@@ -159,6 +174,7 @@ func (db *DB) UpdateBookAuthors(ctx context.Context, bookID int64, names []strin
 			if _, err := tx.ExecContext(ctx, `INSERT INTO book_authors (book_id, author_id, position) VALUES (?, ?, ?)`, bookID, authorID, position); err != nil {
 				return err
 			}
+			position++
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE books SET modified_at = ? WHERE id = ?`, formatTime(modifiedAt), bookID); err != nil {
 			return err

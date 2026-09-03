@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"library/internal/storage"
 )
@@ -135,4 +136,60 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// The plan puts time ownership at this boundary precisely so modified_at
+// propagation can be asserted without a timing assumption.
+func TestUpdateBookMetadataStampsModifiedAtFromTheServiceClock(t *testing.T) {
+	svc, db, id := newMetadataTestService(t)
+	ctx := context.Background()
+	when := time.Date(2026, 9, 3, 10, 30, 0, 0, time.UTC)
+	svc.now = func() time.Time { return when }
+
+	if _, err := svc.UpdateBookMetadata(ctx, id, MetadataUpdate{Field: "publisher", Value: "Ace Books"}); err != nil {
+		t.Fatalf("scalar update: %v", err)
+	}
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !book.ModifiedAt.Equal(when) {
+		t.Errorf("ModifiedAt after a scalar edit = %v, want %v", book.ModifiedAt, when)
+	}
+
+	later := when.Add(2 * time.Hour)
+	svc.now = func() time.Time { return later }
+	if _, err := svc.UpdateBookMetadata(ctx, id, MetadataUpdate{Field: "authors", Value: "Someone"}); err != nil {
+		t.Fatalf("author update: %v", err)
+	}
+	book, err = db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !book.ModifiedAt.Equal(later) {
+		t.Errorf("ModifiedAt after an author edit = %v, want %v", book.ModifiedAt, later)
+	}
+}
+
+func TestNormalizeFieldRejectsLineBreaksExceptInDescription(t *testing.T) {
+	for _, field := range []storage.MetadataField{
+		storage.FieldTitle, storage.FieldPublisher, storage.FieldPublishedDate,
+		storage.FieldLanguage, storage.FieldISBN,
+	} {
+		for _, value := range []string{"one\ntwo", "one\rtwo", "one\r\ntwo"} {
+			if _, err := normalizeField(field, value); !errors.Is(err, ErrInvalidMetadata) {
+				t.Errorf("%s accepted %q: err = %v", field, value, err)
+			}
+		}
+		// Surrounding whitespace is still only trimmed, not rejected.
+		got, err := normalizeField(field, "  fine  \n")
+		if err != nil || got != "fine" {
+			t.Errorf("%s trimmed value = %q, %v; want \"fine\", nil", field, got, err)
+		}
+	}
+
+	got, err := normalizeField(storage.FieldDescription, "first\n\nsecond")
+	if err != nil || got != "first\n\nsecond" {
+		t.Errorf("description = %q, %v; want its newlines preserved", got, err)
+	}
 }

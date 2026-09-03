@@ -54,11 +54,21 @@ full design.
   Provenance is set at creation (`setEmbeddedFieldSourcesTx`, called from
   `createBookTx` inside the same transaction as the book, its author links
   and its FTS row — an invariant, not a backfill-only repair) and on every
-  edit. The rule that is easy to get backwards: **a cleared field stays
+  edit. There is deliberately no backfill migration: the service has never
+  been deployed, so no database exists that predates the table, and a
+  migration whose `SELECT` can only ever match zero rows is a fixture
+  pretending to be a guarantee. A local development database made before
+  this table needs the same one-time reset `books_fts` already documents —
+  delete the file and let the next sweep rescan.
+  The rule that is easy to get backwards: **a cleared field stays
   `manual`.** An empty value with a `manual` source is a decision someone
   made, not metadata that is missing, and a resolver that infers
   provenance from emptiness would undo it. `UpdateBookField` writes one
-  scalar, `UpdateBookAuthors` replaces the whole author list, and both
+  scalar, `UpdateBookAuthors` replaces the whole author list — dropping a
+  repeated name at its first occurrence and keeping positions contiguous,
+  the same rule `createBookTx` applies, because `book_authors` is keyed on
+  `(book_id, author_id)` and a duplicate would otherwise violate the
+  primary key and roll the whole update back — and both
   update the value, its provenance and the FTS row in one transaction —
   `UpdateBookField` refuses `authors` outright (`ErrInvalidMetadataField`)
   since that lives in a join table. Both return `(false, nil)` for an
@@ -343,6 +353,11 @@ full design.
   `HasFileSize` is what carries that: without it a book with no location
   is indistinguishable from one whose file is genuinely zero bytes, and
   the page claims `0 B` for a size it doesn't know.
+  `Service.now` is the package's clock (a private `func() time.Time`,
+  defaulted by `New`, overridden in tests), and every write that stamps a
+  timestamp goes through it rather than reaching for `time.Now` — which is
+  what lets `modified_at` propagation be asserted here without a timing
+  assumption.
   `UpdateBookMetadata` is the editing entry point: it maps a field name
   onto `storage`'s enum, normalizes the submitted value (trimmed; title
   required; per-field byte limits, with `MaxDescriptionBytes` exported
@@ -352,7 +367,12 @@ full design.
   `authors` field takes a different path from the six scalars:
   `normalizeAuthors` splits on newlines, trims, drops blanks and links a
   name credited twice only once, since the textarea is free text and a
-  repeat is a slip. A rejected value is a `metadataValidationError`
+  repeat is a slip. Description is the only multiline field; every other
+  scalar rejects an embedded CR or LF rather than storing one. A browser
+  text input cannot produce one, but the check lives here because this is
+  also what a future API calls, and a stored line break breaks every
+  single-line rendering downstream. A rejected value is a
+  `metadataValidationError`
   wrapping `ErrInvalidMetadata`, carrying the sentence the field shows —
   `MetadataValidationMessage` unwraps it — so a bad value is a field
   error, never a 500. An unknown book id returns `nil, nil`, `GetBook`'s
@@ -555,25 +575,37 @@ full design.
   a whole-page render and a single-field fragment cannot drift; each view
   carries `Value` (what the control edits — authors newline-separated) and
   `Display` (what the read view shows — "A, B & C") separately, because
-  the stored form and the readable one differ. The read view is an `<a>`
+  the stored form and the readable one differ. Every read affordance
+  carries an `aria-label` naming its field: with an optional value empty
+  its visible text is only an em dash, so the accessible name is the sole
+  thing distinguishing seven otherwise identical "edit" links. The read
+  view is an `<a>`
   with both an `href` and an `hx-get`, and the editor a `<form>` with both
   an `action` and an `hx-post`, so there is one markup path rather than a
   no-JS path that drifts: without htmx the `GET` redirects to
   `/books/{id}?edit={field}`, which renders the whole page with that
   editor open, and the `POST` 303s back to the book. An unrecognised
   `?edit=` value opens nothing rather than 400ing — it names no resource.
-  Two details are load-bearing and easy to undo. **The 422 needs client
-  cooperation**: a rejected value answers 422 with the editor and its
-  message, but htmx swaps only 2xx by default, so `edit.js` opts 422 in
-  via `htmx:beforeSwap`, scoped to `[data-editable-field]` — without that
-  listener the response is silently dropped and pressing Save appears to
-  do nothing. **The body cap is derived, not chosen**:
-  `maxMetadataFormBody` is `3 × service.MaxDescriptionBytes + 1024`,
-  because the service limits decoded bytes while `MaxBytesReader` bounds
-  the encoded body, and form-urlencoding triples non-ASCII text — a cap
-  set near the decoded limit rejects a Cyrillic or CJK description at
-  under a third of the advertised size. Over the cap is still a field
-  error, not a bare 413.
+  Two details are load-bearing and easy to get backwards. **A rejected
+  fragment answers 200, the rejected full page answers 422.** The vendored
+  htmx (2.0.10) does not swap a 4xx, so an honest status on the fragment
+  would leave the editor untouched and make Save look like it did nothing.
+  Opting 422 in from the client (`htmx:beforeSwap`) was tried and removed:
+  it buys the status code at the price of the whole interaction depending
+  on one listener still being loaded and still matching, and a silent
+  no-op Save is the worst failure this page has. The navigation path keeps
+  the 422, where nothing swallows it. **The body cap is derived, not
+  chosen**: `maxMetadataFormBody` is `3 × service.MaxMetadataValueBytes +
+  1024`, because the service limits *decoded* bytes while `MaxBytesReader`
+  bounds the *encoded* body and form-urlencoding triples non-ASCII text.
+  It is sized off the author list rather than the description, since 100
+  names of 1 KiB outweighs 64 KiB of prose — sizing off the description
+  rejects a valid author list before `normalizeAuthors` can apply its own
+  limits. Over the cap is still a field error, not a bare 413. Both the
+  fragment and the navigation path load the book before choosing which
+  shape to answer with, so an unknown book is the same plain 404 on
+  each — redirecting first would answer 303 for a book that does not
+  exist.
   The send POST and every metadata POST — the app's only state-changing
   routes — are wrapped in `sameSiteOnly`, which rejects a request whose
   `Sec-Fetch-Site` the browser reports as anything but `same-origin` or

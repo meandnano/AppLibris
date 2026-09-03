@@ -13,16 +13,20 @@ import (
 )
 
 // maxMetadataFormBody bounds the request body a metadata edit may post. It
-// is derived from the largest value the service will accept rather than
-// picked as a round number, because the two are measured in different
-// units: the service limits a description to descriptionLimit bytes of
-// *decoded* text, while this limits the *encoded* body, and
-// form-urlencoding escapes every byte outside a small unreserved set as
-// %XX. Cyrillic and CJK text is three bytes of body per byte of value, so
-// a cap set near the decoded limit would reject descriptions less than a
-// third of the advertised size. The +1KiB covers the field name, the
-// encoding's own overhead and a little slack.
-const maxMetadataFormBody = 3*service.MaxDescriptionBytes + 1024
+// is derived rather than picked, for two reasons that both bite.
+//
+// The units differ: the service limits a value in bytes of *decoded* text,
+// while this limits the *encoded* body, and form-urlencoding escapes every
+// byte outside a small unreserved set as %XX. Cyrillic and CJK text is
+// three body bytes per value byte, so a cap set near the decoded limit
+// rejects a description at under a third of the advertised size.
+//
+// And description is not the largest accepted value: an author list is up
+// to MaxAuthors names of MaxAuthorNameBytes each, which is larger. Sizing
+// off description alone would reject a valid author list before
+// normalizeAuthors ever got to apply its own documented limits. The +1KiB
+// covers the field name, the separators and a little slack.
+const maxMetadataFormBody = 3*service.MaxMetadataValueBytes + 1024
 
 // metadataHandler serves GET and POST /books/{id}/metadata/{field} — one
 // field's read view, its edit form, and the submission that saves it.
@@ -95,16 +99,10 @@ func metadataHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 // form when ?edit=1. A non-htmx caller is redirected to the whole page
 // carrying the same intent in its own query string.
 func metadataFragment(w http.ResponseWriter, r *http.Request, svc *service.Service, id int64, field storage.MetadataField, fragment bool) {
-	editing := r.URL.Query().Get("edit") == "1"
-	if !fragment {
-		target := fmt.Sprintf("/books/%d", id)
-		if editing {
-			target += "?edit=" + string(field)
-		}
-		http.Redirect(w, r, target, http.StatusSeeOther)
-		return
-	}
-
+	// The book is loaded before the fragment/navigation split, not after,
+	// so a missing book is the same plain 404 on both paths. Redirecting
+	// first would answer 303 for a book that does not exist and leave the
+	// 404 to the page it points at.
 	detail, err := svc.GetBook(r.Context(), id)
 	if err != nil {
 		slog.Error("get book failed", "id", id, "error", err)
@@ -115,6 +113,17 @@ func metadataFragment(w http.ResponseWriter, r *http.Request, svc *service.Servi
 		http.NotFound(w, r)
 		return
 	}
+
+	editing := r.URL.Query().Get("edit") == "1"
+	if !fragment {
+		target := fmt.Sprintf("/books/%d", id)
+		if editing {
+			target += "?edit=" + string(field)
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+		return
+	}
+
 	edit := ""
 	if editing {
 		edit = string(field)
@@ -139,12 +148,17 @@ func metadataError(w http.ResponseWriter, r *http.Request, svc *service.Service,
 	}
 
 	if fragment {
+		// 200, not 422: htmx 2.0.10's default response policy does not swap
+		// a 4xx, so an honest status here would leave the editor untouched
+		// and make Save look like it did nothing. The alternative — opting
+		// 422 in from the client — buys the status code at the cost of the
+		// whole interaction depending on one listener still being loaded
+		// and still matching. The full-page path below keeps the 422,
+		// where nothing silently swallows it.
 		view := makeFieldViews(detail, string(field))[field]
 		view.Value = value
 		view.Error = message
-		if err := renderFieldStatus(w, http.StatusUnprocessableEntity, field, view); err != nil {
-			slog.Error("render template failed", "field", field, "error", err)
-		}
+		renderField(w, field, view)
 		return
 	}
 
@@ -164,14 +178,9 @@ func metadataError(w http.ResponseWriter, r *http.Request, svc *service.Service,
 // renderField writes one field's fragment. Each of the three individually
 // placed fields has its own template because each sits in different markup
 // — a heading, a byline, a body paragraph — while every definition-list row
-// shares one.
+// shares one. Always 200: a fragment is only ever rendered for an htmx
+// caller, and see metadataError for why a rejected value is not a 4xx here.
 func renderField(w http.ResponseWriter, field storage.MetadataField, view editableFieldView) {
-	if err := renderFieldStatus(w, http.StatusOK, field, view); err != nil {
-		slog.Error("render template failed", "field", field, "error", err)
-	}
-}
-
-func renderFieldStatus(w http.ResponseWriter, status int, field storage.MetadataField, view editableFieldView) error {
 	name := "book-field-meta"
 	switch field {
 	case storage.FieldTitle:
@@ -181,11 +190,10 @@ func renderFieldStatus(w http.ResponseWriter, status int, field storage.Metadata
 	case storage.FieldDescription:
 		name = "book-field-description"
 	}
-	if err := renderStatus(w, status, name, view); err != nil {
+	if err := render(w, name, view); err != nil {
+		slog.Error("render template failed", "field", field, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return err
 	}
-	return nil
 }
 
 // setPageFieldError opens field's editor on a whole-page render and fills

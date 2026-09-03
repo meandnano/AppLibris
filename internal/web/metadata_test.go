@@ -102,8 +102,11 @@ func TestMetadataRejectedValueComesBackAsAnEditor(t *testing.T) {
 
 	rec := postField(handler, id, "title", url.Values{"value": {"   "}}, htmx)
 	body := rec.Body.String()
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Errorf("blank title = %d, want 422", rec.Code)
+	// 200 on purpose: htmx 2.0.10 does not swap a 4xx, so a rejected
+	// fragment answered with 422 would leave the editor untouched and make
+	// Save look like it did nothing. See metadataError.
+	if rec.Code != http.StatusOK {
+		t.Errorf("blank title fragment = %d, want 200 — htmx will not swap a 4xx", rec.Code)
 	}
 	if !strings.Contains(body, "Title is required") || !strings.Contains(body, "<form") {
 		t.Errorf("rejected value did not come back as an editor with its message: %q", body)
@@ -156,8 +159,8 @@ func TestMetadataOverlongValueIsAFieldErrorNotABareStatus(t *testing.T) {
 	rec := postField(handler, id, "description",
 		url.Values{"value": {strings.Repeat("x", maxMetadataFormBody+1)}}, htmx)
 	body := rec.Body.String()
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Errorf("oversized body = %d, want 422", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("oversized body fragment = %d, want 200", rec.Code)
 	}
 	if !strings.Contains(body, "editable__error") || !strings.Contains(body, "<form") {
 		t.Errorf("oversized body did not come back through the form: %q", body)
@@ -285,5 +288,131 @@ func TestMetadataEditIsSearchableImmediately(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if strings.Contains(rec.Body.String(), "Jonathan Strange") {
 		t.Errorf("the pre-edit title still matches in search; body = %q", rec.Body.String())
+	}
+}
+
+func TestMetadataFullPageErrorKeepsThe422(t *testing.T) {
+	db := newEditTestDB(t)
+	id := createEditTestBook(t, db, storage.Book{Title: "Keep Me", Format: "epub"}, nil)
+	handler := Routes(service.New(db), t.TempDir(), false)
+
+	// Nothing swallows a status on the navigation path, so the honest code
+	// survives there even though the fragment above has to answer 200.
+	rec := postField(handler, id, "title", url.Values{"value": {"   "}}, nil)
+	body := rec.Body.String()
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("blank title, no JS = %d, want 422", rec.Code)
+	}
+	if !strings.Contains(body, "Title is required") || !strings.Contains(body, "detail__meta") {
+		t.Errorf("no-JS rejection is not the whole page with the message: %q", body)
+	}
+}
+
+func TestMetadataUnknownBookIs404OnBothPaths(t *testing.T) {
+	db := newEditTestDB(t)
+	handler := Routes(service.New(db), t.TempDir(), false)
+
+	// The redirect must not be chosen before the book is known to exist,
+	// or an ordinary GET answers 303 for a book that isn't there while the
+	// htmx GET answers 404.
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"htmx", htmx},
+		{"ordinary", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/books/99999/metadata/title?edit=1", nil)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("GET for an unknown book = %d, want 404", rec.Code)
+			}
+		})
+	}
+}
+
+func TestMetadataAcceptsAFullSizeAuthorList(t *testing.T) {
+	db := newEditTestDB(t)
+	id := createEditTestBook(t, db, storage.Book{Title: "Anthology", Format: "epub"}, nil)
+	handler := Routes(service.New(db), t.TempDir(), false)
+
+	// The author list, not the description, is the largest value the
+	// service accepts. A body cap sized off the description limit rejects
+	// this before normalizeAuthors ever applies its own limits.
+	names := make([]string, 100)
+	for i := range names {
+		// Near the 1 KiB-per-name limit, in two-byte runes, so the list as
+		// a whole lands between a description-sized cap and the real one.
+		names[i] = "Автор " + itoa(int64(i)) + " " + strings.Repeat("я", 495)
+	}
+	value := strings.Join(names, "\n")
+	if encoded := len(url.Values{"value": {value}}.Encode()); encoded <= 3*service.MaxDescriptionBytes {
+		t.Fatalf("encoded body is %d bytes; this no longer exceeds a description-sized cap", encoded)
+	}
+
+	rec := postField(handler, id, "authors", url.Values{"value": {value}}, htmx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full-size author list = %d, want 200; body = %q", rec.Code, rec.Body.String())
+	}
+	authors, err := db.ListAuthorsForBook(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(authors) != 100 {
+		t.Errorf("stored %d authors, want 100", len(authors))
+	}
+}
+
+func TestMetadataRejectsLineBreaksInSingleLineFields(t *testing.T) {
+	db := newEditTestDB(t)
+	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
+	handler := Routes(service.New(db), t.TempDir(), false)
+
+	// A browser text input cannot produce these; a scripted request can.
+	for _, field := range []string{"title", "publisher", "published", "language", "isbn"} {
+		name := field
+		if name == "published" {
+			name = "published_date"
+		}
+		rec := postField(handler, id, name, url.Values{"value": {"one\ntwo"}}, htmx)
+		if !strings.Contains(rec.Body.String(), "cannot contain line breaks") {
+			t.Errorf("%s accepted an embedded newline; body = %q", name, rec.Body.String())
+		}
+	}
+
+	// Description is the multiline field and must keep its newlines.
+	rec := postField(handler, id, "description", url.Values{"value": {"one\ntwo"}}, htmx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("multiline description = %d, want 200", rec.Code)
+	}
+	book, _ := db.FindBookByID(context.Background(), id)
+	if book.Description != "one\ntwo" {
+		t.Errorf("Description = %q, want the newline preserved", book.Description)
+	}
+}
+
+func TestMetadataEmptyFieldsHaveDistinctAccessibleNames(t *testing.T) {
+	db := newEditTestDB(t)
+	id := createEditTestBook(t, db, storage.Book{Title: "Sparse", Format: "epub"}, nil)
+	handler := Routes(service.New(db), t.TempDir(), false)
+
+	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	// With every optional value empty, the visible text of each link is
+	// just an em dash — the accessible name is the only thing telling a
+	// screen-reader user which field a link edits.
+	for _, label := range []string{"Edit title", "Edit authors", "Edit description",
+		"Edit publisher", "Edit published", "Edit language", "Edit isbn"} {
+		if !strings.Contains(body, `aria-label="`+label+`"`) {
+			t.Errorf("missing accessible name %q", label)
+		}
 	}
 }

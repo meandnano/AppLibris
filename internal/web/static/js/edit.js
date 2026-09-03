@@ -1,18 +1,6 @@
 (function () {
   "use strict";
 
-  // A rejected edit answers 422 carrying the editor and its message, but
-  // htmx only swaps 2xx by default — without this the response is dropped
-  // and the user sees nothing at all happen. Scoped to the editable
-  // fields, so every other route keeps htmx's default behaviour of
-  // treating a 4xx as an error rather than content.
-  document.addEventListener("htmx:beforeSwap", function (event) {
-    if (event.detail.xhr.status !== 422) return;
-    if (!event.target.closest || !event.target.closest("[data-editable-field]")) return;
-    event.detail.shouldSwap = true;
-    event.detail.isError = false;
-  });
-
   document.addEventListener("keydown", function (event) {
     var form = event.target.closest("[data-editable-field] form");
     if (!form) return;

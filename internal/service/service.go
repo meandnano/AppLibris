@@ -16,6 +16,12 @@ import (
 type Service struct {
 	db *storage.DB
 
+	// now is the service's clock. The plan for inline editing puts time
+	// ownership here rather than letting each write reach for time.Now, so
+	// modified_at propagation can be asserted at this boundary without a
+	// timing assumption. Defaulted by New, overridden in package tests.
+	now func() time.Time
+
 	// Notify, if set, is called after a send is successfully queued —
 	// cmd/server's hook into the worker's poke, so a send starts the
 	// instant the button is pressed instead of waiting for its next
@@ -28,7 +34,7 @@ type Service struct {
 
 // New returns a Service backed by db.
 func New(db *storage.DB) *Service {
-	return &Service{db: db}
+	return &Service{db: db, now: time.Now}
 }
 
 // BookSummary is what a library-browse entry needs.
@@ -292,7 +298,7 @@ func (s *Service) QueueSend(ctx context.Context, bookID int64, address, label st
 		return nil, nil
 	}
 
-	now := time.Now()
+	now := s.now()
 	if _, err := s.db.CreateRecipient(ctx, parsed.Address, label, now); err != nil {
 		return nil, err
 	}

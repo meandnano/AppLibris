@@ -159,3 +159,60 @@ func TestUpdateBookFieldRejectsAuthorsAndUnknownBooks(t *testing.T) {
 		}
 	}
 }
+
+// book_authors is keyed on (book_id, author_id), so a duplicate name would
+// violate the primary key and roll the whole update back. createBookTx
+// drops repeats at first occurrence; this public operation has to match,
+// or a direct caller can fail a write with input the creation path accepts.
+func TestUpdateBookAuthorsDropsRepeatsAtFirstOccurrence(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "dupes", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exists, err := db.UpdateBookAuthors(ctx, id, []string{"First", "Second", "First", "Third"}, time.Now())
+	if err != nil {
+		t.Fatalf("UpdateBookAuthors with a repeated name: %v", err)
+	}
+	if !exists {
+		t.Fatal("exists = false")
+	}
+
+	authors, err := db.ListAuthorsForBook(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"First", "Second", "Third"}
+	if len(authors) != len(want) {
+		t.Fatalf("authors = %v, want %v", authors, want)
+	}
+	for i := range want {
+		if authors[i] != want[i] {
+			t.Errorf("authors = %v, want %v — the repeat keeps its first position", authors, want)
+		}
+	}
+
+	// Positions stay contiguous: they are the order the book lists its
+	// authors in, not the index of the submitted line.
+	rows, err := db.Read().Query(`SELECT position FROM book_authors WHERE book_id = ? ORDER BY position`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var positions []int
+	for rows.Next() {
+		var p int
+		if err := rows.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		positions = append(positions, p)
+	}
+	for i, p := range positions {
+		if p != i {
+			t.Errorf("positions = %v, want 0..%d contiguous", positions, len(positions)-1)
+			break
+		}
+	}
+}

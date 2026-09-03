@@ -229,7 +229,7 @@
   <a class="button button--secondary" href="{{.BookURL}}" hx-get="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML" data-edit-cancel>Cancel</a>
   {{if .Multiline}}<span class="editable__hint">&#8984;/ctrl + &#9166; save &middot; esc cancel</span>{{else}}<span class="editable__hint">&#9166; save &middot; esc cancel</span>{{end}}
 </div>
-{{if .Error}}<p class="editable__error" role="alert">{{.Error}}</p>{{end}}
+{{if .Error}}<p class="editable__error" aria-live="polite">{{.Error}}</p>{{end}}
 {{end}}
 
 {{define "book-field-title"}}
@@ -240,7 +240,7 @@
     {{template "edit-actions" .}}
   </form>
   {{else}}
-  <h1 class="detail__title"><a class="editable__read" href="{{.BookURL}}?edit=title" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{.Display}}</span><span class="editable__label">edit</span></a></h1>
+  <h1 class="detail__title"><a class="editable__read" aria-label="Edit title" href="{{.BookURL}}?edit=title" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{.Display}}</span><span class="editable__label">edit</span></a></h1>
   {{end}}
 </div>
 {{end}}
@@ -253,7 +253,7 @@
     {{template "edit-actions" .}}
   </form>
   {{else}}
-  <p class="detail__author{{if not .Display}} detail__author--unknown{{end}}"><a class="editable__read" href="{{.BookURL}}?edit=authors" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}Author unknown &mdash; add one{{end}}</span><span class="editable__label">edit</span></a></p>
+  <p class="detail__author{{if not .Display}} detail__author--unknown{{end}}"><a class="editable__read" aria-label="Edit authors" href="{{.BookURL}}?edit=authors" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}Author unknown &mdash; add one{{end}}</span><span class="editable__label">edit</span></a></p>
   {{end}}
 </div>
 {{end}}
@@ -267,7 +267,7 @@
     {{template "edit-actions" .}}
   </form>
   {{else}}
-  <a class="editable__read detail__description{{if not .Display}} detail__description--empty{{end}}" href="{{.BookURL}}?edit=description" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}No description &mdash; add one{{end}}</span><span class="editable__label">edit</span></a>
+  <a class="editable__read detail__description{{if not .Display}} detail__description--empty{{end}}" aria-label="Edit description" href="{{.BookURL}}?edit=description" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}No description &mdash; add one{{end}}</span><span class="editable__label">edit</span></a>
   {{end}}
 </div>
 {{end}}
@@ -282,7 +282,7 @@
       {{template "edit-actions" .}}
     </form>
     {{else}}
-    <a class="editable__read" href="{{.BookURL}}?edit={{.Field}}" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</span><span class="editable__label">edit</span></a>
+    <a class="editable__read" aria-label="Edit {{.Label}}" href="{{.BookURL}}?edit={{.Field}}" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</span><span class="editable__label">edit</span></a>
     {{end}}
   </dd>
 </div>
