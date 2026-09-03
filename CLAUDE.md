@@ -325,6 +325,91 @@ full design.
   sweep visited zero files (an unmounted volume can present as an empty
   directory, so seeing nothing is not evidence that everything is gone),
   logged at Warn.
+- The filesystem watcher (`internal/scanner/watcher.go`) is a *trigger*,
+  not a second index path: it never reads, hashes or parses the file an
+  event names, it only pokes a capacity-1 channel that `cmd/server`'s one
+  scan goroutine selects on beside its ticker. So a sweep is a sweep
+  however it was woken, two can never overlap, and nothing about the
+  index's correctness depends on an event arriving — DESIGN.md makes the
+  rescan the mechanism and the watcher an optimisation, and a watcher
+  that never fires costs only latency. Events are debounced (`WATCH_SETTLE`,
+  default `5s`) because an event says something changed, not that it
+  finished changing: a copy fires `CREATE` long before its last byte
+  lands. One timer covers both bounds — the settle window handles a burst
+  that ends, and `watchMaxDelay` (60s) handles one that doesn't, poking on
+  the first event past the cap so a bulk import can't hold the debounce
+  open forever. The debounce is a quality measure, not a correctness one:
+  a sweep that does catch a partial file indexes it, and the completing
+  write's changed size/mtime makes the next sweep re-hash and
+  orphan-prune it in one transaction. Only events worth a sweep qualify —
+  a supported suffix, any remove/rename (the name may already be gone,
+  and a book leaving is what missing-file reconciliation wants), or a new
+  directory — so a `.part` file growing during a download provokes
+  nothing until it is renamed into place. `Refresh` re-registers the
+  watch set after every sweep, which covers three measured failure modes:
+  inotify is not recursive so a new subdirectory needs its own watch; a
+  watch is dropped *silently* when its directory is deleted; and a
+  directory that *moves out* of the library leaves the watches on its
+  descendants live but filed under the names they had inside it (the moved
+  directory's own watch fsnotify drops, its children's it cannot), so they
+  go on reporting files created outside the library as though they had
+  arrived in it. That third one is why `Refresh` compares each directory's
+  `(dev, ino)` against a `registered` map and not just its name — and why
+  it *also* checks `WatchList()` membership, since neither test is
+  sufficient alone: a filesystem may hand a recreated directory the inode
+  number the deleted one had (ext4 does, reproducibly), which reads as
+  unchanged for a watch the kernel has already dropped. Together they are
+  exact, because an inode number only becomes reusable once its inode is
+  freed and freeing it drops the watch filed under that name. A superseded
+  watch is released explicitly, before the re-add: fsnotify's `updatePath`
+  drops the old descriptor from its own map — enough to stop its events
+  being delivered, which is why an event-delivery test passes either way —
+  but never calls `inotify_rm_watch`, so the kernel keeps the watch and no
+  later `Remove` or `WatchList` can reach it, spending one watch from a
+  per-user budget per replacement. Removing first is safe because inotify
+  allocates descriptors cyclically rather than handing back the one just
+  freed, so the `IN_IGNORED` it queues cannot land on the fresh watch. It
+  cannot
+  cover the fourth — losing *every* watch, when the library directory
+  itself is replaced by an unmount and remount — because a sweep only
+  calls `Refresh` after something pokes it, and a watcher with no watches
+  can never poke again; that leaves it deaf until the periodic rescan
+  happens along, which was reproduced by deleting and recreating the
+  library directory under a running server. So `Run` also carries a
+  `watchRecheckInterval` (30s) ticker that rebuilds the set once
+  `WatchList()` is empty — a length check while healthy, a walk only when
+  there is nothing left to lose — and pokes a sweep when it succeeds,
+  since whatever changed while it was deaf is still unindexed.
+- Two startup checks report what the watcher can actually see, because
+  neither is observable later: `mountFor` names the filesystem backing
+  `LIBRARY_DIR` from `/proc/self/mountinfo` (absent on a macOS dev box —
+  a Debug line, not a warning), and warns for the types where changes
+  routinely happen *behind* the mount rather than through it (`fuse.*`,
+  `nfs`, `cifs`, `9p`). That distinction is the whole Unraid story and was
+  measured against a FUSE passthrough: a file written **through** the
+  mount produces `CREATE`+`WRITE`, one written **directly into the
+  backing store** produces nothing at all, though a later `readdir` sees
+  it. So an SMB copy to a `/mnt/user` share is seen and the mover
+  shuffling between `/mnt/cache` and `/mnt/diskN` is not — and bind-mounting
+  the disk path instead makes every change local. Since `fsnotify.Add` on
+  such a mount returns *no error*, a dead watch is indistinguishable from
+  an idle one, so a delivery probe creates a file in the library root and
+  waits for its own event; silence is one Warn. It is created with
+  `os.CreateTemp` rather than at a name derived from the pid: `os.Create`
+  would truncate whatever already sits at that path and follow a symlink
+  through to its target, and in a container the process is pid 1, so the
+  name is guessable — a diagnostic must not be able to destroy a book, and
+  the only writes this directory ever gets are new paths. The probe's own
+  name is recorded before any event is read and excluded from `qualifies`
+  (it must not trigger the work it tests); the file is removed
+  unconditionally including on the timeout path, and only ever the one
+  this probe created. A read-only library is an Info-level skip rather
+  than a failure.
+- The mover needs no handling at all, which is worth keeping true: it
+  preserves path, size and mtime, so the cheap check skips those files,
+  and the inode and physical disk it does change are not things this index
+  stores. That is the reason not to add inode tracking or a device-id
+  column later.
 - `internal/service` — the layer beneath HTTP handlers DESIGN.md's
   "Layering for a future API" calls for, so a future `/api/v1` can reuse it
   as a second thin transport alongside `internal/web`. `ListBooks` and
@@ -634,7 +719,14 @@ full design.
   (default `./library`) against `COVERS_DIR` (default `./data/covers`)
   runs in the background alongside the `SCAN_INTERVAL`-timed (default
   `15m`) periodic rescan, with missing-file grace period `MISSING_GRACE`
-  (default `24h`). Sending is configured by `RESEND_API_KEY` and
+  (default `24h`). `WATCH_ENABLED` (default `true`) and `WATCH_SETTLE`
+  (default `5s`, rejected as negative like `MISSING_GRACE`) configure the
+  watcher; disabling it leaves exactly the pre-watcher behaviour, which is
+  what a mount whose delivery probe reports silence wants. `periodicScan`
+  sweeps on its ticker *or* a watcher poke and calls `Refresh` after each
+  sweep, so a directory the sweep just discovered is watched before the
+  next change lands in it. A watcher that fails to start is a Warn, not a
+  failed startup — the rescan still runs. Sending is configured by `RESEND_API_KEY` and
   `RESEND_FROM`: both set builds an `internal/resend.Client` and an
   `internal/sender.Worker`, wires `Service.Notify` to the worker's
   `Notify`, and runs `storage.FailInterruptedSends` once before the
@@ -667,10 +759,9 @@ full design.
   default logger.
 
 Still missing from DESIGN.md: metadata provider enrichment (Open Library
-/ Google Books) — the consumer `field_sources` is waiting for — the
-filesystem watcher (the periodic rescan is the only live-update mechanism
-so far), the send history view, recipient management beyond the inline
-add-address control, near-duplicate detection, and format conversion.
+/ Google Books) — the consumer `field_sources` is waiting for — the send
+history view, recipient management beyond the inline add-address control,
+near-duplicate detection, and format conversion.
 
 ## Planning
 
