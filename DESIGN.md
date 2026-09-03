@@ -38,7 +38,7 @@ note says which. **Not built** — designed here, no code yet.
 | FTS5 index | Built |
 | Library directory, covers directory | Built |
 | Scanner: startup sweep, periodic rescan, cheap check, hash identity | Built |
-| Scanner: filesystem watcher | Not built — the periodic rescan is the only live-update mechanism; planned in `docs/plans/2026090205-filesystem-watcher.md` |
+| Scanner: filesystem watcher | Built — fsnotify, debounced, with startup mount and delivery checks |
 | Scanner: missing-file handling | Built — mark, grace period, then prune |
 | Duplicate detection (byte-identical) | Partial — the data model holds multiple locations; the UI doesn't flag them |
 | Embedded metadata | Built — EPUB and FB2 (including `.fb2.zip`), all schema columns populated |
@@ -150,7 +150,7 @@ re-parse metadata. This keeps rescans of a large library fast.
 means reorganising folders does not look like a mass delete plus mass add, and
 enriched metadata survives a move.
 
-**Status: Built, except the watcher.** The full sweep, the periodic
+**Status: Built.** The full sweep, the periodic
 rescan, the cheap path+size+mtime check and content-hash identity all
 work as described. One refinement over the description above: the startup
 sweep no longer blocks serving — the server comes up immediately and the
@@ -169,10 +169,33 @@ Paths are stored relative to the library root, so the index survives the
 library mounting at a different absolute path; an unreadable directory
 costs its subtree, not the sweep.
 
-Not built: **the filesystem watcher.** The periodic rescan — described
-here as the safety net — is the only live-update mechanism, so a new file
-takes up to `SCAN_INTERVAL` (default 15m) to appear. This remains the
-right order to have built them in.
+The **filesystem watcher** is built, and is exactly the trigger this
+section describes rather than a second index path: it never reads, hashes
+or parses the file an event names, it only wakes the one scan goroutine.
+So a sweep is a sweep however it was woken, and the periodic rescan
+remains the mechanism — a watcher that never fires costs latency, not
+correctness. Events are debounced (`WATCH_SETTLE`, default 5s), because
+an event says something changed, not that it finished changing.
+
+The unreliability this section predicted is real and is now *reported*
+rather than assumed, because neither fact is observable later: adding a
+watch to a filesystem that will never deliver succeeds silently, so a
+dead watcher is indistinguishable from an idle one. Startup names the
+filesystem backing `LIBRARY_DIR` and warns for the types where changes
+routinely land behind the mount rather than through it (`fuse.*`, `nfs`,
+`cifs`, `9p`), then proves delivery by creating a file and waiting for
+its own event. Measured against a FUSE passthrough, which is the Unraid
+case: a file written *through* a `/mnt/user` share is seen, and the mover
+shuffling between `/mnt/cache` and `/mnt/diskN` is not — so the fix is to
+bind-mount the disk path. `WATCH_ENABLED=false` leaves exactly the
+pre-watcher behaviour, which is what a mount whose probe reports silence
+wants.
+
+See `docs/plans/completed/2026090205-filesystem-watcher.md`, and CLAUDE.md
+for the failure modes `Refresh` has to cover — inotify is not recursive,
+a watch is dropped silently when its directory is deleted, and a
+directory that moves out of the library leaves its descendants' watches
+filed under names something else can take.
 
 ## Duplicate detection
 
@@ -629,12 +652,13 @@ cover.
 
 Worth keeping distinct from the rest of this document: *deferred* is not the
 same as *not yet built*. Everything in this list was consciously ruled out
-of scope. The filesystem watcher, provider enrichment, the send history
-view and the multi-location badge are all unbuilt but **not** deferred —
-they are in scope and simply haven't been reached. Only the six items
-above are decisions rather than backlog.
+of scope. Provider enrichment, the send history view and the
+multi-location badge are all unbuilt but **not** deferred — they are in
+scope and simply haven't been reached. Only the six items above are
+decisions rather than backlog.
 
-The send job model has left that "in scope, not reached" set: it is built.
-Provider enrichment is now the largest thing still designed here and
-absent from the code, and it is the one with a prerequisite already
-waiting on it — the provenance rows being written today exist for it.
+The send job model and the filesystem watcher have both left that "in
+scope, not reached" set: they are built. Provider enrichment is now the
+largest thing still designed here and absent from the code, and it is the
+one with a prerequisite already waiting on it — the provenance rows being
+written today exist for it.
