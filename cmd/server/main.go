@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -54,6 +55,17 @@ func run(ctx context.Context) error {
 		// file marked missing this very sweep would immediately qualify for
 		// deletion — silently bypassing the two-phase safeguard entirely.
 		return fmt.Errorf("parse MISSING_GRACE: must not be negative: %s", missingGrace)
+	}
+	watchEnabled, err := strconv.ParseBool(envOrDefault("WATCH_ENABLED", "true"))
+	if err != nil {
+		return fmt.Errorf("parse WATCH_ENABLED: %w", err)
+	}
+	watchSettle, err := time.ParseDuration(envOrDefault("WATCH_SETTLE", "5s"))
+	if err != nil {
+		return fmt.Errorf("parse WATCH_SETTLE: %w", err)
+	}
+	if watchSettle < 0 {
+		return fmt.Errorf("parse WATCH_SETTLE: must not be negative: %s", watchSettle)
 	}
 
 	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
@@ -137,12 +149,40 @@ func run(ctx context.Context) error {
 	scanCtx, cancelScan := context.WithCancel(ctx)
 	defer cancelScan()
 
+	// The watcher only ever pokes this channel; the scan goroutine below is
+	// still the only thing that calls Scan, so two sweeps can never overlap
+	// and no lock is needed. Capacity 1 collapses a burst of pokes into one
+	// pending wake-up.
+	scanTrigger := make(chan struct{}, 1)
+	var watcher *scanner.Watcher
+	if watchEnabled {
+		watcher, err = scanner.NewWatcher(libraryDir, watchSettle, scanTrigger)
+		if err != nil {
+			// The periodic rescan is the mechanism; the watcher only makes
+			// it prompt. Losing it is a warning, not a failed startup.
+			slog.Warn("filesystem watcher disabled", "error", err)
+			watcher = nil
+		}
+	}
+
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
 		runScan(scanCtx, db, libraryDir, coversDir, missingGrace)
-		periodicScan(scanCtx, db, libraryDir, coversDir, scanInterval, missingGrace)
+		if watcher != nil {
+			watcher.Refresh()
+		}
+		periodicScan(scanCtx, db, libraryDir, coversDir, scanInterval, missingGrace, scanTrigger, watcher)
 	}()
+
+	var watcherDone chan struct{}
+	if watcher != nil {
+		watcherDone = make(chan struct{})
+		go func() {
+			defer close(watcherDone)
+			watcher.Run(scanCtx)
+		}()
+	}
 
 	var workerDone chan struct{}
 	if sendEnabled {
@@ -171,6 +211,9 @@ func run(ctx context.Context) error {
 		// few lines down.
 		deadline, cancelDeadline := context.WithTimeout(context.Background(), 10*time.Second)
 		waitForBackground(cancelScan, scanDone, deadline.Done(), "scan")
+		if watcherDone != nil {
+			waitForBackground(cancelScan, watcherDone, deadline.Done(), "watcher")
+		}
 		if workerDone != nil {
 			waitForBackground(cancelScan, workerDone, deadline.Done(), "sender")
 		}
@@ -200,6 +243,9 @@ func run(ctx context.Context) error {
 	// send — can still miss this window; the bound exists so that doesn't
 	// hang shutdown.
 	waitForBackground(cancelScan, scanDone, shutdownCtx.Done(), "scan")
+	if watcherDone != nil {
+		waitForBackground(cancelScan, watcherDone, shutdownCtx.Done(), "watcher")
+	}
 	if workerDone != nil {
 		waitForBackground(cancelScan, workerDone, shutdownCtx.Done(), "sender")
 	}
@@ -224,15 +270,26 @@ func waitForBackground(cancel context.CancelFunc, done <-chan struct{}, deadline
 	}
 }
 
-func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration) {
+// periodicScan sweeps on a timer and whenever the watcher pokes trigger.
+// Both wake-ups run the same sweep on the same goroutine, so the watcher
+// changes when a sweep happens and never what one does — DESIGN.md's "two
+// entry points sharing one code path", with the ticker as the safety net
+// that runs whether or not any event ever arrives.
+func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration, trigger <-chan struct{}, watcher *scanner.Watcher) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			runScan(ctx, db, libraryDir, coversDir, missingGrace)
+		case <-trigger:
 		case <-ctx.Done():
 			return
+		}
+		runScan(ctx, db, libraryDir, coversDir, missingGrace)
+		if watcher != nil {
+			// After the sweep, so a directory the sweep just discovered is
+			// watched before the next change lands in it.
+			watcher.Refresh()
 		}
 	}
 }
