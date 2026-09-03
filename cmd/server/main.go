@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"library/internal/enrich"
 	"library/internal/resend"
 	"library/internal/scanner"
 	"library/internal/sender"
@@ -100,6 +101,14 @@ func run(ctx context.Context) error {
 	} else {
 		slog.Warn("sending disabled: RESEND_FROM is not set")
 	}
+
+	// No real Provider exists yet — that's a later step — so the worker
+	// runs with an empty chain and every job resolves to "nothing
+	// missing, no providers". Unlike sending, there's no config that
+	// disables this: an empty provider list already makes it a no-op, and
+	// running it unconditionally keeps its queue/worker wiring exercised
+	// ahead of a real provider needing it.
+	enrichWorker := enrich.New(db, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +211,20 @@ func run(ctx context.Context) error {
 		}()
 	}
 
+	// Unlike FailInterruptedSends above, this requeues rather than fails —
+	// see storage.RequeueInterruptedEnrichment's doc comment for why an
+	// interrupted enrichment job is safe to simply run again, where an
+	// interrupted send is not. Runs unconditionally, since the enrichment
+	// worker itself always runs.
+	if _, err := db.RequeueInterruptedEnrichment(ctx, time.Now()); err != nil {
+		slog.Error("requeue interrupted enrichment", "error", err)
+	}
+	enrichDone := make(chan struct{})
+	go func() {
+		defer close(enrichDone)
+		enrichWorker.Run(scanCtx)
+	}()
+
 	select {
 	case err := <-serveErr:
 		// A serving failure isn't a signal, so ctx (and scanCtx, derived
@@ -217,6 +240,7 @@ func run(ctx context.Context) error {
 		if workerDone != nil {
 			waitForBackground(cancelScan, workerDone, deadline.Done(), "sender")
 		}
+		waitForBackground(cancelScan, enrichDone, deadline.Done(), "enrichment")
 		cancelDeadline()
 		if closeErr := db.Close(); closeErr != nil {
 			slog.Error("close database", "error", closeErr)
@@ -249,6 +273,7 @@ func run(ctx context.Context) error {
 	if workerDone != nil {
 		waitForBackground(cancelScan, workerDone, shutdownCtx.Done(), "sender")
 	}
+	waitForBackground(cancelScan, enrichDone, shutdownCtx.Done(), "enrichment")
 
 	return db.Close()
 }

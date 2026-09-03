@@ -1,0 +1,229 @@
+package enrich
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"library/internal/storage"
+)
+
+// pollInterval is the safety-net tick that catches anything a Notify poke
+// missed — a job left queued by a crash between insert and notify, most
+// obviously. Same shape as internal/sender's, for the same reason: the
+// poke is the optimisation, the tick is the mechanism.
+const pollInterval = 1 * time.Minute
+
+// markTimeout bounds the write that records a job's terminal outcome —
+// same value and same reasoning as internal/sender's: one local SQLite
+// write, possibly happening inside the process's shutdown budget.
+const markTimeout = 5 * time.Second
+
+// bookGoneReason is recorded when a job's book no longer exists by the
+// time it's claimed — the book was pruned between enqueue and claim.
+// enrichment_jobs.book_id cascades on delete, so the ordinary case is the
+// row vanishing with the book rather than ever reaching this; it exists
+// for the narrow race where a claim and a deletion interleave.
+const bookGoneReason = "the book was removed from the library before enrichment could run"
+
+// lookupFailedReason is recorded when a read the job needs (the book, its
+// authors, its field sources) fails for a reason that isn't the book being
+// gone — a storage error, not a statement about the book's existence.
+const lookupFailedReason = "could not read the library index — try again"
+
+// applyFailedReason is recorded when Resolve succeeded but writing its
+// result back failed.
+const applyFailedReason = "could not save enriched metadata"
+
+// Worker claims and processes enrichment_jobs rows one at a time, in queue
+// order — internal/sender's shape, with providers in place of a Transport.
+type Worker struct {
+	db        *storage.DB
+	providers []Provider
+	notify    chan struct{}
+}
+
+// New returns a Worker that reads jobs from db and asks providers, in
+// order, for whatever's missing. A nil or empty providers is valid: every
+// job then resolves to "nothing missing, no providers", which is what lets
+// this worker run — and its wiring stay exercised — before step 05 gives
+// it something to call.
+func New(db *storage.DB, providers []Provider) *Worker {
+	return &Worker{db: db, providers: providers, notify: make(chan struct{}, 1)}
+}
+
+// Notify pokes the worker to check the queue immediately, instead of
+// waiting for the next pollInterval tick. Non-blocking, capacity-1 channel:
+// a burst of enqueues coalesces into one wake-up.
+func (w *Worker) Notify() {
+	select {
+	case w.notify <- struct{}{}:
+	default:
+	}
+}
+
+// Run drains the queue, then blocks waiting for a Notify poke or the next
+// pollInterval tick, until ctx is done. A job in flight when ctx is
+// cancelled is left running — see process's ctx.Err() handling — for
+// RequeueInterruptedEnrichment to recover at next startup. Unlike
+// internal/sender's equivalent recovery, that recovery requeues rather
+// than fails: see storage.RequeueInterruptedEnrichment's doc comment for
+// why an enrichment job can safely be re-run where a send cannot.
+func (w *Worker) Run(ctx context.Context) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		w.drain(ctx)
+
+		select {
+		case <-w.notify:
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// drain processes claimed jobs until the queue is empty, ctx is done, or a
+// claim fails outright.
+func (w *Worker) drain(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		job, err := w.db.ClaimNextEnrichment(ctx, time.Now())
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Error("claim next enrichment", "error", err)
+			}
+			return
+		}
+		if job == nil {
+			return
+		}
+
+		w.process(ctx, job)
+	}
+}
+
+// process resolves and applies one already-claimed job, marking it done or
+// failed. Every read and write below that can fail is checked against
+// ctx.Err() first: because Decision 2 (see package doc) makes a running
+// job safe to re-run from scratch, a failure that coincides with ctx
+// already being cancelled is treated as an abandoned attempt, not a
+// verdict — the row is left running for recovery rather than recorded as
+// failed, which would otherwise need its own retry path that doesn't exist
+// here. A failure with ctx still live is a real one and always ends in a
+// terminal Mark call, so drain moves on to the next job.
+func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
+	book, err := w.db.FindBookByID(ctx, job.BookID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		w.fail(ctx, job.ID, lookupFailedReason)
+		return
+	}
+	if book == nil {
+		w.fail(ctx, job.ID, bookGoneReason)
+		return
+	}
+
+	authors, err := w.db.ListAuthorsForBook(ctx, job.BookID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		w.fail(ctx, job.ID, lookupFailedReason)
+		return
+	}
+
+	sources, err := w.db.FieldSourcesForBook(ctx, job.BookID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		w.fail(ctx, job.ID, lookupFailedReason)
+		return
+	}
+
+	values, sourceName, err := Resolve(ctx, *book, authors, sources, w.providers)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		w.fail(ctx, job.ID, err.Error())
+		return
+	}
+	if ctx.Err() != nil {
+		// Resolve logs and skips a provider error rather than returning
+		// one — cancellation included, since from inside Resolve a
+		// provider call abandoned by a shutdown looks exactly like one
+		// that failed outright. So a cancelled ctx can reach here with
+		// err == nil and an empty or partial values map that says
+		// nothing about what a full run would have found. Leave the job
+		// running rather than recording that partial result as the
+		// answer; RequeueInterruptedEnrichment picks it up at next
+		// startup and Resolve runs again from scratch.
+		return
+	}
+
+	// Grouped by provider: ApplyEnrichedFields records one source for the
+	// whole call, and a job can resolve fields from more than one
+	// provider (the field-level merge Resolve documents), so a naive
+	// single call would misattribute every field but the first group's to
+	// the wrong provider.
+	for name, fields := range groupBySource(values, sourceName) {
+		if _, err := w.db.ApplyEnrichedFields(ctx, job.BookID, fields, name, time.Now()); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("apply enriched fields", "job_id", job.ID, "provider", name, "error", err)
+			w.fail(ctx, job.ID, applyFailedReason)
+			return
+		}
+	}
+
+	w.done(ctx, job.ID)
+}
+
+// groupBySource splits a Resolve result by which provider answered each
+// field. values and sourceName share the same keys — Resolve builds them
+// together — so every field in values has a name here, even if that name
+// is "" (which cannot happen while providers implement Provider correctly,
+// since Name() is used as the map key regardless of what it returns).
+func groupBySource(values, sourceName map[storage.MetadataField]string) map[string]map[storage.MetadataField]string {
+	byProvider := map[string]map[storage.MetadataField]string{}
+	for field, value := range values {
+		name := sourceName[field]
+		if byProvider[name] == nil {
+			byProvider[name] = map[storage.MetadataField]string{}
+		}
+		byProvider[name][field] = value
+	}
+	return byProvider
+}
+
+// done records job's successful completion. Like internal/sender's
+// terminal writes, it runs on a context detached from ctx: process has
+// already established there is nothing left to lose by writing the
+// verdict, so a shutdown landing in this exact gap shouldn't cost it.
+func (w *Worker) done(ctx context.Context, jobID int64) {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)
+	defer cancel()
+	if err := w.db.MarkEnrichmentDone(markCtx, jobID, time.Now()); err != nil {
+		slog.Error("mark enrichment done", "job_id", jobID, "error", err)
+	}
+}
+
+// fail records job's terminal failure with reason. Same detached-context
+// reasoning as done.
+func (w *Worker) fail(ctx context.Context, jobID int64, reason string) {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)
+	defer cancel()
+	if err := w.db.MarkEnrichmentFailed(markCtx, jobID, reason, time.Now()); err != nil {
+		slog.Error("mark enrichment failed", "job_id", jobID, "error", err)
+	}
+}
