@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -55,10 +56,39 @@ type Watcher struct {
 	// maxDelay is watchMaxDelay, and recheck is watchRecheckInterval, as
 	// fields so tests can shorten them rather than waiting out the real
 	// ones.
-	maxDelay  time.Duration
-	recheck   time.Duration
-	trigger   chan<- struct{}
+	maxDelay time.Duration
+	recheck  time.Duration
+	trigger  chan<- struct{}
+	// probeName is set by the delivery probe, on Run's goroutine, before any
+	// event is read; only qualifies reads it, from that same goroutine.
 	probeName string
+
+	// mu guards registered, which Refresh mutates from the scan goroutine
+	// and from Run's recheck.
+	mu sync.Mutex
+	// registered records which directory each watch is actually attached to.
+	registered map[string]watchKey
+}
+
+// watchKey identifies the directory a watch really covers. inotify watches
+// an inode, but fsnotify files each watch under the pathname it was
+// registered with, and the two stop agreeing the moment a directory moves:
+// the watch follows the inode out of the tree while the name it is filed
+// under can be taken by a different directory entirely. Comparing identity
+// rather than name is what keeps a replacement from being mistaken for the
+// original and left unwatched.
+type watchKey struct {
+	dev uint64
+	ino uint64
+}
+
+// watchKeyFor reads a directory's identity from an already-stat'd entry.
+func watchKeyFor(info fs.FileInfo) (watchKey, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return watchKey{}, false
+	}
+	return watchKey{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}, true
 }
 
 // NewWatcher watches libraryDir and every directory beneath it, poking
@@ -85,31 +115,51 @@ func NewWatcher(libraryDir string, settle time.Duration, trigger chan<- struct{}
 		maxDelay:   watchMaxDelay,
 		recheck:    watchRecheckInterval,
 		trigger:    trigger,
-		// The pid keeps two processes pointed at one library from
-		// colliding on the probe file, and keeps a stale one attributable.
-		probeName: fmt.Sprintf(".watch-probe-%d", os.Getpid()),
+		registered: make(map[string]watchKey),
 	}
 	w.logMount()
 	w.Refresh()
 	return w, nil
 }
 
-// Refresh brings the watch set back in line with the directory tree, adding
-// a watch for every directory that hasn't got one. Call it after each sweep.
+// Refresh brings the watch set back in line with the directory tree. Call
+// it after each sweep.
 //
-// One rule covers three failure modes measured on real mounts: a
-// subdirectory created since the last sweep gets watched (inotify is not
-// recursive — a watch on the parent says nothing about files inside a new
-// child); a watch silently dropped when its directory was deleted is
-// restored if the directory comes back; and an unmount/remount cycle, which
-// drops every watch without reporting an error, heals at the next sweep
-// instead of leaving the watcher permanently deaf.
+// It compares each directory's identity, not just its name, against what is
+// registered. Four failure modes measured on real filesystems need that:
+//
+//   - inotify is not recursive, so a subdirectory created since the last
+//     sweep has no watch of its own;
+//   - a watch is dropped silently when its directory is deleted, and must
+//     be restored if the directory comes back;
+//   - an unmount/remount drops every watch without reporting an error;
+//   - and a directory that *moves out* of the library takes its watch with
+//     it, leaving the watch filed under a name that something else can then
+//     occupy. Trusting the name alone would skip the replacement for good —
+//     books written there produce no events, refresh after refresh — while
+//     the departed inode keeps delivering events under a path it no longer
+//     owns.
+//
+// Both tests are needed, because each covers the other's blind spot.
+// Identity alone is not enough: a filesystem is free to hand a recreated
+// directory the inode number the deleted one had (ext4 does, reproducibly),
+// which reads as "unchanged" for a watch the kernel has already dropped.
+// The name alone is not enough either — that is the moved-directory case
+// above. Together they are exact, because an inode number is only reusable
+// once its inode is freed, and freeing it drops the watch filed under that
+// name: a live watch plus a matching identity cannot be a coincidence.
 func (w *Watcher) Refresh() {
-	watched := make(map[string]bool)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// What fsnotify still holds a watch for, by the name it was registered
+	// under — the authority on whether a watch exists at all.
+	watched := make(map[string]bool, len(w.registered))
 	for _, path := range w.fsw.WatchList() {
 		watched[path] = true
 	}
 
+	seen := make(map[string]bool, len(w.registered))
 	err := filepath.WalkDir(w.libraryDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// An unreadable subtree costs its own watches and nothing
@@ -120,28 +170,69 @@ func (w *Watcher) Refresh() {
 			}
 			return nil
 		}
-		if !d.IsDir() || watched[path] {
+		if !d.IsDir() {
 			return nil
+		}
+		seen[path] = true
+
+		info, err := d.Info()
+		if err != nil {
+			// Vanished between the readdir and here; the next refresh has it.
+			return nil
+		}
+		key, haveKey := watchKeyFor(info)
+		switch {
+		case !watched[path]:
+			// Nothing is filed under this name: a directory created since
+			// the last refresh, or one whose watch went with it when it was
+			// deleted and needs restoring now that it is back.
+		case !haveKey:
+			// No identity to compare on this platform, so the name is all
+			// there is to go on.
+			return nil
+		case w.registered[path] == key:
+			return nil // same directory, still watched
+		default:
+			// The name now belongs to a different directory, so re-register
+			// it. Adding a path whose inode has changed supersedes the watch
+			// filed under it, which is what stops the departed inode
+			// reporting under a name it has given up; removing first would
+			// only add the hazard of inotify reusing the freed descriptor.
+			// Forget the stale identity now rather than after a successful
+			// Add: if the Add fails, a registration that still matches would
+			// make the next refresh think this name was fine.
+			delete(w.registered, path)
 		}
 		if err := w.fsw.Add(path); err != nil {
 			if errors.Is(err, fsnotify.ErrClosed) {
 				// Shutdown cancels the watcher and the scan loop together,
 				// and Run closes the handle on its way out — so a sweep
 				// still finishing can land here with nothing left to
-				// register. A closed watcher reports an empty WatchList,
-				// which would otherwise make this retry every directory in
-				// the tree and warn about each one.
+				// register, and would otherwise warn once per directory.
 				return fs.SkipAll
 			}
 			// Most plausibly the inotify watch limit on a deep tree. A
-			// missing watch costs latency in that subtree, not
-			// correctness, so keep going.
+			// missing watch costs latency in that subtree, not correctness,
+			// so keep going.
 			slog.Warn("could not watch directory", "path", path, "error", err)
+			return nil
+		}
+		if haveKey {
+			w.registered[path] = key
 		}
 		return nil
 	})
 	if err != nil {
 		slog.Warn("watch refresh", "library_dir", w.libraryDir, "error", err)
+	}
+
+	// Directories that have left the tree: drop their watches so a departed
+	// inode cannot keep poking sweeps from outside the library.
+	for path := range w.registered {
+		if !seen[path] {
+			w.fsw.Remove(path)
+			delete(w.registered, path)
+		}
 	}
 }
 
@@ -258,7 +349,7 @@ func (w *Watcher) poke() {
 // qualifies reports whether an event is worth a sweep.
 func (w *Watcher) qualifies(event fsnotify.Event) bool {
 	name := filepath.Base(event.Name)
-	if name == w.probeName {
+	if w.probeName != "" && name == w.probeName {
 		// The probe must not be able to trigger the work it is testing.
 		return false
 	}
@@ -292,8 +383,13 @@ func (w *Watcher) qualifies(event fsnotify.Event) bool {
 //
 // It reports whether it consumed a qualifying event while waiting.
 func (w *Watcher) probe(ctx context.Context) (pending bool) {
-	path := filepath.Join(w.libraryDir, w.probeName)
-	f, err := os.Create(path)
+	// Created exclusively, under a name nothing else can already hold.
+	// os.Create would truncate whatever is at the path and follow a symlink
+	// through to its target — and in a container the process is PID 1, so a
+	// name built from the pid is guessable. A library file must not be
+	// collateral damage of a diagnostic; DESIGN.md's rule for this directory
+	// is that writes only ever create new paths.
+	f, err := os.CreateTemp(w.libraryDir, ".watch-probe-*")
 	if err != nil {
 		// A read-only library mount is a legitimate deployment, not a
 		// broken watcher: say so quietly and carry on.
@@ -301,13 +397,19 @@ func (w *Watcher) probe(ctx context.Context) (pending bool) {
 			slog.Info("watch delivery probe skipped: library directory is not writable",
 				"library_dir", w.libraryDir)
 		} else {
-			slog.Warn("watch delivery probe could not create its file", "path", path, "error", err)
+			slog.Warn("watch delivery probe could not create its file",
+				"library_dir", w.libraryDir, "error", err)
 		}
 		return false
 	}
+	path := f.Name()
 	f.Close()
-	// Unconditional, including on the timeout path: a restart loop must
-	// not litter the library.
+	// Set before any event is read, so the file this probe just made cannot
+	// be mistaken for a book and poke the very sweep it is testing.
+	w.probeName = filepath.Base(path)
+	// Unconditional, including on the timeout path: a restart loop must not
+	// litter the library. Only ever the file this probe created, which is
+	// what exclusive creation buys.
 	defer func() {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("watch delivery probe could not remove its file", "path", path, "error", err)

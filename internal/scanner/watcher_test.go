@@ -411,3 +411,147 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	return &buf
 }
+
+// The probe writes into the live library, so it must only ever create a new
+// path — os.Create truncates whatever is already at the name and follows
+// symlinks through to the target. In a container the process is PID 1, so a
+// fixed name is guessable: a symlink at that name pointing at a book would
+// leave the book empty.
+func TestWatcherProbeDoesNotDisturbAnExistingPath(t *testing.T) {
+	dir := t.TempDir()
+	book := filepath.Join(dir, "book.epub")
+	const content = "the whole book"
+	if err := os.WriteFile(book, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	decoy := filepath.Join(dir, fmt.Sprintf(".watch-probe-%d", os.Getpid()))
+	if err := os.Symlink(book, decoy); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	trigger := make(chan struct{}, 1)
+	w, err := NewWatcher(dir, testSettle, trigger)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	waitForPokeToSettle(t, trigger)
+
+	got, err := os.ReadFile(book)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != content {
+		t.Errorf("the probe modified an existing book: content = %q, want %q", got, content)
+	}
+	if _, err := os.Lstat(decoy); err != nil {
+		t.Errorf("the probe removed a path it did not create: %v", err)
+	}
+}
+
+// A watch is attached to an inode, but fsnotify files it under the pathname
+// used to register it, and the two stop agreeing the moment a directory
+// moves: the watch follows the inode out of the library while the name it is
+// filed under can be taken by a different directory. Trusting the name alone
+// then skips the replacement for good — books written there produce no
+// events, refresh after refresh.
+func TestWatcherRefreshRewatchesADirectoryReplacedAfterAMove(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	series := filepath.Join(dir, "author", "series")
+	if err := os.MkdirAll(series, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	trigger := make(chan struct{}, 1)
+	w, err := NewWatcher(dir, testSettle, trigger)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	waitForPokeToSettle(t, trigger)
+
+	// The parent leaves the library, taking the descendant watch's inode
+	// with it, and a fresh tree takes the same names.
+	if err := os.Rename(filepath.Join(dir, "author"), filepath.Join(outside, "author")); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if err := os.MkdirAll(series, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	awaitPoke(t, trigger, "the tree changed under the library")
+	w.Refresh()
+
+	if err := os.WriteFile(filepath.Join(series, "new.epub"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	awaitPoke(t, trigger, "a book arrived in the directory that replaced the moved one")
+}
+
+// The other half of a moved directory: its own watch is dropped by the
+// move, but a watch on a directory *beneath* it is not — that inode never
+// moved relative to its own watch. It stays live, still filed under the
+// name it had inside the library, and goes on reporting files created
+// outside the library entirely as though they had arrived in it.
+//
+// Both endings need covering because different code handles them: a name
+// something else now occupies is re-registered, while a name that has left
+// the tree is only unwatched by the sweep for departed registrations.
+func TestWatcherRefreshStopsWatchingADirectoryThatLeftTheLibrary(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace bool
+	}{
+		{"the names are taken by a fresh tree", true},
+		{"the names are simply gone", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, outside := t.TempDir(), t.TempDir()
+			series := filepath.Join(dir, "author", "series")
+			if err := os.MkdirAll(series, 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+
+			trigger := make(chan struct{}, 1)
+			w, err := NewWatcher(dir, testSettle, trigger)
+			if err != nil {
+				t.Fatalf("NewWatcher: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go w.Run(ctx)
+			waitForPokeToSettle(t, trigger)
+
+			if err := os.Rename(filepath.Join(dir, "author"), filepath.Join(outside, "author")); err != nil {
+				t.Fatalf("Rename: %v", err)
+			}
+			if tc.replace {
+				if err := os.MkdirAll(series, 0o755); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+			}
+			awaitPoke(t, trigger, "the tree changed under the library")
+			w.Refresh()
+			waitForPokeToSettle(t, trigger)
+
+			moved := filepath.Join(outside, "author", "series")
+			if err := os.WriteFile(filepath.Join(moved, "gone.epub"), []byte("x"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			expectNoPoke(t, trigger, 2*testSettle, "a book arrived in a directory that is no longer in the library")
+
+			if !tc.replace {
+				return
+			}
+			// The replacement is watched, so this is not simply a watcher
+			// that has stopped reporting anything.
+			if err := os.WriteFile(filepath.Join(series, "here.epub"), []byte("x"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			awaitPoke(t, trigger, "a book arrived in the directory now at that name")
+		})
+	}
+}

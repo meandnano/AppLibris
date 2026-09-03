@@ -346,10 +346,25 @@ full design.
   and a book leaving is what missing-file reconciliation wants), or a new
   directory — so a `.part` file growing during a download provokes
   nothing until it is renamed into place. `Refresh` re-registers the
-  watch set after every sweep, which covers two measured failure modes:
-  inotify is not recursive so a new subdirectory needs its own watch, and
-  a watch is dropped *silently* when its directory is deleted. It cannot
-  cover the third — losing *every* watch, when the library directory
+  watch set after every sweep, which covers three measured failure modes:
+  inotify is not recursive so a new subdirectory needs its own watch; a
+  watch is dropped *silently* when its directory is deleted; and a
+  directory that *moves out* of the library leaves the watches on its
+  descendants live but filed under the names they had inside it (the moved
+  directory's own watch fsnotify drops, its children's it cannot), so they
+  go on reporting files created outside the library as though they had
+  arrived in it. That third one is why `Refresh` compares each directory's
+  `(dev, ino)` against a `registered` map and not just its name — and why
+  it *also* checks `WatchList()` membership, since neither test is
+  sufficient alone: a filesystem may hand a recreated directory the inode
+  number the deleted one had (ext4 does, reproducibly), which reads as
+  unchanged for a watch the kernel has already dropped. Together they are
+  exact, because an inode number only becomes reusable once its inode is
+  freed and freeing it drops the watch filed under that name. Re-adding a
+  path whose inode changed is what supersedes the stale watch — fsnotify
+  drops the old descriptor itself — so `Refresh` never removes first,
+  which would only risk inotify reusing the freed descriptor. It cannot
+  cover the fourth — losing *every* watch, when the library directory
   itself is replaced by an unmount and remount — because a sweep only
   calls `Refresh` after something pokes it, and a watcher with no watches
   can never poke again; that leaves it deaf until the periodic rescan
@@ -372,11 +387,18 @@ full design.
   shuffling between `/mnt/cache` and `/mnt/diskN` is not — and bind-mounting
   the disk path instead makes every change local. Since `fsnotify.Add` on
   such a mount returns *no error*, a dead watch is indistinguishable from
-  an idle one, so a delivery probe creates `.watch-probe-<pid>` in the
-  library root and waits for its own event; silence is one Warn. The probe
-  file is excluded from `qualifies` (it must not trigger the work it
-  tests), is removed unconditionally including on the timeout path, and a
-  read-only library is an Info-level skip rather than a failure.
+  an idle one, so a delivery probe creates a file in the library root and
+  waits for its own event; silence is one Warn. It is created with
+  `os.CreateTemp` rather than at a name derived from the pid: `os.Create`
+  would truncate whatever already sits at that path and follow a symlink
+  through to its target, and in a container the process is pid 1, so the
+  name is guessable — a diagnostic must not be able to destroy a book, and
+  the only writes this directory ever gets are new paths. The probe's own
+  name is recorded before any event is read and excluded from `qualifies`
+  (it must not trigger the work it tests); the file is removed
+  unconditionally including on the timeout path, and only ever the one
+  this probe created. A read-only library is an Info-level skip rather
+  than a failure.
 - The mover needs no handling at all, which is worth keeping true: it
   preserves path, size and mtime, so the cheap check skips those files,
   and the inode and physical disk it does change are not things this index
