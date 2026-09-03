@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"library/internal/service"
 	"library/internal/storage"
@@ -212,6 +213,111 @@ func TestVarySetOnBothFullPageAndFragmentResponses(t *testing.T) {
 	handler.ServeHTTP(fragmentRec, fragment)
 	if got := fragmentRec.Header().Get("Vary"); got != wantVary {
 		t.Errorf("fragment GET /?q=Piranesi (HX-Request) Vary = %q, want %q", got, wantVary)
+	}
+}
+
+// newTestHandlerWithLocations sets up one book with n file locations
+// ("/loc-0.epub", "/loc-1.epub", ...) for the multi-location badge tests.
+func newTestHandlerWithLocations(t *testing.T, title string, n int) http.Handler {
+	t.Helper()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	bookID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
+		ContentHash: "hash-1",
+		Title:       title,
+		SortTitle:   title,
+		Format:      "epub",
+	}, nil, "/loc-0.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	for i := 1; i < n; i++ {
+		if _, err := db.UpsertBookFile(ctx, bookID, fmt.Sprintf("/loc-%d.epub", i), 100, mtime); err != nil {
+			t.Fatalf("UpsertBookFile %d: %v", i, err)
+		}
+	}
+
+	return Routes(service.New(db), t.TempDir(), false)
+}
+
+// The mutation this guards against: dropping the PathsLabel assignment
+// entirely would still pass every storage and service test, since those
+// only check the Locations count reaches BookSummary — this is the one test
+// that would catch the marker never reaching the rendered page.
+func TestMultiLocationBookRendersPathsMarker(t *testing.T) {
+	handler := newTestHandlerWithLocations(t, "Duplicated Book", 2)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `class="card__paths"`) {
+		t.Errorf("GET / body missing the paths marker: %q", body)
+	}
+	if !strings.Contains(body, "2 paths") {
+		t.Errorf("GET / body = %q, want it to contain %q", body, "2 paths")
+	}
+}
+
+// A single-location book must render no marker at all, not an empty span:
+// asserting the class is absent (not just the text) catches a threshold bug
+// that renders the marker with empty content.
+func TestSingleLocationBookRendersNoPathsMarker(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Solo Book", nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Contains(body, `class="card__paths"`) {
+		t.Errorf("GET / body for a single-location book contains a paths marker: %q", body)
+	}
+}
+
+// The count is the real number, not a hardcoded 2.
+func TestThreeLocationBookRendersThreePaths(t *testing.T) {
+	handler := newTestHandlerWithLocations(t, "Triplicated Book", 3)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "3 paths") {
+		t.Errorf("GET / body = %q, want it to contain %q", body, "3 paths")
+	}
+}
+
+// The marker has to survive into the book-grid fragment a live search
+// request gets, not just the full page.
+func TestMultiLocationMarkerSurvivesIntoSearchFragment(t *testing.T) {
+	handler := newTestHandlerWithLocations(t, "Piranesi", 2)
+
+	req := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=Piranesi (HX-Request) status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "2 paths") {
+		t.Errorf("HX-Request fragment body = %q, want it to contain %q", body, "2 paths")
 	}
 }
 

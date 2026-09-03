@@ -67,6 +67,74 @@ func TestListBooksAssemblesAuthors(t *testing.T) {
 	}
 }
 
+// The map-absence contract translated at the service boundary: storage's
+// CountFilesByBook omits a book with one location rather than mapping it to
+// zero, and ListBooks must turn that absence into 1, not 0.
+func TestListBooksReportsLocations(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+
+	oneID, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-one", Title: "One Location", SortTitle: "One Location", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook one: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, oneID, "/one.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile one: %v", err)
+	}
+
+	twoID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-two", Title: "Two Locations", SortTitle: "Two Locations", Format: "epub"}, nil, "/two-a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile two: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, twoID, "/two-b.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile two-b: %v", err)
+	}
+
+	books, err := svc.ListBooks(ctx)
+	if err != nil {
+		t.Fatalf("ListBooks: %v", err)
+	}
+	byID := make(map[int64]BookSummary, len(books))
+	for _, b := range books {
+		byID[b.ID] = b
+	}
+
+	if got := byID[oneID].Locations; got != 1 {
+		t.Errorf("one-location book Locations = %d, want 1", got)
+	}
+	if got := byID[twoID].Locations; got != 2 {
+		t.Errorf("two-location book Locations = %d, want 2", got)
+	}
+}
+
+// The regression this guards: a future refactor splitting ListBooks and
+// SearchBooks off from their shared summarize helper could silently drop
+// the marker from search results only.
+func TestSearchBooksReportsLocations(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+
+	matchID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Piranesi", SortTitle: "Piranesi", Format: "epub"}, nil, "/a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, matchID, "/b.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile: %v", err)
+	}
+
+	result, err := svc.SearchBooks(ctx, "Piranesi")
+	if err != nil {
+		t.Fatalf("SearchBooks: %v", err)
+	}
+	if len(result.Books) != 1 || result.Books[0].Locations != 2 {
+		t.Fatalf("SearchBooks(Piranesi) = %+v, want one book with Locations 2", result.Books)
+	}
+}
+
 func TestSearchBooksBlankQueryReturnsFullList(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

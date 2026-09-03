@@ -250,6 +250,36 @@ func (db *DB) ListAuthorsForBook(ctx context.Context, bookID int64) ([]string, e
 	return names, rows.Err()
 }
 
+// CountFilesByBook returns how many file locations each book has, keyed by
+// book id. Books with no locations are absent from the map rather than
+// present with a zero, which callers should treat as 1-or-fewer: the last
+// location's deletion prunes the book in the same transaction, so a book
+// with zero locations is a race, not a state.
+//
+// Missing locations are counted. A row whose path has vanished stays in
+// book_files until it has been missing past MISSING_GRACE, and the detail
+// page lists it — annotated — for that whole window. Filtering them out
+// here would make the grid and the detail page disagree about the same
+// book's location count while linking to each other.
+func (db *DB) CountFilesByBook(ctx context.Context) (map[int64]int, error) {
+	rows, err := db.read.QueryContext(ctx, `SELECT book_id, count(*) FROM book_files GROUP BY book_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[int64]int)
+	for rows.Next() {
+		var bookID int64
+		var count int
+		if err := rows.Scan(&bookID, &count); err != nil {
+			return nil, err
+		}
+		counts[bookID] = count
+	}
+	return counts, rows.Err()
+}
+
 // FindFileByPath returns the location and its owning book's cover fields, or nil if none exists
 func (db *DB) FindFileByPath(ctx context.Context, path string) (*BookFile, error) {
 	row := db.read.QueryRowContext(ctx, `

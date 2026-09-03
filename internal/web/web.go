@@ -84,6 +84,13 @@ type bookCard struct {
 	AuthorLine string
 	Format     string
 	CoverURL   string
+	// PathsLabel is the multi-location marker's text ("2 paths"), or "" for
+	// the ordinary single-location book, which is what the template
+	// branches on. Composed here rather than in the template, the same as
+	// searchSummary: the template holds no formatting logic, and a count
+	// that never reaches the marker cannot be rendered as "1 paths" by
+	// accident.
+	PathsLabel string
 }
 
 // libraryPage is the data library.html (and its book-grid fragment) render
@@ -167,13 +174,17 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 
 		cards := make([]bookCard, len(books))
 		for i, b := range books {
-			cards[i] = bookCard{
+			card := bookCard{
 				ID:         b.ID,
 				Title:      b.Title,
 				AuthorLine: authorLine(b.Authors),
 				Format:     b.Format,
 				CoverURL:   coverURL(b.CoverPath),
 			}
+			if b.Locations > 1 {
+				card.PathsLabel = strconv.Itoa(b.Locations) + " paths"
+			}
+			cards[i] = card
 		}
 
 		page := libraryPage{

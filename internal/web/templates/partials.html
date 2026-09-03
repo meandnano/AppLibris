@@ -119,7 +119,10 @@
         {{else}}
         <p class="card__author card__author--unknown">Author unknown</p>
         {{end}}
-        <p class="card__meta"><span class="badge">{{.Format}}</span></p>
+        <p class="card__meta">
+          <span class="badge">{{.Format}}</span>
+          {{if .PathsLabel}}<span class="card__paths" title="Same file found in more than one location">{{.PathsLabel}}</span>{{end}}
+        </p>
       </a>
     </li>
     {{end}}
