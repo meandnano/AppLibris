@@ -192,8 +192,11 @@ full design.
   foreign key is what makes that a schema guarantee rather than a rule
   this method has to remember to keep.
 - `enrichment_jobs` (`internal/storage/enrichment.go`) backs the provider-
-  enrichment queue, one row per book: `status` is CHECK-constrained to
-  `queued`/`running`/`done`/`failed`, the same shape `send_log` uses.
+  enrichment queue, one row per job (a book can accumulate several over
+  time — terminal history isn't pruned, and a `running` job can coexist
+  with a fresh `queued` one; only `EnqueueEnrichment`'s own guard, below,
+  keeps two `queued` rows from coexisting): `status` is CHECK-constrained
+  to `queued`/`running`/`done`/`failed`, the same shape `send_log` uses.
   `book_id` **cascades** on delete, unlike `send_log.book_id` — the
   contrast is deliberate: a send log entry is the record that a thing
   happened and must outlive its book, while an enrichment job is a
@@ -233,14 +236,25 @@ full design.
   generalised rather than a parallel path: both now call shared
   unexported helpers (`updateBookColumnTx`, `updateBookAuthorsTx`) that
   take a `source` parameter, with the public methods passing `"manual"`
-  and `ApplyEnrichedFields` passing a provider's name — one write path
-  writing the same three things (value, provenance, `books_fts`) is how
-  provenance stays right in both callers instead of drifting in one.
-  Authors move through the same join-table path `UpdateBookAuthors` uses,
-  their value newline-joined in the `map[MetadataField]string` both
-  `Resolve` and `ApplyEnrichedFields` share — the same convention the web
-  layer's author textarea already uses — so an author list looks the same
-  shape whether a provider or a person supplied it.
+  and `ApplyEnrichedFields` taking a `sourceName map[MetadataField]string`
+  instead of one shared `source` — `Resolve`'s own return value, passed
+  straight through, so a job that pulled fields from more than one
+  provider still records each field under whichever one actually answered
+  it, all in the one transaction `ApplyEnrichedFields` runs as. Before
+  writing each field, `fieldIsStillMissingTx` re-reads its current value
+  and provenance fresh, inside that same transaction, and skips it if it's
+  no longer missing: `Resolve`'s snapshot can be stale by the time a
+  provider has answered minutes later, and `DB.Write`'s single write
+  connection means a concurrent manual edit — filling the field, or
+  deliberately clearing it — has already committed by the time this
+  transaction's read runs, so a provider's now-stale answer can never
+  clobber it. That recheck is why provenance stays right across every
+  caller instead of drifting in one. Authors move through the same
+  join-table path `UpdateBookAuthors` uses, their value newline-joined in
+  the `map[MetadataField]string` both `Resolve` and `ApplyEnrichedFields`
+  share — the same convention the web layer's author textarea already
+  uses — so an author list looks the same shape whether a provider or a
+  person supplied it.
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
   ISBN, description, publisher, publication date) from the OPF package
   inside the zip, and extracts the declared cover image (EPUB3
@@ -388,13 +402,14 @@ full design.
   `Resolve`'s `map[storage.MetadataField]string` newline-joined, the same
   representation `ApplyEnrichedFields` (`internal/storage`) and the web
   layer's author textarea already use, so the join-table write on the way
-  in is `storage.ApplyEnrichedFields`'s job, not this package's. Because
-  `ApplyEnrichedFields` records one source per call and a single job can
-  legitimately resolve fields from more than one provider (DESIGN.md's
-  field-level merge), the worker groups a resolved result by which
-  provider actually answered each field before applying it, one call per
-  group — otherwise a second provider's answer would be recorded under
-  the first's name. The job itself failing (the book vanished between
+  in is `storage.ApplyEnrichedFields`'s job, not this package's. The
+  worker passes `Resolve`'s `values` and `sourceName` straight through to
+  one `ApplyEnrichedFields` call — DESIGN.md's field-level merge means a
+  single job can legitimately resolve fields from more than one provider,
+  and `sourceName` already carries each field's own answerer, so there is
+  no grouping to do here; keeping every resolved field in one call is also
+  what lets `ApplyEnrichedFields` apply (or skip, per its own re-check)
+  the whole set as one transaction. The job itself failing (the book vanished between
   enqueue and claim, a write failed) is a `failed` job; a provider having
   nothing to say — the ordinary case for most books against most
   providers — is not, and a job that reached at least one provider still

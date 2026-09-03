@@ -202,22 +202,97 @@ func splitAuthors(value string) []string {
 	return names
 }
 
-// ApplyEnrichedFields writes every field in values together with its
-// provenance (source — a provider's Name(), never "manual"; enrichment
-// never claims a human made the edit) and the books_fts row, all in one
-// transaction, so a book is never left half-enriched by a write that fails
-// partway through. FieldAuthors is handled through the same join-table
-// path UpdateBookAuthors uses, its value newline-separated per
+// scalarColumnName returns the books column field backs, for every field
+// except FieldAuthors (which has no column — it lives in book_authors).
+func scalarColumnName(field MetadataField) (string, bool) {
+	switch field {
+	case FieldTitle:
+		return "title", true
+	case FieldPublisher:
+		return "publisher", true
+	case FieldPublishedDate:
+		return "published_date", true
+	case FieldLanguage:
+		return "language", true
+	case FieldISBN:
+		return "isbn", true
+	case FieldDescription:
+		return "description", true
+	default:
+		return "", false
+	}
+}
+
+// fieldIsStillMissingTx re-reads field's current value and provenance and
+// applies isMissing's rule (empty and not manual) against them, fresh,
+// inside the caller's transaction. This is what makes ApplyEnrichedFields
+// safe against a book edited between when Resolve took its snapshot and
+// when this write finally runs: Resolve's "missing" set can be minutes
+// stale by the time a provider has answered, and DB.Write's single write
+// connection means any edit that landed in between already committed
+// before this transaction began — a fresh read here sees it. It must be
+// called from inside a DB.Write callback — see DB.Write's contract.
+func fieldIsStillMissingTx(ctx context.Context, tx *sql.Tx, bookID int64, field MetadataField) (bool, error) {
+	var source string
+	err := tx.QueryRowContext(ctx, `SELECT source FROM field_sources WHERE book_id = ? AND field = ?`, bookID, field).Scan(&source)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if source == "manual" {
+		return false, nil
+	}
+
+	if field == FieldAuthors {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM book_authors WHERE book_id = ?`, bookID).Scan(&count); err != nil {
+			return false, err
+		}
+		return count == 0, nil
+	}
+
+	column, ok := scalarColumnName(field)
+	if !ok {
+		return false, ErrInvalidMetadataField
+	}
+	var value string
+	if err := tx.QueryRowContext(ctx, `SELECT `+column+` FROM books WHERE id = ?`, bookID).Scan(&value); err != nil {
+		return false, err
+	}
+	return value == "", nil
+}
+
+// ApplyEnrichedFields writes every field in values together with its own
+// provenance (sourceName[field] — a provider's Name(), never "manual";
+// enrichment never claims a human made the edit) and the books_fts row,
+// all in one transaction, so a book is never left half-enriched by a write
+// that fails partway through and a job that pulled fields from more than
+// one provider records each field under the provider that actually
+// answered it — sourceName is exactly Resolve's own return value, passed
+// straight through. Before writing each field, fieldIsStillMissingTx
+// re-checks it is still empty and non-manual; a field a person filled or
+// deliberately cleared while providers were being asked is left alone
+// rather than overwritten by a now-stale answer — see its doc comment.
+// FieldAuthors is handled through the same join-table path
+// UpdateBookAuthors uses, its value newline-separated per
 // authorsSeparator; every other field is a plain column write via
 // updateBookColumnTx. Returns false for an unknown book, the same
 // absent-isn't-an-error contract UpdateBookField uses.
-func (db *DB) ApplyEnrichedFields(ctx context.Context, bookID int64, values map[MetadataField]string, source string, modifiedAt time.Time) (exists bool, err error) {
+func (db *DB) ApplyEnrichedFields(ctx context.Context, bookID int64, values map[MetadataField]string, sourceName map[MetadataField]string, modifiedAt time.Time) (exists bool, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM books WHERE id = ?)`, bookID).Scan(&exists); err != nil || !exists {
 			return err
 		}
 
 		for field, value := range values {
+			stillMissing, err := fieldIsStillMissingTx(ctx, tx, bookID, field)
+			if err != nil {
+				return err
+			}
+			if !stillMissing {
+				continue
+			}
+			source := sourceName[field]
+
 			if field == FieldAuthors {
 				if err := updateBookAuthorsTx(ctx, tx, bookID, splitAuthors(value), source, modifiedAt); err != nil {
 					return err

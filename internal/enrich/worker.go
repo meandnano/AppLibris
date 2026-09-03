@@ -170,40 +170,25 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		return
 	}
 
-	// Grouped by provider: ApplyEnrichedFields records one source for the
-	// whole call, and a job can resolve fields from more than one
-	// provider (the field-level merge Resolve documents), so a naive
-	// single call would misattribute every field but the first group's to
-	// the wrong provider.
-	for name, fields := range groupBySource(values, sourceName) {
-		if _, err := w.db.ApplyEnrichedFields(ctx, job.BookID, fields, name, time.Now()); err != nil {
+	// One call, one transaction, whatever Resolve found — sourceName
+	// carries each field's own provider, so a job that pulled fields from
+	// more than one provider still records each under the one that
+	// actually answered it, and ApplyEnrichedFields's re-check of every
+	// field against the book's *current* state (not the snapshot Resolve
+	// saw) is what keeps this safe against an edit racing the provider
+	// calls above.
+	if len(values) > 0 {
+		if _, err := w.db.ApplyEnrichedFields(ctx, job.BookID, values, sourceName, time.Now()); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			slog.Error("apply enriched fields", "job_id", job.ID, "provider", name, "error", err)
+			slog.Error("apply enriched fields", "job_id", job.ID, "error", err)
 			w.fail(ctx, job.ID, applyFailedReason)
 			return
 		}
 	}
 
 	w.done(ctx, job.ID)
-}
-
-// groupBySource splits a Resolve result by which provider answered each
-// field. values and sourceName share the same keys — Resolve builds them
-// together — so every field in values has a name here, even if that name
-// is "" (which cannot happen while providers implement Provider correctly,
-// since Name() is used as the map key regardless of what it returns).
-func groupBySource(values, sourceName map[storage.MetadataField]string) map[string]map[storage.MetadataField]string {
-	byProvider := map[string]map[storage.MetadataField]string{}
-	for field, value := range values {
-		name := sourceName[field]
-		if byProvider[name] == nil {
-			byProvider[name] = map[storage.MetadataField]string{}
-		}
-		byProvider[name][field] = value
-	}
-	return byProvider
 }
 
 // done records job's successful completion. Like internal/sender's

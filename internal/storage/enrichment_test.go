@@ -293,7 +293,12 @@ func TestApplyEnrichedFieldsWritesValueProvenanceAndFTSInOneTransaction(t *testi
 		FieldISBN:        "9780575000001",
 		FieldDescription: "A story.",
 		FieldAuthors:     "First Author\nSecond Author",
-	}, "openlibrary", when)
+	}, map[MetadataField]string{
+		FieldPublisher:   "openlibrary",
+		FieldISBN:        "openlibrary",
+		FieldDescription: "openlibrary",
+		FieldAuthors:     "openlibrary",
+	}, when)
 	if err != nil || !exists {
 		t.Fatalf("ApplyEnrichedFields = %v, %v", exists, err)
 	}
@@ -330,8 +335,11 @@ func TestApplyEnrichedFieldsWritesValueProvenanceAndFTSInOneTransaction(t *testi
 // A partial failure must not leave a partially-enriched book: one field
 // applying and a sibling failing has to roll both back, or a book ends up
 // with some fields carrying provider provenance and others not reflecting
-// what was actually saved.
-func TestApplyEnrichedFieldsRollsBackOnFailure(t *testing.T) {
+// what was actually saved. This mixes two distinct sources in the same
+// call — the shape a real multi-provider job produces — so the rollback
+// has to undo the valid field's write together with the invalid one's,
+// not just the invalid one's own no-op.
+func TestApplyEnrichedFieldsRollsBackOnFailureAcrossMixedProviders(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-10", Title: "Book", SortTitle: "book"}, nil)
@@ -342,7 +350,10 @@ func TestApplyEnrichedFieldsRollsBackOnFailure(t *testing.T) {
 	_, err = db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldPublisher:         "Gollancz",
 		MetadataField("bogus"): "x",
-	}, "openlibrary", time.Now())
+	}, map[MetadataField]string{
+		FieldPublisher:         "provider-a",
+		MetadataField("bogus"): "provider-b",
+	}, time.Now())
 	if err == nil {
 		t.Fatal("ApplyEnrichedFields with an invalid field = nil error, want one")
 	}
@@ -359,7 +370,68 @@ func TestApplyEnrichedFieldsRollsBackOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if count != 0 {
-		t.Errorf("field_sources rows for publisher = %d after a rolled-back write, want 0", count)
+		t.Errorf("field_sources rows for publisher = %d after a rolled-back write, want 0 — provider-a's field must not survive provider-b's failure", count)
+	}
+}
+
+// The regression a review comment called out: Resolve takes its snapshot
+// of what's missing before any provider is asked, and a provider can take
+// a while to answer. If a person fills or deliberately clears the same
+// field in between, ApplyEnrichedFields must not clobber it with the
+// provider's now-stale answer — the field_sources/manual guarantee has to
+// win. fieldIsStillMissingTx's fresh re-read inside the write transaction
+// is what makes this safe without any explicit locking: the manual edit
+// below stands in for one that committed while a provider call was still
+// in flight.
+func TestApplyEnrichedFieldsSkipsAFieldManuallyEditedSinceResolve(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-11", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stands in for a person editing the book while Resolve's chosen
+	// provider was still being asked about it.
+	if exists, err := db.UpdateBookField(ctx, id, FieldDescription, "Hand-written description", time.Now()); err != nil || !exists {
+		t.Fatalf("UpdateBookField: %v, %v", exists, err)
+	}
+
+	// The stale answer Resolve computed before that edit landed.
+	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+		FieldDescription: "Provider description",
+		FieldPublisher:   "Ace Books",
+	}, map[MetadataField]string{
+		FieldDescription: "openlibrary",
+		FieldPublisher:   "openlibrary",
+	}, time.Now())
+	if err != nil || !exists {
+		t.Fatalf("ApplyEnrichedFields = %v, %v", exists, err)
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Description != "Hand-written description" {
+		t.Errorf("Description = %q, want the manual edit preserved, not the provider's stale answer", book.Description)
+	}
+	if book.Publisher != "Ace Books" {
+		t.Errorf("Publisher = %q, want Ace Books — this field genuinely was still missing", book.Publisher)
+	}
+
+	var descSource, pubSource string
+	if err := db.Read().QueryRow(`SELECT source FROM field_sources WHERE book_id = ? AND field = ?`, id, FieldDescription).Scan(&descSource); err != nil {
+		t.Fatal(err)
+	}
+	if descSource != "manual" {
+		t.Errorf("description source = %q, want manual (unchanged)", descSource)
+	}
+	if err := db.Read().QueryRow(`SELECT source FROM field_sources WHERE book_id = ? AND field = ?`, id, FieldPublisher).Scan(&pubSource); err != nil {
+		t.Fatal(err)
+	}
+	if pubSource != "openlibrary" {
+		t.Errorf("publisher source = %q, want openlibrary", pubSource)
 	}
 }
 
@@ -367,7 +439,7 @@ func TestApplyEnrichedFieldsUnknownBook(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	exists, err := db.ApplyEnrichedFields(ctx, 99999, map[MetadataField]string{FieldPublisher: "Press"}, "openlibrary", time.Now())
+	exists, err := db.ApplyEnrichedFields(ctx, 99999, map[MetadataField]string{FieldPublisher: "Press"}, map[MetadataField]string{FieldPublisher: "openlibrary"}, time.Now())
 	if err != nil || exists {
 		t.Errorf("ApplyEnrichedFields for an unknown book = %v, %v; want false, nil", exists, err)
 	}
