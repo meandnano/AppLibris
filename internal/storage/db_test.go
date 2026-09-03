@@ -168,3 +168,52 @@ func TestConcurrentWritesFromDifferentGoroutinesBothSucceed(t *testing.T) {
 		}
 	}
 }
+
+// A schema_migrations row naming a file that no longer exists is ignored,
+// not an error. This is what makes deleting a migration safe: migrate
+// iterates the embedded files and skips the ones already applied, so a
+// record with nothing behind it is inert. Worth pinning, because the
+// alternative — erroring on an unrecognised version — would turn every
+// removed migration into a database that refuses to open.
+func TestOpenIgnoresAppliedMigrationsWithNoFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := db.Write(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO schema_migrations (version) VALUES ('2026090207_a_migration_that_was_deleted.sql')`)
+		return err
+	}); err != nil {
+		t.Fatalf("record a removed migration: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open with a removed migration recorded: %v", err)
+	}
+	defer reopened.Close()
+
+	// And the real migrations are still all present, so the stray row did
+	// not mask one.
+	var count int
+	if err := reopened.Read().QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		t.Fatalf("count schema_migrations: %v", err)
+	}
+	if want := countMigrationFiles(t) + 1; count != want {
+		t.Errorf("schema_migrations rows = %d, want %d", count, want)
+	}
+}
+
+func countMigrationFiles(t *testing.T) int {
+	t.Helper()
+	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatalf("read embedded migrations: %v", err)
+	}
+	return len(entries)
+}

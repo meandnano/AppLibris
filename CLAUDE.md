@@ -23,7 +23,11 @@ full design.
   `internal/storage/migrations/`, one statement per file, named
   `YYYYMMDDNN_description.sql`, applied in filename order inside individual
   transactions and tracked in a `schema_migrations` table. `storage.Open` is
-  idempotent — safe to call on every process start.
+  idempotent — safe to call on every process start. `migrate` iterates the
+  embedded *files* and skips those already recorded, so a
+  `schema_migrations` row naming a file that no longer exists is inert
+  rather than an error — which is what makes deleting a migration a safe
+  change while the project is pre-deployment.
 - Schema so far: `books` (identity and metadata; no location fields),
   `authors`, `book_authors` (join table), and `book_files` — one row per
   physical file location, keyed by `book_id`, so byte-identical content at
