@@ -419,3 +419,216 @@ func TestLatestSendForBookUnknownBookReturnsNil(t *testing.T) {
 		t.Errorf("LatestSendForBook(unknown) = %+v, want nil", got)
 	}
 }
+
+func TestListSendsSinceOrdersNewestFirstAndRespectsSinceAndLimit(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+
+	since := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	tooOld := since.Add(-time.Hour)
+	oldest := since
+	middle := since.Add(time.Hour)
+	newest := since.Add(2 * time.Hour)
+
+	if _, err := db.EnqueueSend(ctx, bookID, "Book", "excluded@kindle.com", tooOld); err != nil {
+		t.Fatalf("EnqueueSend tooOld: %v", err)
+	}
+	oldestID, err := db.EnqueueSend(ctx, bookID, "Book", "oldest@kindle.com", oldest)
+	if err != nil {
+		t.Fatalf("EnqueueSend oldest: %v", err)
+	}
+	middleID, err := db.EnqueueSend(ctx, bookID, "Book", "middle@kindle.com", middle)
+	if err != nil {
+		t.Fatalf("EnqueueSend middle: %v", err)
+	}
+	newestID, err := db.EnqueueSend(ctx, bookID, "Book", "newest@kindle.com", newest)
+	if err != nil {
+		t.Fatalf("EnqueueSend newest: %v", err)
+	}
+
+	sends, err := db.ListSendsSince(ctx, since, 500)
+	if err != nil {
+		t.Fatalf("ListSendsSince: %v", err)
+	}
+	if len(sends) != 3 {
+		t.Fatalf("ListSendsSince = %d rows, want 3 (the pre-since row excluded)", len(sends))
+	}
+	if got := []int64{sends[0].ID, sends[1].ID, sends[2].ID}; got[0] != newestID || got[1] != middleID || got[2] != oldestID {
+		t.Errorf("ListSendsSince order = %v, want newest first [%d %d %d]", got, newestID, middleID, oldestID)
+	}
+
+	capped, err := db.ListSendsSince(ctx, since, 2)
+	if err != nil {
+		t.Fatalf("ListSendsSince capped: %v", err)
+	}
+	if len(capped) != 2 {
+		t.Fatalf("ListSendsSince with limit 2 = %d rows, want 2", len(capped))
+	}
+	if capped[0].ID != newestID || capped[1].ID != middleID {
+		t.Errorf("ListSendsSince capped = %+v, want the two newest rows kept, not the oldest", capped)
+	}
+}
+
+// The regression the handoff's own "joined to books and recipients" note
+// would have caused: send_log denormalises book_title precisely so a
+// pruned book's history survives it, and a join would silently drop this
+// row.
+func TestListSendsSinceIncludesSendForADeletedBook(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Vanishing Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	sendID, err := db.EnqueueSend(ctx, bookID, "Vanishing Book", "reader@kindle.com", queuedAt)
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	f, err := db.FindFileByPath(ctx, "a.epub")
+	if err != nil || f == nil {
+		t.Fatalf("FindFileByPath: %+v, %v", f, err)
+	}
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := db.SetFilesMissing(ctx, []int64{f.ID}, old); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+	if _, _, err := db.PruneMissingFiles(ctx, []int64{f.ID}); err != nil {
+		t.Fatalf("PruneMissingFiles: %v", err)
+	}
+
+	sends, err := db.ListSendsSince(ctx, queuedAt.Add(-time.Hour), 500)
+	if err != nil {
+		t.Fatalf("ListSendsSince: %v", err)
+	}
+	if len(sends) != 1 || sends[0].ID != sendID {
+		t.Fatalf("ListSendsSince = %+v, want the one send for the now-deleted book", sends)
+	}
+	if sends[0].BookID.Valid {
+		t.Errorf("BookID = %v, want NULL after the book was pruned", sends[0].BookID)
+	}
+	if sends[0].BookTitle != "Vanishing Book" {
+		t.Errorf("BookTitle = %q, want the snapshot to survive the book's deletion", sends[0].BookTitle)
+	}
+}
+
+// Same idea, the other denormalised column: a send still names its
+// recipient after the address has been removed from recipients.
+func TestListSendsSinceIncludesSendToARemovedRecipient(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", queuedAt); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+	if _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt); err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+	if deleted, err := db.DeleteRecipient(ctx, "reader@kindle.com"); err != nil || !deleted {
+		t.Fatalf("DeleteRecipient: deleted=%v, err=%v", deleted, err)
+	}
+
+	sends, err := db.ListSendsSince(ctx, queuedAt.Add(-time.Hour), 500)
+	if err != nil {
+		t.Fatalf("ListSendsSince: %v", err)
+	}
+	if len(sends) != 1 || sends[0].RecipientAddress != "reader@kindle.com" {
+		t.Fatalf("ListSendsSince = %+v, want the send to the now-removed address to survive", sends)
+	}
+}
+
+func TestDeleteRecipient(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "Mine", now); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+
+	deleted, err := db.DeleteRecipient(ctx, "Reader@Kindle.com")
+	if err != nil {
+		t.Fatalf("DeleteRecipient: %v", err)
+	}
+	if !deleted {
+		t.Error("DeleteRecipient (different case) = false, want true — the column is COLLATE NOCASE")
+	}
+
+	recipients, err := db.ListRecipients(ctx)
+	if err != nil {
+		t.Fatalf("ListRecipients: %v", err)
+	}
+	if len(recipients) != 0 {
+		t.Errorf("ListRecipients after delete = %+v, want none", recipients)
+	}
+
+	again, err := db.DeleteRecipient(ctx, "reader@kindle.com")
+	if err != nil {
+		t.Fatalf("DeleteRecipient (already gone): %v", err)
+	}
+	if again {
+		t.Error("DeleteRecipient on an already-removed address = true, want false")
+	}
+}
+
+// The schema already guarantees this — recipient_address is a plain
+// string, not a foreign key — so this test is what stops a future "tidy up
+// orphaned history" migration from quietly reversing that decision.
+func TestDeleteRecipientLeavesSendLogUntouched(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", queuedAt); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+	sendID, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt)
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	before, err := db.ListSendsSince(ctx, queuedAt.Add(-time.Hour), 500)
+	if err != nil {
+		t.Fatalf("ListSendsSince before: %v", err)
+	}
+
+	if deleted, err := db.DeleteRecipient(ctx, "reader@kindle.com"); err != nil || !deleted {
+		t.Fatalf("DeleteRecipient: deleted=%v, err=%v", deleted, err)
+	}
+
+	after, err := db.ListSendsSince(ctx, queuedAt.Add(-time.Hour), 500)
+	if err != nil {
+		t.Fatalf("ListSendsSince after: %v", err)
+	}
+	if len(before) != len(after) {
+		t.Fatalf("send_log row count changed after DeleteRecipient: before=%d after=%d", len(before), len(after))
+	}
+
+	got, err := db.GetSend(ctx, sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.RecipientAddress != "reader@kindle.com" {
+		t.Errorf("RecipientAddress = %q, want it unchanged by DeleteRecipient", got.RecipientAddress)
+	}
+}

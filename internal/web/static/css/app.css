@@ -15,9 +15,11 @@
   --accent: #8a5a3c;
   --accent-soft: #f3ebe4;
 
-  /* Status colours: used only for the send control's state, per
-     TOKENS.md — status is the only place colour carries meaning besides
-     the accent, so nothing else in the UI may reach for these. Queued and
+  /* Status colours: used only for a send's state, per TOKENS.md — status
+     is the only place colour carries meaning besides the accent, so
+     nothing else in the UI may reach for these. Two surfaces show that
+     same state today (the book detail page's send control, and the
+     history table's status column), never a second meaning. Queued and
      sending read as --fg-muted/--accent instead; there's no separate pair
      for them. */
   --ok: #3f6b52;
@@ -134,6 +136,11 @@ a:hover {
 .masthead__link {
   color: var(--fg-faint);
   padding-bottom: 2px;
+}
+
+a.masthead__link:hover {
+  color: var(--fg);
+  text-decoration: none;
 }
 
 .masthead__link--current {
@@ -765,6 +772,47 @@ a:hover {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.send__saved {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.send__saved-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.send__saved-address {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.send__remove {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  background: transparent;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.send__remove:hover {
+  color: var(--err);
+  text-decoration: underline;
+}
+
 .send__status {
   display: flex;
   flex-direction: column;
@@ -871,6 +919,96 @@ a:hover {
 
   .detail__rail {
     max-width: 240px;
+  }
+}
+
+/* ---------- history (plate 07) ---------- */
+
+.history {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history__row {
+  display: grid;
+  grid-template-columns: minmax(0, 2.4fr) minmax(0, 1.3fr) 120px 140px;
+  align-items: baseline;
+  gap: 24px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--rule-faint);
+}
+
+.history__title-cell {
+  min-width: 0;
+}
+
+.history__title {
+  font-family: var(--serif);
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.history__title--gone {
+  color: var(--fg-faint);
+}
+
+.history__reason {
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--err);
+}
+
+.history__recipient {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.history__status {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.history__status--ok {
+  color: var(--ok);
+}
+
+.history__status--err {
+  color: var(--err);
+}
+
+.history__status--pending {
+  color: var(--accent);
+}
+
+.history__status--muted {
+  color: var(--fg-faint);
+}
+
+.history__when {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  text-align: right;
+}
+
+/* Four fixed-ish columns are the first thing a narrow viewport breaks —
+   same threshold detail's own rail/main split uses — so the row stacks
+   into a single column instead of squeezing them. */
+@media (max-width: 700px) {
+  .history__row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .history__when {
+    text-align: left;
+    color: var(--fg-muted);
   }
 }
 

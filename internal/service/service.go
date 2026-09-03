@@ -361,16 +361,23 @@ func (s *Service) LatestSend(ctx context.Context, bookID int64) (*SendState, err
 	return sendStateFrom(send), nil
 }
 
+// sendAt collapses a send's "when did this happen" to one instant —
+// finished_at once the send is terminal, queued_at otherwise — shared by
+// sendStateFrom and sendRecordFrom so the detail page's status box and the
+// history view can't drift on the same rule.
+func sendAt(send storage.Send) time.Time {
+	if send.FinishedAt.Valid {
+		return send.FinishedAt.Time
+	}
+	return send.QueuedAt
+}
+
 // sendStateFrom shapes a storage.Send into a SendState. The at-a-glance
-// timestamp collapses to one field — finished_at once a send is terminal,
-// queued_at otherwise — so the template needs no branching to pick it.
+// timestamp collapses to one field via sendAt so the template needs no
+// branching to pick it.
 func sendStateFrom(send *storage.Send) *SendState {
 	if send == nil {
 		return nil
-	}
-	at := send.QueuedAt
-	if send.FinishedAt.Valid {
-		at = send.FinishedAt.Time
 	}
 	return &SendState{
 		ID:            send.ID,
@@ -378,6 +385,89 @@ func sendStateFrom(send *storage.Send) *SendState {
 		Status:        string(send.Status),
 		Recipient:     send.RecipientAddress,
 		FailureReason: send.FailureReason,
-		At:            at,
+		At:            sendAt(*send),
 	}
+}
+
+// sendHistoryWindow is how far back the send history view looks — plate
+// 07's "last 30 days" scope line. An unbounded log is a page whose render
+// cost grows forever; a rolling window keeps it bounded without an
+// archival or pagination story this library doesn't need at DESIGN.md's
+// stated volume ("a handful of sends a week").
+const sendHistoryWindow = 30 * 24 * time.Hour
+
+// SendHistoryLimit caps how many rows the history view will ever render,
+// even inside the window. A time window alone is not a bound — nothing
+// stops a scripted burst from putting thousands of rows inside 30 days —
+// and at DESIGN.md's stated volume, 500 rows is roughly a decade of
+// ordinary use, so this should never actually bite in practice. It exists
+// so that if it ever does, SendHistory can say so instead of the page
+// silently rendering a "last 30 days" that is no longer true.
+//
+// Exported, the same reason MaxMetadataValueBytes is: internal/web spells
+// the exact number out in the scope line ("last 30 days · 500 most
+// recent") when SendHistory reports truncated, and a copy of the literal
+// there would drift from this the day either one changes.
+const SendHistoryLimit = 500
+
+// SendRecord is one row of the send history view.
+type SendRecord struct {
+	SendID        int64
+	BookID        int64 // 0 when the book has since been deleted
+	BookTitle     string
+	Recipient     string
+	Status        string
+	FailureReason string
+	At            time.Time // finished_at once terminal, else queued_at
+}
+
+// sendRecordFrom shapes one storage.Send into a SendRecord, sharing sendAt
+// with sendStateFrom so the detail page and the history view report the
+// same instant for the same send.
+func sendRecordFrom(send storage.Send) SendRecord {
+	return SendRecord{
+		SendID:        send.ID,
+		BookID:        send.BookID.Int64, // 0 when the book has since been deleted
+		BookTitle:     send.BookTitle,
+		Recipient:     send.RecipientAddress,
+		Status:        string(send.Status),
+		FailureReason: send.FailureReason,
+		At:            sendAt(send),
+	}
+}
+
+// SendHistory returns recent sends, newest first, over the last
+// sendHistoryWindow measured from the service clock — so the window is
+// testable without waiting. truncated reports whether SendHistoryLimit
+// actually cut rows out of that window: a fixed "last 30 days" line over a
+// silently truncated list would be a claim the page cannot support, and
+// this page exists to be believed, so the caller has to be able to say so.
+//
+// Asking storage for one row past the limit is what makes truncated
+// answerable without a second COUNT query: getting back SendHistoryLimit+1
+// rows proves at least one more exists in the window, at which point the
+// extra row is trimmed back off before returning.
+func (s *Service) SendHistory(ctx context.Context) (records []SendRecord, truncated bool, err error) {
+	since := s.now().Add(-sendHistoryWindow)
+	sends, err := s.db.ListSendsSince(ctx, since, SendHistoryLimit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	truncated = len(sends) > SendHistoryLimit
+	if truncated {
+		sends = sends[:SendHistoryLimit]
+	}
+
+	records = make([]SendRecord, len(sends))
+	for i, send := range sends {
+		records[i] = sendRecordFrom(send)
+	}
+	return records, truncated, nil
+}
+
+// RemoveRecipient deletes a saved address, reporting whether one went. See
+// storage.DeleteRecipient for the case-insensitive match and why send_log
+// is left untouched.
+func (s *Service) RemoveRecipient(ctx context.Context, address string) (bool, error) {
+	return s.db.DeleteRecipient(ctx, address)
 }

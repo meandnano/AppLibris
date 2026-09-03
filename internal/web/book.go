@@ -14,10 +14,10 @@ import (
 
 // bookDetailPage is the data book.html renders against. Title doubles as
 // the browser tab title (via document-head) and the on-page heading — the
-// book's own title, unlike libraryPage's constant "Library". Count and
-// CountText are the masthead's library-wide total, same contract as
-// libraryPage's — the shared site-header partial renders CountText and
-// pluralizes on Count, so both have to be here or the masthead breaks.
+// book's own title, unlike libraryPage's constant "Library". Nav and
+// HeaderNote are the masthead's shared fields — same contract as
+// libraryPage's, composed by navFor and headerBookCount so the two pages
+// can't render the masthead two different ways.
 // Locations is service.FileLocation as it comes: the template reads Path
 // and Missing under those names, so a per-page copy of the same two fields
 // would be a rename of nothing. FileSizeHuman is empty when the book has
@@ -47,8 +47,8 @@ import (
 // line.
 type bookDetailPage struct {
 	Title             string
-	Count             int
-	CountText         string
+	Nav               []navItem
+	HeaderNote        string
 	CoverURL          string
 	Format            string
 	FileSizeHuman     string
@@ -141,8 +141,8 @@ func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.B
 
 	page := bookDetailPage{
 		Title:             detail.Title,
-		Count:             count,
-		CountText:         formatCount(count),
+		Nav:               navFor("library"),
+		HeaderNote:        headerBookCount(count),
 		CoverURL:          coverURL(detail.CoverPath),
 		Format:            detail.Format,
 		FileSizeHuman:     sizeHuman,

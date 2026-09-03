@@ -934,6 +934,29 @@ func TestCoversPathTraversalDoesNotEscapeCoversDir(t *testing.T) {
 	}
 }
 
+// The library page's nav renders Library as the current item (plain text,
+// aria-current), not a link — the same rule navFor documents: there is
+// nowhere more useful to send someone already on the page a link would
+// point to.
+func TestLibraryPageNavMarksLibraryCurrent(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `class="masthead__link masthead__link--current" aria-current="page">Library<`) {
+		t.Errorf("GET / nav missing current Library item: %q", body)
+	}
+	if strings.Contains(body, `href="/">Library<`) {
+		t.Errorf("GET / renders Library as a link to itself: %q", body)
+	}
+	if !strings.Contains(body, `href="/history">History<`) {
+		t.Errorf("GET / nav missing a link to History: %q", body)
+	}
+}
+
 func TestCoverURL(t *testing.T) {
 	if got := coverURL("/data/covers/abc123.jpg"); got != "/covers/abc123.jpg" {
 		t.Errorf("coverURL = %q, want /covers/abc123.jpg", got)
