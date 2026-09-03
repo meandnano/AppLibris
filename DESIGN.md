@@ -23,11 +23,18 @@ the code far enough that reading it without a map was misleading, and the
 map has been worth keeping since. Each section below carries a **Status**
 note. This table is the summary.
 
-The gap has largely closed: the primary flow this project exists for —
-see the library, send a book to a Kindle — works end to end, and the two
-features that were blocking each other (editing waiting on provenance,
-sending waiting on the job model) have both shipped. What remains unbuilt
-is real but no longer load-bearing.
+The gap has closed. The primary flow this project exists for — see the
+library, find a book, send it to a Kindle, confirm it arrived — works end
+to end, and every feature designed below is built except one: **metadata
+provider enrichment**, which is now the only thing in this document that
+is in scope and unwritten. Everything else is either shipped or on the
+deferred list.
+
+That makes this table cheaper to read than it used to be, and it changes
+what the Status notes are for. They started as a map over a document that
+had outrun its code; what they mostly record now is where the design was
+*wrong* and what the code does instead — which is the more useful half to
+keep.
 
 Legend: **Built** — done and in use. **Partial** — some of it exists, the
 note says which. **Not built** — designed here, no code yet.
@@ -40,7 +47,7 @@ note says which. **Not built** — designed here, no code yet.
 | Scanner: startup sweep, periodic rescan, cheap check, hash identity | Built |
 | Scanner: filesystem watcher | Built — fsnotify, debounced, with startup mount and delivery checks |
 | Scanner: missing-file handling | Built — mark, grace period, then prune |
-| Duplicate detection (byte-identical) | Partial — the data model holds multiple locations; the UI doesn't flag them |
+| Duplicate detection (byte-identical) | Built — one entry per content hash, multiple locations, flagged on the grid |
 | Embedded metadata | Built — EPUB and FB2 (including `.fb2.zip`), all schema columns populated |
 | Covers | Built — extracted, stored atomically, regenerated when missing |
 | Metadata providers, chain | Not built |
@@ -49,7 +56,7 @@ note says which. **Not built** — designed here, no code yet.
 | Recipients, send log, field sources schema | Built |
 | Send to Kindle: Resend transport + size limit | Built |
 | Send to Kindle: job model, recipient picker | Built |
-| Send to Kindle: history view, recipient management | Not built |
+| Send to Kindle: history view, recipient management | Built — `/history`; a saved address can be removed from the picker |
 | Web UI: server-side templates, embedded CSS, service layer | Built |
 | Web UI: library grid | Built |
 | Web UI: htmx, search, book detail | Built |
@@ -208,14 +215,35 @@ author + ISBN comparison and should surface as a suggestion rather than an
 automatic merge, since false positives (omnibus editions, different translations)
 are annoying to undo.
 
-**Status: Partial.** The data model does this correctly — one `books` row,
-one `book_files` row per location. The UI does not flag it; the library grid
-has no multi-location indicator yet.
+**Status: Built**, for the byte-identical half this section scopes.
+One `books` row, one `book_files` row per location, and the library grid
+marks any book with more than one — a dotted-underline "2 paths" beside
+the format badge, reusing the accent affordance the detail page already
+uses for the same thing. Search results share the grid's fragment, so
+they carry the marker too. The count comes from a single `GROUP BY` over
+`book_files` rather than a query per card
+(`docs/plans/completed/2026090302-multi-location-badge.md`).
 
-The flag was deliberately blocked on scanner correctness: stale rows and
-absolute paths would have made the location count lie. Both blockers are
-now fixed — missing files are reconciled and paths are stored relative —
-so the badge is buildable whenever a UI step picks it up.
+The grid flags; it does not act. There is no merge or delete-the-other-copy
+button, and that is deliberate: the scanner owns the library directory,
+whose rule is that writes only ever create new paths. Removing a book file
+from a web request is a different feature with a different risk profile.
+Flagging is useful alone — the duplicate gets fixed in a file manager.
+
+The flag was blocked on scanner correctness rather than on effort, and
+the blockers are worth remembering because they are what keeps the count
+honest: stale rows would have made every deleted copy read as a permanent
+duplicate, and absolute paths would have flagged the *entire library*
+after a remount at a different prefix. Missing-file reconciliation and
+relative paths fixed both before this was built.
+
+**A missing location still counts.** A vanished path keeps its
+`book_files` row until `MISSING_GRACE` elapses, and the detail page lists
+it — annotated — for that whole window, so excluding it from the grid's
+count would make two screens that link directly to each other disagree
+about one book. The marker therefore persists for at most the grace
+period after a duplicate is deleted, then the row is pruned and it
+disappears on its own.
 
 ## Metadata
 
@@ -505,18 +533,46 @@ chose", and a failed send must not silently reset the default to a
 different address. Adding an address inline is secondary as intended,
 except with zero saved recipients, where it is the only thing shown.
 
-Not built: **the send history view**. The job model and log that make it
-possible are in place, and the detail page shows a book's own most recent
-send, but there is no page listing sends across the library — so "did I
-already put this on the Kindle?" is answerable per book and not yet in
-general. Recipient management is a subtler gap. "No separate
-management UI" above is a decision and still the right one — but its
-consequence was not thought through: a mistyped address, once saved, is
-permanent and sits in the picker forever, because saving happens as a side
-effect of sending and nothing can remove a row. That is a defect of this
-design rather than of its implementation, and the fix is probably a delete
-affordance on the picker rather than the management screen this section
-rules out.
+The **history view** at `/history` answers the question this section says
+the log exists for — "did I already put this on the Kindle?" — across the
+library rather than per book. It reads `send_log`'s denormalised
+`book_title` and `recipient_address` directly instead of joining `books`
+and `recipients`, which is the whole reason those columns are
+denormalised: a book the scanner has since pruned, or an address since
+removed, must still appear in its own history, and a join would silently
+drop exactly those rows.
+
+Its window is a trailing 30 days capped at 500 rows, and **the scope line
+names the cap when it bites** ("last 30 days · 500 most recent"). That is
+not decoration. This page has one job, and its two wrong answers are not
+symmetric: a false "yes" costs a moment's doubt, while a false "no" causes
+a duplicate delivery — the exact failure the job model contorts itself to
+avoid when it fails interrupted jobs rather than requeueing them. A fixed
+"last 30 days" over a silently truncated list would reintroduce in the UI
+what the queue was designed to prevent. At the volumes above, 500 rows is
+roughly a decade of sends, so the second form should never appear; it
+exists so that if the assumption is ever wrong, the page degrades into
+telling the truth rather than into confidently omitting rows — and doubles
+as the signal for when paging or filtering becomes worth building.
+
+**Recipient management** was a subtler gap, and the resolution is worth
+recording because the defect was in this design rather than in its
+implementation. "No separate management UI" above is a decision and
+remains the right one — but its consequence had not been thought through:
+a mistyped address, once saved, was permanent and sat in the picker
+forever, because saving happens as a side effect of sending and nothing
+could remove a row. The fix is a remove control on the picker itself, not
+the management screen this section rules out — so the decision stands and
+its consequence is repaired.
+
+There is deliberately no *edit*: removing a wrong address and adding the
+right one is the same number of actions, and needs no second validation
+path and no question about history rows written under the old spelling.
+Removal never touches `send_log`, which the schema guarantees rather than
+the code remembering to — `recipient_address` is a plain string, not a
+foreign key, precisely so that forgetting an address cannot erase the
+record that something was sent to it
+(`docs/plans/completed/2026090303-send-history-and-recipient-removal.md`).
 
 The packaging blocker is gone: the image moved from `scratch` to
 `distroless/static`, which carries the CA bundle the HTTPS call to Resend
@@ -537,8 +593,9 @@ htmx is used only where dynamism is actually needed:
 **Status: Built.** All three htmx interactions this section names now
 exist.
 
-Built: `internal/web` serves the library grid at `GET /` and a book
-detail page at `GET /books/{id}`, with templates, CSS and a theme script
+Built: `internal/web` serves the library grid at `GET /`, a book detail
+page at `GET /books/{id}` and the send history at `GET /history`, with
+templates, CSS and a theme script
 embedded via `go:embed` and no build step, translated from the mockups in
 `UI.md`/`ui-handoff/`. Cover thumbnails are served from the covers
 directory; both the covers and static mounts refuse to generate directory
@@ -580,10 +637,17 @@ Two corrections to what this section used to claim:
   trades an accurate status code for a working interaction, and it is
   worth stating rather than rediscovering.
 
-The multi-location badge on the grid is still unbuilt, though the detail
-page shows a book's locations directly now
-(`docs/plans/completed/2026090107-book-detail-page.md`), which delivers
-most of that item's value anyway.
+The multi-location badge is built, so the grid and the detail page now
+say the same thing at two altitudes: the card marks that a book sits at
+more than one path, and the detail page enumerates which
+(`docs/plans/completed/2026090107-book-detail-page.md`,
+`docs/plans/completed/2026090302-multi-location-badge.md`).
+
+The masthead carries a nav, which it did not need while there was one
+page. Both its items — the current-page marker and the right-hand note —
+are passed in by the handler rather than decided in the template, so
+`/history` can put its scope line where the library puts its book count
+without the partial branching on which page is rendering it.
 
 ### Layering for a future API
 
@@ -600,11 +664,19 @@ described, and the handlers are thin over it. The surface has grown with
 each feature rather than the handlers growing logic: `ListBooks`,
 `SearchBooks`, `CountBooks` and `GetBook` for browsing;
 `UpdateBookMetadata` for editing, which owns the validation and
-normalisation rules; and `Recipients`, `QueueSend`, `SendState` and
-`LatestSend` for sending, where `QueueSend` owns address parsing and the
-enqueue. The `/api/v1` transport itself remains deferred — but the layer
-it would sit on has now been exercised by two features rather than
-asserted by one.
+normalisation rules; and `Recipients`, `QueueSend`, `SendState`,
+`LatestSend`, `SendHistory` and `RemoveRecipient` for sending, where
+`QueueSend` owns address parsing and the enqueue and `SendHistory` owns
+the window and whether it truncated. The `/api/v1` transport itself
+remains deferred — but the layer it would sit on has now been exercised
+by every feature since it was built rather than asserted by one.
+
+The split has held under a case that would have exposed it: the history
+window is computed from the service's own clock, so the rule about what
+"recent" means lives beside the query, while rendering a timestamp as
+"yesterday, 22:41" stayed in the transport as a pure function of two
+times. Presentation did not migrate into the service to reach a clock,
+and no clock was injected into the transport to keep it testable.
 
 ## Authentication
 
@@ -628,12 +700,12 @@ browser breaks it: any page the user visits can issue a form POST to a
 LAN or localhost address its author cannot reach, with no CORS preflight
 in the way. With no login, network position is the only thing standing
 between the collection and everyone else, and a send POST carries the
-destination address in its body. Every state-changing route — the send and
-the metadata edits — therefore rejects a request the browser itself
-reports as cross-site, via `Sec-Fetch-Site`. A request carrying no fetch
-metadata is allowed through: a client that sends none is not the
-ambient-authority vector this guards, and failing closed there would cost
-the UI for no security gain.
+destination address in its body. Every state-changing route — the send,
+the metadata edits, and removing a recipient — therefore rejects a request
+the browser itself reports as cross-site, via `Sec-Fetch-Site`. A request
+carrying no fetch metadata is allowed through: a client that sends none
+is not the ambient-authority vector this guards, and failing closed there
+would cost the UI for no security gain.
 
 This is not authentication and does not weaken the case for having none.
 It closes the one hole that "internal network only" does not actually
@@ -652,13 +724,13 @@ cover.
 
 Worth keeping distinct from the rest of this document: *deferred* is not the
 same as *not yet built*. Everything in this list was consciously ruled out
-of scope. Provider enrichment, the send history view and the
-multi-location badge are all unbuilt but **not** deferred — they are in
-scope and simply haven't been reached. Only the six items above are
-decisions rather than backlog.
+of scope. Only the six items above are decisions rather than backlog.
 
-The send job model and the filesystem watcher have both left that "in
-scope, not reached" set: they are built. Provider enrichment is now the
-largest thing still designed here and absent from the code, and it is the
-one with a prerequisite already waiting on it — the provenance rows being
-written today exist for it.
+That distinction now costs almost nothing to maintain, because the "in
+scope, not reached" set has emptied out to one item. The send job model,
+the filesystem watcher, the send history view and the multi-location
+badge have all left it. **Provider enrichment is what remains** — the
+largest thing still designed here and absent from the code, and the one
+with a prerequisite already waiting on it: the `field_sources` rows being
+written on every create and edit today exist for nothing else. Everything
+else designed in this document is either built or on the list above.
