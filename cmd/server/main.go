@@ -285,6 +285,14 @@ func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir str
 		case <-ctx.Done():
 			return
 		}
+		// Both the trigger and ctx.Done() can be ready at once — the
+		// trigger holds a poke until it is taken, and shutdown cancels the
+		// context under it — and select picks between ready cases at
+		// random. Without this, half of those shutdowns sweep against a
+		// dead context and log the resulting failure as an error.
+		if ctx.Err() != nil {
+			return
+		}
 		runScan(ctx, db, libraryDir, coversDir, missingGrace)
 		if watcher != nil {
 			// After the sweep, so a directory the sweep just discovered is

@@ -124,6 +124,15 @@ func (w *Watcher) Refresh() {
 			return nil
 		}
 		if err := w.fsw.Add(path); err != nil {
+			if errors.Is(err, fsnotify.ErrClosed) {
+				// Shutdown cancels the watcher and the scan loop together,
+				// and Run closes the handle on its way out — so a sweep
+				// still finishing can land here with nothing left to
+				// register. A closed watcher reports an empty WatchList,
+				// which would otherwise make this retry every directory in
+				// the tree and warn about each one.
+				return fs.SkipAll
+			}
 			// Most plausibly the inotify watch limit on a deep tree. A
 			// missing watch costs latency in that subtree, not
 			// correctness, so keep going.

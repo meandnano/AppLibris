@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"library/internal/storage"
 )
 
 // A serving failure (an occupied address, here) must still cancel and wait
@@ -155,5 +160,43 @@ func TestRunRejectsBadWatchConfiguration(t *testing.T) {
 				t.Errorf("run with %s=%q returned no error", tc.key, tc.value)
 			}
 		})
+	}
+}
+
+// The watcher's trigger has capacity 1 and holds a poke until the scan loop
+// takes it, so at shutdown both that channel and ctx.Done() are ready at
+// once — and Go's select picks between ready cases at random. Falling
+// through to the sweep on the trigger branch runs Scan against a dead
+// context, which fails and logs at ERROR: a clean shutdown that looks like
+// a fault, roughly half the time. Before the watcher this was near
+// impossible, since only the 15-minute ticker could be ready.
+func TestPeriodicScanDoesNotSweepOnACancelledContext(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	libraryDir, coversDir := t.TempDir(), t.TempDir()
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	// One run is a coin flip; fifty makes missing the bug essentially
+	// impossible.
+	for range 50 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		trigger := make(chan struct{}, 1)
+		trigger <- struct{}{} // a poke still pending, exactly as at shutdown
+
+		periodicScan(ctx, db, libraryDir, coversDir, time.Hour, time.Hour, trigger, nil)
+	}
+
+	if got := logs.String(); strings.Contains(got, "level=ERROR") {
+		t.Errorf("a cancelled shutdown swept anyway and logged an error:\n%s", got)
 	}
 }

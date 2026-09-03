@@ -1,8 +1,10 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -368,4 +370,44 @@ func TestNewWatcherRejectsAMissingDirectory(t *testing.T) {
 	if _, err := NewWatcher(filepath.Join(t.TempDir(), "nope"), testSettle, make(chan struct{}, 1)); err == nil {
 		t.Error("NewWatcher on a missing directory returned no error")
 	}
+}
+
+// Shutdown cancels the watcher and the scan loop together. Run closes the
+// fsnotify handle on its way out, but a sweep that was still finishing then
+// calls Refresh — and a closed watcher reports an empty WatchList, so a
+// naive Refresh tries to re-add every directory in the tree and warns once
+// per failure. Shutdown should be quiet.
+func TestWatcherRefreshIsQuietOnceTheWatcherIsClosed(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"one", "two", "three"} {
+		if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+	}
+
+	w, err := NewWatcher(dir, testSettle, make(chan struct{}, 1))
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	// What Run's deferred Close does when its context ends.
+	if err := w.fsw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	logs := captureLogs(t)
+	w.Refresh()
+
+	if got := logs.String(); strings.Contains(got, "level=WARN") {
+		t.Errorf("Refresh on a closed watcher logged warnings:\n%s", got)
+	}
+}
+
+// captureLogs redirects the default logger for the duration of a test.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buf
 }
