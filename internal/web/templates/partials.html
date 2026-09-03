@@ -24,11 +24,17 @@
   <div class="masthead__left">
     <span class="masthead__brand">Bookshelf</span>
     <nav class="masthead__nav">
-      <span class="masthead__link masthead__link--current" aria-current="page">Library</span>
+      {{range .Nav}}
+      {{if .Current}}
+      <span class="masthead__link masthead__link--current" aria-current="page">{{.Label}}</span>
+      {{else}}
+      <a class="masthead__link" href="{{.URL}}">{{.Label}}</a>
+      {{end}}
+      {{end}}
     </nav>
   </div>
   <div class="masthead__right">
-    <span class="masthead__count">{{.CountText}} {{if eq .Count 1}}book{{else}}books{{end}}</span>
+    <span class="masthead__count">{{.HeaderNote}}</span>
     <button class="masthead__theme" type="button" data-theme-toggle>Dark mode</button>
   </div>
 </header>
@@ -185,12 +191,38 @@
     {{if not .SendPending}}
     <details class="send__add"{{if or (not .Recipients) .SendError}} open{{end}}>
       <summary>+ add address</summary>
+      {{/* A saved address can only be removed here, not from the picker
+           above: an <option> cannot hold a button, so a second listing —
+           this one button-capable — is what a delete affordance on a
+           <select> actually turns into. Each button submits the sibling
+           recipient-form below via its form attribute, since a <form>
+           cannot nest inside this one. */}}
+      {{if .Recipients}}
+      <ul class="send__saved">
+        {{range .Recipients}}
+        <li class="send__saved-row">
+          <span class="send__saved-address">{{if .Label}}{{.Label}} — {{end}}{{.Address}}</span>
+          <button class="send__remove" type="submit" form="recipient-form" name="address" value="{{.Address}}" aria-label="Remove {{.Address}}">remove</button>
+        </li>
+        {{end}}
+      </ul>
+      {{end}}
       <div class="send__add-row">
         <input class="send__add-input" type="email" name="new_address" value="{{.SendNewAddress}}" placeholder="name@kindle.com">
         <input class="send__add-input" type="text" name="new_label" value="{{.SendNewLabel}}" placeholder="label (optional)">
       </div>
     </details>
     {{end}}
+  </form>
+
+  {{/* Sibling, not nested — HTML forbids a <form> inside a <form>, and a
+       remove control living inside send__form would submit a send instead
+       of a removal. book rides along as a hidden field so the response
+       can re-render this book's whole send control: removing an address
+       changes the picker above, so a bare confirmation would leave it
+       stale. */}}
+  <form id="recipient-form" method="post" action="/recipients/remove" hx-post="/recipients/remove" hx-target="#send" hx-swap="outerHTML">
+    <input type="hidden" name="book" value="{{.ID}}">
   </form>
 
   {{if .Send}}

@@ -29,11 +29,13 @@ import (
 func Routes(svc *service.Service, coversDir string, sendEnabled bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", libraryHandler(svc))
+	mux.HandleFunc("GET /history", historyHandler(svc))
 	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled))
 	mux.HandleFunc("GET /books/{id}/metadata/{field}", metadataHandler(svc, sendEnabled))
 	mux.HandleFunc("POST /books/{id}/metadata/{field}", sameSiteOnly(metadataHandler(svc, sendEnabled)))
 	mux.HandleFunc("POST /books/{id}/send", sameSiteOnly(sendHandler(svc, sendEnabled)))
 	mux.HandleFunc("GET /books/{id}/sends/{sendID}", sendStatusHandler(svc, sendEnabled))
+	mux.HandleFunc("POST /recipients/remove", sameSiteOnly(removeRecipientHandler(svc, sendEnabled)))
 	mux.Handle("GET /static/", staticHandler())
 	mux.Handle("GET /covers/", coversHandler(coversDir))
 	return mux
@@ -93,13 +95,43 @@ type bookCard struct {
 	PathsLabel string
 }
 
+// navItem is one entry in the masthead's nav — Library and History today.
+// Current is rendered as plain text rather than a link: there is nowhere
+// more useful to send someone already on the page a link would point to.
+type navItem struct {
+	Label   string
+	URL     string
+	Current bool
+}
+
+// navFor builds the masthead's nav for the page named current ("library"
+// or "history"), so every page composes it the same way and the two links
+// can't drift out of sync with each other. The book detail page passes
+// "library": it has no nav entry of its own, and highlighting Library
+// there matches what the single hardcoded nav item did for every page
+// before History existed.
+func navFor(current string) []navItem {
+	return []navItem{
+		{Label: "Library", URL: "/", Current: current == "library"},
+		{Label: "History", URL: "/history", Current: current == "history"},
+	}
+}
+
+// headerBookCount composes the masthead's book-count note ("1,284 books"),
+// shared by the library and book detail pages. Replaces the template's own
+// pluralization branch — the last piece of formatting logic site-header
+// held, and exactly what the searchSummary convention exists to move out
+// of templates.
+func headerBookCount(n int) string {
+	noun := "books"
+	if n == 1 {
+		noun = "book"
+	}
+	return formatCount(n) + " " + noun
+}
+
 // libraryPage is the data library.html (and its book-grid fragment) render
-// against. Count is always the library's total size, never the
-// search-filtered count: the masthead shows it, and so does the results
-// line inside the fragment ("4 of 1,284"), which is why the fragment pays
-// for it too. CountText is that number with thousands grouped, since the
-// mockups render it that way in both places and one screen must not show
-// the same number two ways; Count itself stays around for pluralization.
+// against.
 //
 // SearchSummary is the whole results line, composed in the handler so the
 // template stays logic-free. Query and Searching distinguish "browsing the
@@ -111,8 +143,8 @@ type bookCard struct {
 // invites typing would be a lie.
 type libraryPage struct {
 	Title         string
-	Count         int
-	CountText     string
+	Nav           []navItem
+	HeaderNote    string
 	Books         []bookCard
 	Query         string
 	Searching     bool
@@ -189,8 +221,8 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 
 		page := libraryPage{
 			Title:         "Library",
-			Count:         total,
-			CountText:     formatCount(total),
+			Nav:           navFor("library"),
+			HeaderNote:    headerBookCount(total),
 			Books:         cards,
 			Query:         query,
 			Searching:     result.Searched,

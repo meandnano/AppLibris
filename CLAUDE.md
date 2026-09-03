@@ -173,7 +173,22 @@ full design.
   requeueing risks a silent duplicate delivery, while failing surfaces the
   ambiguity and leaves retry a click away. `LatestSendForBook` is the
   detail page's initial-render lookup (`ORDER BY queued_at DESC, id DESC
-  LIMIT 1`).
+  LIMIT 1`). `ListSendsSince` is the send history view's data: sends queued
+  at or after a given time, newest first (`queued_at DESC, id DESC`, the
+  same tie-break `LatestSendForBook` uses), capped at a row limit — indexed
+  by `send_log_queued_at`, since neither existing `send_log` index serves
+  an unfiltered `ORDER BY queued_at DESC`. It reads `book_title` and
+  `recipient_address` straight off `send_log` rather than joining `books`
+  or `recipients`: that denormalisation exists precisely so a pruned
+  book's or a removed recipient's send still appears in its own history,
+  and a join would silently drop exactly those rows — read the columns,
+  do not join. `DeleteRecipient` removes a saved address, matching
+  `COLLATE NOCASE` the same way `CreateRecipient` is idempotent across
+  case, and returns `false` for an unknown address rather than an error —
+  a double-submitted remove is a slip, not a failure. It never touches
+  `send_log`: `recipient_address` being a plain string rather than a
+  foreign key is what makes that a schema guarantee rather than a rule
+  this method has to remember to keep.
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
   ISBN, description, publisher, publication date) from the OPF package
   inside the zip, and extracts the declared cover image (EPUB3
@@ -508,7 +523,24 @@ full design.
   `queued_at`) so the template branches on one shape regardless of which
   produced it, mirroring `BookDetail.FileSize`'s single-source-of-truth
   approach; `SendState`, `LatestSend` and `QueueSend`'s return value all
-  produce it through the same unexported `sendStateFrom` shaping.
+  produce it through the same unexported `sendStateFrom` shaping, which
+  itself calls the package-private `sendAt` for that collapse — `SendRecord`
+  (the history view's row) shares it via `sendRecordFrom`, so the detail
+  page's status box and the history table can never report a different
+  instant for the same send. `SendHistory` returns recent `SendRecord`s,
+  newest first, over the trailing `sendHistoryWindow` (30 days) measured
+  from `Service.now` — so the window is testable without waiting — capped
+  at `SendHistoryLimit` (500, exported for the same reason
+  `MaxMetadataValueBytes` is: `internal/web` spells the number out in the
+  scope line when truncation happens, and a copy of the literal there
+  would drift). `truncated` reports whether the cap actually cut rows out
+  of the window, found by asking storage for one row past the limit rather
+  than a second `COUNT` query — getting `SendHistoryLimit+1` rows back
+  proves at least one more exists, at which point the extra row is trimmed
+  off before returning. A fixed "last 30 days" line over a silently
+  truncated list would be a claim the page cannot support, and the history
+  view exists to be believed. `RemoveRecipient` is a thin pass-through to
+  `storage.DeleteRecipient`.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
@@ -740,6 +772,75 @@ full design.
   none (curl, a script, a browser predating the header) isn't the
   ambient-authority vector this guards, and failing closed there would
   cost the UI for no security gain.
+- The masthead's `site-header` partial takes two fields shared by every
+  full-page render — `Nav` (`[]navItem`, composed by the package-private
+  `navFor`) and `HeaderNote` (a plain string) — replacing what used to be
+  a hardcoded single nav item and a `Count`/`CountText` pair the template
+  pluralized itself. `libraryPage` and `bookDetailPage` lost `Count` and
+  `CountText` entirely once `HeaderNote` replaced both uses — a field
+  nothing reads is how the next person learns to distrust the struct.
+  `headerBookCount` composes the library-total note ("1,284 books") both
+  pages share; the history page (below) composes its own scope line
+  instead. `navFor(current)` builds both nav entries every time, marking
+  one current — rendered as plain text, not a link, since there is
+  nowhere more useful to send someone already on the page a link would
+  point to — so Library and History can never drift into describing each
+  other inconsistently. The book detail page passes `navFor("library")`:
+  it has no nav entry of its own, so highlighting Library there matches
+  what the single hardcoded item did for every page before History
+  existed.
+- `GET /history` (`internal/web/history.go`, `history.html`) is the send
+  history view DESIGN.md's send-to-Kindle section was missing: every send
+  across the library over `service.SendHistory`'s trailing window, newest
+  first, answering "did I already put this on the Kindle?" for the whole
+  library rather than one book at a time. It renders even when
+  `sendEnabled` is false — a log, not an action, so a library that used to
+  send but no longer has a key configured still has history worth
+  reading. Each `historyRow` is composed entirely in the handler, the
+  `searchSummary` convention: `Status`/`StatusKind` come from
+  `historyStatus`, which collapses `queued` and `sending` into one
+  "Sending" label and `pending` kind — the same collapse the send control
+  already makes, since the UI has no separate treatment for the gap
+  between enqueue and claim, deliberately departing from plate 07's own
+  mock (which draws a distinct muted "Queued") because two screens naming
+  the same state differently would be worse than either alone.
+  `BookURL` is empty for a send whose book has since been pruned, which
+  the template renders unlinked rather than pointing nowhere.
+  `historyScopeLine` mirrors the masthead's `HeaderNote` contract: "last
+  30 days" ordinarily, or naming `service.SendHistoryLimit` once
+  `SendHistory` reports the cap actually truncated the window.
+  `relativeTime(t, now)` is the plate's timestamp format ("today, 14:02",
+  "yesterday, 22:41", "28 Aug, 09:15") as a pure function — `now` passed
+  in rather than read from the clock, so every case is a table test with
+  no sleeping. It converts both times to the server's local zone (the
+  only zone the server knows; the browser's is not available to a
+  server-rendered page without JavaScript) and compares calendar dates via
+  `AddDate`, never a raw `time.Sub`: a send at 23:50 is "yesterday" twenty
+  minutes later at 00:10, which a duration-based `< 24h` comparison gets
+  wrong exactly at that boundary.
+- Removing a saved recipient is `POST /recipients/remove`
+  (`internal/web/send.go`), wrapped in `sameSiteOnly` like every other
+  state-changing route, and reachable only from the send control's
+  address list — DESIGN.md's "no separate management screen" decision
+  stands; this is the delete affordance that decision's own follow-up
+  identified as missing, added where the addresses already are rather
+  than a new page. The markup problem it solves: an `<option>` cannot
+  hold a button, so the saved-address list a `<select>` alone cannot
+  express instead lives in the send form's `+ add address` `<details>`,
+  one row per address with a "remove" button — and that button cannot be
+  a child of `send__form`, since submitting it must never also submit a
+  send and HTML forbids nesting a `<form>` inside another besides. The
+  fix is a sibling `<form id="recipient-form">`, submitted via each
+  button's `form="recipient-form"` attribute (valid anywhere in the
+  document, not just inside the form it names) — plain HTML, no JS, no
+  duplicated markup — carrying the book id as a hidden field so the
+  response can re-render that book's whole send control rather than a
+  bare confirmation, since removing an address changes the picker too.
+  The handler mirrors `sendHandler`'s progressive-enhancement split: an
+  `HX-Request` gets the swapped-in control, everyone else a `303` back to
+  the book page, which is what the form's own `action` is for. Removing
+  an address that doesn't exist (a double-submit, two open tabs) 200s
+  like any other case — a slip, not an error.
 - `cmd/server` — entrypoint. `main` sets up logging and a
   `signal.NotifyContext` (SIGINT/SIGTERM) and calls `run(ctx) error`, so
   every failure path has one exit point (`slog.Error` + `os.Exit(1)`).

@@ -45,7 +45,14 @@ type Send struct {
 
 const sendColumns = `id, book_id, book_title, recipient_address, status, provider_message_id, failure_reason, queued_at, started_at, finished_at`
 
-func scanSend(row *sql.Row) (*Send, error) {
+// rowScanner is the subset of *sql.Row and *sql.Rows that scanSend needs,
+// so the same column-order logic serves both a single-row lookup and a
+// multi-row list.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSend(row rowScanner) (*Send, error) {
 	var s Send
 	var status string
 	err := row.Scan(&s.ID, &s.BookID, &s.BookTitle, &s.RecipientAddress, &status, &s.ProviderMessageID,
@@ -112,6 +119,30 @@ func (db *DB) CreateRecipient(ctx context.Context, address, label string, now ti
 		return err
 	})
 	return id, err
+}
+
+// DeleteRecipient removes a saved address, matching case-insensitively —
+// the column is COLLATE NOCASE, the same arrangement that makes
+// CreateRecipient idempotent, so removing "Mike@Kindle.com" removes the row
+// saved as "mike@kindle.com". Returns false when no such address exists,
+// the same absent-isn't-an-error contract the finders use: a double-
+// submitted remove (two tabs, a slow network retry) is a slip, not a
+// failure.
+//
+// send_log is deliberately untouched. recipient_address there is a plain
+// string, not a foreign key, precisely so removing a recipient can never
+// erase or rewrite the record that something was once sent to it.
+func (db *DB) DeleteRecipient(ctx context.Context, address string) (deleted bool, err error) {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM recipients WHERE address = ?`, address)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		deleted = affected > 0
+		return err
+	})
+	return deleted, err
 }
 
 // EnqueueSend records a new queued send and bumps the recipient's
@@ -232,4 +263,39 @@ func (db *DB) LatestSendForBook(ctx context.Context, bookID int64) (*Send, error
 	row := db.read.QueryRowContext(ctx, `
 		SELECT `+sendColumns+` FROM send_log WHERE book_id = ? ORDER BY queued_at DESC, id DESC LIMIT 1`, bookID)
 	return scanSend(row)
+}
+
+// ListSendsSince returns sends queued at or after since, newest first,
+// capped at limit rows — the send history view's data. Newest-first with a
+// cap means the cap drops the oldest rows in the window, which is the
+// right end to lose: a viewer scanning "did I already send this?" cares
+// about recent activity, not the tail. id DESC breaks a same-second tie
+// the same way LatestSendForBook already does, so two sends queued in the
+// same second order consistently between the two screens.
+//
+// It reads book_title and recipient_address straight off send_log rather
+// than joining books or recipients — that is the whole point of
+// denormalising them there. A book the scanner has since pruned, or an
+// address since removed, must still appear in its own history, and a join
+// would silently drop exactly those rows. Read the columns; do not join.
+func (db *DB) ListSendsSince(ctx context.Context, since time.Time, limit int) ([]Send, error) {
+	rows, err := db.read.QueryContext(ctx, `
+		SELECT `+sendColumns+` FROM send_log
+		WHERE queued_at >= ?
+		ORDER BY queued_at DESC, id DESC
+		LIMIT ?`, formatTime(since), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sends []Send
+	for rows.Next() {
+		send, err := scanSend(rows)
+		if err != nil {
+			return nil, err
+		}
+		sends = append(sends, *send)
+	}
+	return sends, rows.Err()
 }

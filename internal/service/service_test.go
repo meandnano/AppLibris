@@ -469,3 +469,180 @@ func TestLatestSendUnsentBookReturnsNilNil(t *testing.T) {
 		t.Errorf("LatestSend(never sent) = %+v, want nil", latest)
 	}
 }
+
+// enqueueSendsAt queues n sends for a fresh book, one second apart ending
+// at now, so callers get a run of distinct, ordered timestamps without
+// caring about the exact values.
+func enqueueSendsAt(t *testing.T, db *storage.DB, now time.Time, n int) {
+	t.Helper()
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-" + itoa(int(now.UnixNano())), Title: "Book", SortTitle: "Book", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		at := now.Add(-time.Duration(n-1-i) * time.Second)
+		if _, err := db.EnqueueSend(ctx, id, "Book", "reader@kindle.com", at); err != nil {
+			t.Fatalf("EnqueueSend %d: %v", i, err)
+		}
+	}
+}
+
+func TestSendHistoryReportsTruncatedOnlyWhenCapBites(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	t.Run("cap-1 rows", func(t *testing.T) {
+		db := openTestDB(t)
+		svc := New(db)
+		svc.now = func() time.Time { return now }
+		enqueueSendsAt(t, db, now, SendHistoryLimit-1)
+
+		records, truncated, err := svc.SendHistory(context.Background())
+		if err != nil {
+			t.Fatalf("SendHistory: %v", err)
+		}
+		if truncated {
+			t.Error("truncated = true with cap-1 rows, want false")
+		}
+		if len(records) != SendHistoryLimit-1 {
+			t.Errorf("len(records) = %d, want %d", len(records), SendHistoryLimit-1)
+		}
+	})
+
+	t.Run("cap+1 rows", func(t *testing.T) {
+		db := openTestDB(t)
+		svc := New(db)
+		svc.now = func() time.Time { return now }
+		enqueueSendsAt(t, db, now, SendHistoryLimit+1)
+
+		records, truncated, err := svc.SendHistory(context.Background())
+		if err != nil {
+			t.Fatalf("SendHistory: %v", err)
+		}
+		if !truncated {
+			t.Error("truncated = false with cap+1 rows, want true")
+		}
+		if len(records) != SendHistoryLimit {
+			t.Errorf("len(records) = %d, want the cap %d", len(records), SendHistoryLimit)
+		}
+	})
+}
+
+func TestSendHistoryWindowIsMeasuredFromTheServiceClock(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "Book", SortTitle: "Book", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	tooOld := now.Add(-31 * 24 * time.Hour)
+	inWindow := now.Add(-29 * 24 * time.Hour)
+	if _, err := db.EnqueueSend(ctx, id, "Book", "excluded@kindle.com", tooOld); err != nil {
+		t.Fatalf("EnqueueSend tooOld: %v", err)
+	}
+	if _, err := db.EnqueueSend(ctx, id, "Book", "included@kindle.com", inWindow); err != nil {
+		t.Fatalf("EnqueueSend inWindow: %v", err)
+	}
+
+	records, _, err := svc.SendHistory(ctx)
+	if err != nil {
+		t.Fatalf("SendHistory: %v", err)
+	}
+	if len(records) != 1 || records[0].Recipient != "included@kindle.com" {
+		t.Fatalf("SendHistory = %+v, want only the send queued 29 days ago", records)
+	}
+}
+
+// The same assertion SendState already carries, pinned here too because
+// sendStateFrom and sendRecordFrom now share sendAt — a regression to
+// either would break only one of the two screens.
+func TestSendHistoryAtIsFinishedAtForTerminalAndQueuedAtForPending(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "Pending Book", SortTitle: "Pending Book", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook pending: %v", err)
+	}
+	queuedAt := now.Add(-time.Hour)
+	if _, err := db.EnqueueSend(ctx, id, "Pending Book", "reader@kindle.com", queuedAt); err != nil {
+		t.Fatalf("EnqueueSend pending: %v", err)
+	}
+
+	deliveredID, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-2", Title: "Delivered Book", SortTitle: "Delivered Book", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook delivered: %v", err)
+	}
+	deliveredQueuedAt := now.Add(-2 * time.Hour)
+	if _, err := db.EnqueueSend(ctx, deliveredID, "Delivered Book", "reader@kindle.com", deliveredQueuedAt); err != nil {
+		t.Fatalf("EnqueueSend delivered: %v", err)
+	}
+	claimed, err := db.ClaimNextSend(ctx, deliveredQueuedAt.Add(time.Minute))
+	if err != nil || claimed == nil {
+		t.Fatalf("ClaimNextSend: %+v, %v", claimed, err)
+	}
+	finishedAt := now.Add(-time.Minute)
+	if err := db.MarkSendDelivered(ctx, claimed.ID, "msg-1", finishedAt); err != nil {
+		t.Fatalf("MarkSendDelivered: %v", err)
+	}
+
+	records, _, err := svc.SendHistory(ctx)
+	if err != nil {
+		t.Fatalf("SendHistory: %v", err)
+	}
+	byTitle := make(map[string]SendRecord, len(records))
+	for _, r := range records {
+		byTitle[r.BookTitle] = r
+	}
+
+	pending, ok := byTitle["Pending Book"]
+	if !ok || !pending.At.Equal(queuedAt) {
+		t.Errorf("pending record At = %+v, want queued_at %v", pending, queuedAt)
+	}
+	delivered, ok := byTitle["Delivered Book"]
+	if !ok || !delivered.At.Equal(finishedAt) {
+		t.Errorf("delivered record At = %+v, want finished_at %v", delivered, finishedAt)
+	}
+}
+
+func TestRemoveRecipient(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "Mine", time.Now()); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+
+	removed, err := svc.RemoveRecipient(ctx, "reader@kindle.com")
+	if err != nil {
+		t.Fatalf("RemoveRecipient: %v", err)
+	}
+	if !removed {
+		t.Error("RemoveRecipient = false, want true")
+	}
+
+	recipients, err := svc.Recipients(ctx)
+	if err != nil {
+		t.Fatalf("Recipients: %v", err)
+	}
+	if len(recipients) != 0 {
+		t.Errorf("Recipients after removal = %+v, want none", recipients)
+	}
+
+	again, err := svc.RemoveRecipient(ctx, "reader@kindle.com")
+	if err != nil {
+		t.Fatalf("RemoveRecipient (already gone): %v", err)
+	}
+	if again {
+		t.Error("RemoveRecipient on an already-removed address = true, want false")
+	}
+}

@@ -105,6 +105,57 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 	}
 }
 
+// removeRecipientHandler serves POST /recipients/remove: deleting one saved
+// address, from the control that already lists them. Not scoped under
+// /books/{id} — a recipient is not a property of a book, and nesting the
+// route there would imply that removing an address on one book's page
+// leaves it saved on another's, which is false.
+//
+// The book id still rides along, as a hidden "book" field on the sibling
+// recipient-form send-control.html describes: removing an address changes
+// the picker, so the response has to be the whole re-rendered send control
+// for that book, not a bare confirmation. Same progressive-enhancement
+// split as sendHandler: an htmx caller gets the swapped-in control,
+// everyone else a 303 back to the book page — which is what the form's
+// plain action is there for, since form="recipient-form" only says which
+// form a remove button submits, not how the response comes back.
+func removeRecipientHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
+
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		bookID, err := strconv.ParseInt(r.FormValue("book"), 10, 64)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		if _, err := svc.RemoveRecipient(r.Context(), r.FormValue("address")); err != nil {
+			slog.Error("remove recipient failed", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		if !isHTMXFragment(r) {
+			http.Redirect(w, r, "/books/"+strconv.FormatInt(bookID, 10), http.StatusSeeOther)
+			return
+		}
+
+		page := bookDetailPage{ID: bookID}
+		if err := populateSendControl(r.Context(), svc, sendEnabled, &page); err != nil {
+			slog.Error("build send control failed", "id", bookID, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if err := render(w, "send-control", page); err != nil {
+			slog.Error("render template failed", "template", "send-control", "error", err)
+		}
+	}
+}
+
 // sendStatusHandler serves GET /books/{id}/sends/{sendID}, the send
 // control's poll target. Scoped under the book id so a mismatched pairing
 // 404s rather than rendering one book's send status under another's page.

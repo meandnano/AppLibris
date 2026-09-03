@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+{{template "document-head" .}}
+<body>
+{{template "site-header" .}}
+
+<main class="page">
+  {{if .Empty}}
+  {{/* Its own block, not the library's "No books yet" empty state: the two
+       are different situations calling for different next actions, the
+       same reason search__empty and the library empty state stay
+       separate. */}}
+  <div class="empty">
+    <h2 class="empty__title">Nothing sent yet</h2>
+    <p class="empty__body">Open a book and send it to your Kindle.</p>
+  </div>
+  {{else}}
+  <ul class="history">
+    {{range .Rows}}
+    <li class="history__row">
+      <div class="history__title-cell">
+        {{if .BookURL}}
+        <a class="history__title" href="{{.BookURL}}">{{.Title}}</a>
+        {{else}}
+        {{/* No link: the book is gone, and send_log's denormalised title
+             is the only trace of it left. */}}
+        <span class="history__title history__title--gone">{{.Title}}</span>
+        {{end}}
+        {{if .Reason}}
+        <p class="history__reason">{{.Reason}}</p>
+        {{end}}
+      </div>
+      <span class="history__recipient">{{.Recipient}}</span>
+      <span class="history__status history__status--{{.StatusKind}}">{{.Status}}</span>
+      <span class="history__when">{{.When}}</span>
+    </li>
+    {{end}}
+  </ul>
+  {{end}}
+</main>
+
+{{template "site-scripts" .}}
+</body>
+</html>

@@ -307,6 +307,145 @@ func TestSendHandlerAllowsSameOriginAndMetadataLessPosts(t *testing.T) {
 	}
 }
 
+func postRemoveRecipientForm(handler http.Handler, bookID int64, address string, hx bool) *httptest.ResponseRecorder {
+	form := url.Values{"book": {itoa(bookID)}, "address": {address}}
+	req := httptest.NewRequest(http.MethodPost, "/recipients/remove", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if hx {
+		req.Header.Set("HX-Request", "true")
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestRemoveRecipientHandlerDeletesAndReturnsReRenderedControl(t *testing.T) {
+	db := newSendTestDB(t)
+	ctx := context.Background()
+	id := createSendTestBook(t, db)
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "Mine", time.Now()); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+	handler := Routes(service.New(db), t.TempDir(), true)
+
+	rec := postRemoveRecipientForm(handler, id, "reader@kindle.com", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /recipients/remove status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "reader@kindle.com") {
+		t.Errorf("re-rendered send control still lists the removed address: %q", body)
+	}
+
+	recipients, err := db.ListRecipients(ctx)
+	if err != nil {
+		t.Fatalf("ListRecipients: %v", err)
+	}
+	if len(recipients) != 0 {
+		t.Errorf("ListRecipients after removal = %+v, want none", recipients)
+	}
+}
+
+// Removing an address that doesn't exist (a double-submit, two open tabs)
+// is a slip, not an error — the control just comes back unchanged.
+func TestRemoveRecipientHandlerUnknownAddressIsNotAnError(t *testing.T) {
+	db := newSendTestDB(t)
+	id := createSendTestBook(t, db)
+	handler := Routes(service.New(db), t.TempDir(), true)
+
+	rec := postRemoveRecipientForm(handler, id, "nobody@kindle.com", true)
+	if rec.Code != http.StatusOK {
+		t.Errorf("POST /recipients/remove (unknown address) status = %d, want 200", rec.Code)
+	}
+}
+
+// The no-JS path: a plain form submission (no HX-Request) still removes
+// the address and lands back on the book page via a 303, exactly like
+// sendHandler's own progressive-enhancement split.
+func TestRemoveRecipientHandlerNonHXRequestRedirects303(t *testing.T) {
+	db := newSendTestDB(t)
+	ctx := context.Background()
+	id := createSendTestBook(t, db)
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+	handler := Routes(service.New(db), t.TempDir(), true)
+
+	rec := postRemoveRecipientForm(handler, id, "reader@kindle.com", false)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /recipients/remove (no HX-Request) status = %d, want 303", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/books/"+itoa(id) {
+		t.Errorf("Location = %q, want /books/%d", loc, id)
+	}
+
+	recipients, err := db.ListRecipients(ctx)
+	if err != nil {
+		t.Fatalf("ListRecipients: %v", err)
+	}
+	if len(recipients) != 0 {
+		t.Errorf("a plain form POST must still remove the address: ListRecipients = %+v", recipients)
+	}
+}
+
+func TestRemoveRecipientHandlerRejectsCrossSitePost(t *testing.T) {
+	db := newSendTestDB(t)
+	ctx := context.Background()
+	id := createSendTestBook(t, db)
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+	handler := Routes(service.New(db), t.TempDir(), true)
+
+	form := url.Values{"book": {itoa(id)}, "address": {"reader@kindle.com"}}
+	req := httptest.NewRequest(http.MethodPost, "/recipients/remove", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-site POST /recipients/remove = %d, want 403", rec.Code)
+	}
+	recipients, err := db.ListRecipients(ctx)
+	if err != nil {
+		t.Fatalf("ListRecipients: %v", err)
+	}
+	if len(recipients) != 1 {
+		t.Errorf("a cross-site POST removed the recipient: %+v, want it untouched", recipients)
+	}
+}
+
+// The markup contract removal depends on: each saved address renders a
+// remove button wired to the sibling recipient-form by its form attribute
+// (not nested inside send__form, which HTML forbids), and that form has a
+// real action — the no-JS path's whole reason for existing, which a test
+// client can assert on but not execute.
+func TestSendControlRemoveButtonMarkupContract(t *testing.T) {
+	db := newSendTestDB(t)
+	ctx := context.Background()
+	id := createSendTestBook(t, db)
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+	handler := Routes(service.New(db), t.TempDir(), true)
+
+	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `<form id="recipient-form" method="post" action="/recipients/remove"`) {
+		t.Errorf("book page missing the recipient-form with a real action: %q", body)
+	}
+	if !strings.Contains(body, `<input type="hidden" name="book" value="`+itoa(id)+`">`) {
+		t.Errorf("recipient-form missing the hidden book field: %q", body)
+	}
+	if !strings.Contains(body, `form="recipient-form"`) || !strings.Contains(body, `name="address" value="reader@kindle.com"`) {
+		t.Errorf("saved address missing its form-attribute remove button: %q", body)
+	}
+}
+
 func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
