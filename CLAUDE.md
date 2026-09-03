@@ -118,7 +118,20 @@ full design.
   non-nil slice rather than an error when there are none — `ListBookAuthors`
   loads the whole library's author map, right for the grid page and wrong
   for a single book). `CountBooks` is a plain `count(*)`, independent of
-  any search filter.
+  any search filter. `CountFilesByBook` mirrors `ListBookAuthors`: one
+  `GROUP BY book_id` over `book_files`, keyed by book id, for the grid's
+  multi-location badge. It counts every location row, missing ones
+  included — a row stays in `book_files` until it has been missing past
+  `MISSING_GRACE`, and the detail page lists it (annotated) for that whole
+  window, so filtering them out here would make the grid and the detail
+  page disagree about the same book's location count while linking
+  directly to each other. A book id absent from the map counted zero rows —
+  the plain `GROUP BY` never emits one for a book_id with none — which a Go
+  map read returns the same as an explicit zero; zero rows should be
+  exceptional in practice (the last location's deletion prunes the book in
+  the same transaction) but that invariant is enforced by the scanner's
+  orphan-pruning, not by this query, which only reports `book_files` as it
+  stands.
 - `recipients` and `send_log` (`internal/storage/sends.go`) back
   send-to-Kindle. `recipients.address` is `COLLATE NOCASE` with a unique
   index on it — the same arrangement `books.sort_title` uses — so
@@ -415,7 +428,16 @@ full design.
   as a second thin transport alongside `internal/web`. `ListBooks` and
   `SearchBooks` both assemble `internal/storage`'s books and authors into a
   `BookSummary` per book via a shared unexported `summarize` helper.
-  `SearchBooks` sanitizes via `storage.SanitizeFTSQuery` first and returns
+  `BookSummary.Locations` — how many `book_files` rows a book has — comes
+  from `storage.CountFilesByBook` alongside the author map, in the same
+  helper, so both `ListBooks` and `SearchBooks` get it for free; a book
+  absent from that map counted zero rows at the storage layer, but since
+  zero and one both mean "don't show the multi-location badge," this
+  normalizes it to 1 rather than carrying the raw zero forward — one
+  location being the common real-world case an absent entry actually
+  represents, zero rows in `book_files` being the exceptional one orphan-
+  pruning is meant to prevent. `SearchBooks` sanitizes via
+  `storage.SanitizeFTSQuery` first and returns
   a `SearchResult` — the books, whether a search actually ran, and which
   indexed fields matched. A query that sanitizes to nothing is treated as
   `ListBooks`, so the empty search box and a freshly-loaded page are the
@@ -516,7 +538,17 @@ full design.
   a short, five-minute `max-age` — that bounds how long a client can serve
   a stale file after a deploy without consulting the `ETag`, rather than
   eliminating the risk outright. Handlers map `service.BookSummary` onto a
-  small per-page view model so templates stay logic-free. `render` executes
+  small per-page view model so templates stay logic-free. `bookCard.PathsLabel`
+  is the multi-location badge's text ("2 paths") composed in the handler
+  from `BookSummary.Locations`, the same way `searchSummary` composes the
+  results line — set only above 1, so the template branches on presence
+  rather than formatting a count itself and risking "1 paths". It renders
+  in `.card__meta` beside the format badge, on both the full library page
+  and the `book-grid` fragment a search request gets, sharing the accent
+  and dotted-underline treatment the detail page's own `.locations summary`
+  already uses for the same idea — the grid says "look here", the detail
+  page (already listing every `book_files` row) says "here is what and
+  where". `render` executes
   into a buffer before writing anything to the response, so a template
   error is a clean 500 rather than a truncated page, and sets `Content-Type`
   explicitly rather than relying on sniffing. Only the pre-write `ExecuteTemplate`

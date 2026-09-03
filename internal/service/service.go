@@ -44,6 +44,9 @@ type BookSummary struct {
 	Authors   []string
 	Format    string
 	CoverPath string
+	// Locations is how many places on disk this book's content sits at.
+	// 1 for almost every book; more than 1 is what the grid flags.
+	Locations int
 }
 
 // ListBooks returns every book, ordered by sort_title, with its authors attached.
@@ -205,26 +208,44 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 	}, nil
 }
 
-// summarize attaches authors to books and shapes both into BookSummary.
-// ListBookAuthors loads every book's authors rather than a filtered
-// variant scoped to books — at this library's scale the whole-table map is
-// cheaper than the extra query plumbing a filtered version would need, and
-// ListBooks already set that precedent before SearchBooks needed the same
-// shape.
+// summarize attaches authors and a location count to books and shapes both
+// into BookSummary. ListBookAuthors and CountFilesByBook both load the
+// whole library's map rather than a filtered variant scoped to books — at
+// this library's scale the whole-table map is cheaper than the extra query
+// plumbing a filtered version would need, and ListBooks already set that
+// precedent before SearchBooks needed the same shape.
+//
+// locationsByBook[b.ID] reads as 0 for a book with no book_files rows — a
+// state that should be exceptional in practice (the last location's
+// deletion prunes the book in the same transaction) but that
+// CountFilesByBook itself does not rule out; it just reports book_files as
+// it stands. Since 0 and 1 both mean "don't show the multi-location badge",
+// this normalizes 0 up to 1 rather than carrying the storage layer's raw
+// count forward, so BookSummary.Locations reads as an actual location
+// count instead of an artifact of the map being unset.
 func (s *Service) summarize(ctx context.Context, books []storage.Book) ([]BookSummary, error) {
 	authorsByBook, err := s.db.ListBookAuthors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	locationsByBook, err := s.db.CountFilesByBook(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	summaries := make([]BookSummary, len(books))
 	for i, b := range books {
+		locations := locationsByBook[b.ID]
+		if locations == 0 {
+			locations = 1
+		}
 		summaries[i] = BookSummary{
 			ID:        b.ID,
 			Title:     b.Title,
 			Authors:   authorsByBook[b.ID],
 			Format:    b.Format,
 			CoverPath: b.CoverPath,
+			Locations: locations,
 		}
 	}
 	return summaries, nil

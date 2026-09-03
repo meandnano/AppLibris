@@ -436,6 +436,122 @@ func TestListBookAuthorsUsesEachBooksOwnOrderNotAuthorID(t *testing.T) {
 	}
 }
 
+func TestCountFilesByBook(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+
+	oneID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-one", Title: "One Location", Format: "epub"}, nil, "/one.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile one: %v", err)
+	}
+
+	twoID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-two", Title: "Two Locations", Format: "epub"}, nil, "/two-a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile two: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, twoID, "/two-b.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile two-b: %v", err)
+	}
+
+	threeID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-three", Title: "Three Locations", Format: "epub"}, nil, "/three-a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile three: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, threeID, "/three-b.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile three-b: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, threeID, "/three-c.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile three-c: %v", err)
+	}
+
+	counts, err := db.CountFilesByBook(ctx)
+	if err != nil {
+		t.Fatalf("CountFilesByBook: %v", err)
+	}
+	if counts[oneID] != 1 {
+		t.Errorf("counts[one] = %d, want 1", counts[oneID])
+	}
+	if counts[twoID] != 2 {
+		t.Errorf("counts[two] = %d, want 2", counts[twoID])
+	}
+	if counts[threeID] != 3 {
+		t.Errorf("counts[three] = %d, want 3", counts[threeID])
+	}
+}
+
+// The decision CLAUDE.md and the plan pin: a missing location still counts.
+// A book_files row stays until it has been missing past MISSING_GRACE, and
+// the detail page lists it (annotated) for that whole window, so the grid's
+// count must agree rather than dropping the marker early.
+func TestCountFilesByBookCountsMissingLocations(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	f, err := db.FindFileByPath(ctx, "/x.epub")
+	if err != nil || f == nil {
+		t.Fatalf("FindFileByPath: %+v, %v", f, err)
+	}
+	if err := db.SetFilesMissing(ctx, []int64{f.ID}, mtime); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+
+	counts, err := db.CountFilesByBook(ctx)
+	if err != nil {
+		t.Fatalf("CountFilesByBook: %v", err)
+	}
+	if counts[bookID] != 1 {
+		t.Errorf("counts[book] = %d, want 1 (a missing row is still a row)", counts[bookID])
+	}
+}
+
+func TestCountFilesByBookOmitsDeletedBook(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, bookID)
+		return err
+	}); err != nil {
+		t.Fatalf("delete book: %v", err)
+	}
+
+	counts, err := db.CountFilesByBook(ctx)
+	if err != nil {
+		t.Fatalf("CountFilesByBook: %v", err)
+	}
+	if _, ok := counts[bookID]; ok {
+		t.Errorf("counts[book] present after delete = %d, want no entry", counts[bookID])
+	}
+}
+
+func TestCountFilesByBookEmptyLibrary(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	counts, err := db.CountFilesByBook(ctx)
+	if err != nil {
+		t.Fatalf("CountFilesByBook: %v", err)
+	}
+	if counts == nil {
+		t.Error("counts = nil, want empty non-nil map")
+	}
+	if len(counts) != 0 {
+		t.Errorf("counts = %v, want empty", counts)
+	}
+}
+
 func TestBookAuthorsPositionIsZeroBasedAndContiguous(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

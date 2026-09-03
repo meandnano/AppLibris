@@ -452,6 +452,14 @@ a:hover {
   padding: 2px 5px;
 }
 
+.card__paths {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  border-bottom: 1px dotted var(--accent);
+}
+
 /* ---------- empty state ---------- */
 
 .empty {
