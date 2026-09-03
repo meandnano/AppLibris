@@ -30,6 +30,8 @@ func Routes(svc *service.Service, coversDir string, sendEnabled bool) http.Handl
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", libraryHandler(svc))
 	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled))
+	mux.HandleFunc("GET /books/{id}/metadata/{field}", metadataHandler(svc, sendEnabled))
+	mux.HandleFunc("POST /books/{id}/metadata/{field}", sameSiteOnly(metadataHandler(svc, sendEnabled)))
 	mux.HandleFunc("POST /books/{id}/send", sameSiteOnly(sendHandler(svc, sendEnabled)))
 	mux.HandleFunc("GET /books/{id}/sends/{sendID}", sendStatusHandler(svc, sendEnabled))
 	mux.Handle("GET /static/", staticHandler())
@@ -50,6 +52,17 @@ func Routes(svc *service.Service, coversDir string, sendEnabled bool) http.Handl
 // through, since a client that sends none (curl, a script, a browser older
 // than the header) is not the ambient-authority vector this guards, and
 // failing closed there would cost the UI for no security gain.
+// isHTMXFragment reports whether r wants a fragment rather than a whole
+// page. htmx sets HX-Request on every request it issues, including the one
+// it makes restoring a history entry that has fallen out of its cache —
+// but that response it swaps into the whole document body, so answering it
+// with a fragment strips the page down to it. HX-History-Restore-Request
+// is what separates the two, which is why both headers name themselves in
+// every Vary set alongside this call.
+func isHTMXFragment(r *http.Request) bool {
+	return r.Header.Get("HX-Request") != "" && r.Header.Get("HX-History-Restore-Request") == ""
+}
+
 func sameSiteOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get("Sec-Fetch-Site") {
@@ -123,7 +136,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
 
 		query := r.URL.Query().Get("q")
-		fragment := r.Header.Get("HX-Request") != "" && r.Header.Get("HX-History-Restore-Request") == ""
+		fragment := isHTMXFragment(r)
 
 		// SearchBooks already treats a blank query as ListBooks, so this
 		// covers both cases without repeating that check here, and it

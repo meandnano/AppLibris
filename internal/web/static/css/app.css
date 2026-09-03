@@ -896,3 +896,158 @@ a:hover {
     gap: 26px 16px;
   }
 }
+
+/* The editable fields' Save/Cancel pair. Deliberately separate from
+   .send__button, which is the same idea at a different size and is left
+   alone here rather than refactored underneath a just-shipped control —
+   see docs/backlog for folding the two together. Cancel is an <a>, so the
+   base rule has to undo link decoration. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 8px 14px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg-raised);
+}
+
+.button--secondary {
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--fg-muted);
+}
+
+.editable__read {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 12px;
+  max-width: 100%;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  color: inherit;
+}
+
+.editable__read:hover,
+.editable__read:focus-visible {
+  background: var(--bg-sunken);
+  text-decoration: none;
+}
+
+.editable__label {
+  visibility: hidden;
+  flex: none;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.editable__read:hover .editable__label,
+.editable__read:focus-visible .editable__label {
+  visibility: visible;
+}
+
+/* visibility rather than display above, so revealing the label on hover
+   doesn't shift the text beside it. That reserved gutter is only worth
+   paying for where hover exists: on a touch screen the label can never be
+   revealed, and on a narrow one the space it holds squeezes the metadata
+   values into wrapping. The whole read view stays tappable either way. */
+@media (hover: none), (max-width: 640px) {
+  .editable__label {
+    display: none;
+  }
+}
+
+.editable form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+}
+
+.editable__control {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.editable--title .editable__control {
+  max-width: 26ch;
+}
+
+.editable__control--authors {
+  min-height: 88px;
+  resize: vertical;
+  font-family: var(--sans);
+  font-size: 15px;
+}
+
+.editable--description .editable__control {
+  min-height: 108px;
+  resize: vertical;
+  padding: 10px 12px;
+}
+
+.editable__control--mono {
+  font-family: var(--mono);
+}
+
+.editable__section-label,
+.editable__hint {
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.editable__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.editable__error,
+.send__error {
+  margin: 0;
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.editable--meta dd,
+.editable--meta form {
+  width: 100%;
+}
+
+.editable--meta .editable__actions {
+  margin-top: 4px;
+}
+
+.detail__send:empty {
+  display: none;
+}

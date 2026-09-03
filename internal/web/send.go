@@ -65,7 +65,7 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 			return
 		}
 
-		fragment := r.Header.Get("HX-Request") != "" && r.Header.Get("HX-History-Restore-Request") == ""
+		fragment := isHTMXFragment(r)
 		if !fragment {
 			http.Redirect(w, r, "/books/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 			return

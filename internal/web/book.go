@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"library/internal/service"
+	"library/internal/storage"
 )
 
 // bookDetailPage is the data book.html renders against. Title doubles as
@@ -22,6 +23,15 @@ import (
 // would be a rename of nothing. FileSizeHuman is empty when the book has
 // no location to take a size from — the template renders an em dash there
 // rather than "0 B", which is a size, and a wrong one.
+//
+// The seven editable fields arrive as editableFieldView rather than as
+// plain strings: each renders as either a read view or its edit form, and
+// which one is a property of the field, not of the page. Title, Authors
+// and Description are named individually because the layout places them
+// individually (heading, byline, body); MetadataFields is the definition
+// list, whose rows differ only in label and value and so can be ranged
+// over. Title survives alongside TitleField because document-head still
+// needs a plain string for the browser tab.
 //
 // ID is the book id the send form posts to — removed as unread after #29,
 // it comes back here with that caller. The Send* fields are also this
@@ -44,13 +54,12 @@ type bookDetailPage struct {
 	FileSizeHuman     string
 	FileSizeBytesText string
 	Locations         []service.FileLocation
-	AuthorLine        string
-	Publisher         string
-	PublishedDate     string
-	Language          string
-	ISBN              string
-	Description       string
 	AddedAt           string
+
+	TitleField       editableFieldView
+	AuthorsField     editableFieldView
+	DescriptionField editableFieldView
+	MetadataFields   []editableFieldView
 
 	ID                int64
 	SendEnabled       bool
@@ -77,6 +86,16 @@ func bookDetailHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc 
 			return
 		}
 
+		// ?edit=<field> is how the no-JavaScript path opens an editor: the
+		// read view's link is a plain href, and htmx only intercepts it
+		// when it has loaded. An unrecognised field opens nothing rather
+		// than 400ing — it names no resource, and a mistyped query string
+		// should still show the book.
+		edit := r.URL.Query().Get("edit")
+		if _, ok := storage.ParseMetadataField(edit); !ok {
+			edit = ""
+		}
+
 		detail, err := svc.GetBook(r.Context(), id)
 		if err != nil {
 			slog.Error("get book failed", "id", id, "error", err)
@@ -88,39 +107,9 @@ func bookDetailHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc 
 			return
 		}
 
-		count, err := svc.CountBooks(r.Context())
+		page, err := makeBookDetailPage(r, svc, detail, sendEnabled, edit)
 		if err != nil {
-			slog.Error("count books failed", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-
-		var sizeHuman, sizeBytes string
-		if detail.HasFileSize {
-			sizeHuman = humanSize(detail.FileSize)
-			sizeBytes = fmt.Sprintf("%d bytes", detail.FileSize)
-		}
-
-		page := bookDetailPage{
-			Title:             detail.Title,
-			Count:             count,
-			CountText:         formatCount(count),
-			CoverURL:          coverURL(detail.CoverPath),
-			Format:            detail.Format,
-			FileSizeHuman:     sizeHuman,
-			FileSizeBytesText: sizeBytes,
-			Locations:         detail.Locations,
-			AuthorLine:        fullAuthorLine(detail.Authors),
-			Publisher:         detail.Publisher,
-			PublishedDate:     detail.PublishedDate,
-			Language:          detail.Language,
-			ISBN:              detail.ISBN,
-			Description:       detail.Description,
-			AddedAt:           detail.AddedAt.Format("2006-01-02"),
-			ID:                detail.ID,
-		}
-		if err := populateSendControl(r.Context(), svc, sendEnabled, &page); err != nil {
-			slog.Error("load send state failed", "id", id, "error", err)
+			slog.Error("build book detail page failed", "id", id, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -130,6 +119,113 @@ func bookDetailHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc 
 			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// makeBookDetailPage assembles the whole detail page from a book already
+// loaded, with edit naming the field whose editor should be open (empty
+// for none). Takes the loaded detail rather than an id because both
+// callers have already fetched it — the handler to decide between 404 and
+// 200, the metadata error path to render the rest of the page around a
+// rejected value.
+func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.BookDetail, sendEnabled bool, edit string) (*bookDetailPage, error) {
+	count, err := svc.CountBooks(r.Context())
+	if err != nil {
+		return nil, err
+	}
+
+	var sizeHuman, sizeBytes string
+	if detail.HasFileSize {
+		sizeHuman = humanSize(detail.FileSize)
+		sizeBytes = fmt.Sprintf("%d bytes", detail.FileSize)
+	}
+
+	page := bookDetailPage{
+		Title:             detail.Title,
+		Count:             count,
+		CountText:         formatCount(count),
+		CoverURL:          coverURL(detail.CoverPath),
+		Format:            detail.Format,
+		FileSizeHuman:     sizeHuman,
+		FileSizeBytesText: sizeBytes,
+		Locations:         detail.Locations,
+		AddedAt:           detail.AddedAt.Format("2006-01-02"),
+		ID:                detail.ID,
+	}
+	applyFieldViews(&page, detail, edit)
+	if err := populateSendControl(r.Context(), svc, sendEnabled, &page); err != nil {
+		return nil, err
+	}
+	return &page, nil
+}
+
+// editableFieldView is one field's state for the templates: Value is what
+// an editor's control holds, Display what the read view shows, and the two
+// differ wherever the stored form isn't the readable one — authors are
+// newline-separated for a textarea but "A, B & C" in the byline. Edit
+// decides which of the two is rendered. EditURL and ReadURL are the htmx
+// swap targets; BookURL is the same intent as a plain href, for the path
+// where htmx never loaded.
+type editableFieldView struct {
+	BookID      int64
+	Field       string
+	Label       string
+	Value       string
+	Display     string
+	Edit        bool
+	Error       string
+	EditURL     string
+	ReadURL     string
+	BookURL     string
+	Placeholder string
+	Multiline   bool
+	Mono        bool
+}
+
+// applyFieldViews fills page's four editable slots from detail.
+func applyFieldViews(page *bookDetailPage, detail *service.BookDetail, edit string) {
+	views := makeFieldViews(detail, edit)
+	page.TitleField = views[storage.FieldTitle]
+	page.AuthorsField = views[storage.FieldAuthors]
+	page.DescriptionField = views[storage.FieldDescription]
+	page.MetadataFields = []editableFieldView{
+		views[storage.FieldPublisher], views[storage.FieldPublishedDate],
+		views[storage.FieldLanguage], views[storage.FieldISBN],
+	}
+}
+
+// makeFieldViews builds every editable field's view, keyed by field so
+// both the whole page and a single-field fragment draw from one place and
+// cannot drift. edit names at most one field to open.
+//
+// An empty optional field still gets a Display of "" and is rendered as a
+// visible em dash or an invitation rather than dropped: a field that isn't
+// on the page cannot be filled in, and sparse metadata is the common FB2
+// case. PublishedDate is passed through exactly as stored, never parsed —
+// it is free text from embedded metadata, sometimes a year and sometimes a
+// full date, and parsing it would lie confidently.
+func makeFieldViews(detail *service.BookDetail, edit string) map[storage.MetadataField]editableFieldView {
+	views := map[storage.MetadataField]editableFieldView{}
+	add := func(field storage.MetadataField, label, value, display, placeholder string, multiline, mono bool) {
+		name := string(field)
+		views[field] = editableFieldView{
+			BookID: detail.ID, Field: name, Label: label, Value: value, Display: display,
+			Edit:    edit == name,
+			EditURL: fmt.Sprintf("/books/%d/metadata/%s?edit=1", detail.ID, name),
+			ReadURL: fmt.Sprintf("/books/%d/metadata/%s", detail.ID, name),
+			BookURL: fmt.Sprintf("/books/%d", detail.ID),
+			// The read view's plain href carries the same intent as the
+			// hx-get, so the no-JavaScript path opens the same editor.
+			Placeholder: placeholder, Multiline: multiline, Mono: mono,
+		}
+	}
+	add(storage.FieldTitle, "Title", detail.Title, detail.Title, "Book title", false, false)
+	add(storage.FieldAuthors, "Authors", strings.Join(detail.Authors, "\n"), fullAuthorLine(detail.Authors), "One author per line", true, false)
+	add(storage.FieldDescription, "Description", detail.Description, detail.Description, "Add a description", true, false)
+	add(storage.FieldPublisher, "publisher", detail.Publisher, detail.Publisher, "Publisher", false, false)
+	add(storage.FieldPublishedDate, "published", detail.PublishedDate, detail.PublishedDate, "Published date", false, false)
+	add(storage.FieldLanguage, "language", detail.Language, detail.Language, "Language", false, false)
+	add(storage.FieldISBN, "isbn", detail.ISBN, detail.ISBN, "ISBN", false, true)
+	return views
 }
 
 // populateSendControl fills page's send-control fields: the saved
@@ -185,20 +281,6 @@ func applySendState(page *bookDetailPage, send *service.SendState) {
 	default:
 		page.SendButtonLabel = "Send"
 		page.SendButtonPrimary = true
-	}
-}
-
-// fullAuthorLine joins every author name for display — unlike authorLine's
-// grid-card "and N others" collapse, the detail page has room to name
-// everyone.
-func fullAuthorLine(names []string) string {
-	switch len(names) {
-	case 0:
-		return ""
-	case 1:
-		return names[0]
-	default:
-		return strings.Join(names[:len(names)-1], ", ") + " & " + names[len(names)-1]
 	}
 }
 

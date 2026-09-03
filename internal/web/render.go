@@ -29,11 +29,20 @@ var staticFS embed.FS
 // client disconnecting) is logged here instead, since the caller can no
 // longer respond any differently.
 func render(w http.ResponseWriter, name string, data any) error {
+	return renderStatus(w, http.StatusOK, name, data)
+}
+
+// renderStatus is render with an explicit status code, for a response that
+// carries a rendered body and a non-200 code together — a rejected edit
+// answering 422 with the form and its error message, rather than a bare
+// http.Error that would swap away the editor.
+func renderStatus(w http.ResponseWriter, status int, name string, data any) error {
 	var buf bytes.Buffer
 	if err := templates.ExecuteTemplate(&buf, name, data); err != nil {
 		return err
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
 	if _, err := buf.WriteTo(w); err != nil {
 		slog.Warn("write rendered response", "template", name, "error", err)
 	}
