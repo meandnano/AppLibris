@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -69,23 +70,50 @@ func awaitPoke(t *testing.T, trigger chan struct{}, why string) {
 	}
 }
 
-// expectNoPoke asserts nothing pokes within a window comfortably past the
-// settle time.
-func expectNoPoke(t *testing.T, trigger chan struct{}, why string) {
+// expectNoPoke asserts nothing pokes within quiet, which callers size
+// against whatever settle window their watcher is using.
+func expectNoPoke(t *testing.T, trigger chan struct{}, quiet time.Duration, why string) {
 	t.Helper()
 	select {
 	case <-trigger:
 		t.Fatalf("a sweep was triggered but should not have been: %s", why)
-	case <-time.After(testSettle * 4):
+	case <-time.After(quiet):
 	}
 }
 
 // A copy produces CREATE then one or more WRITEs, and a burst produces one
 // pair per file. The whole point of the debounce is that the scan loop is
 // woken once for the lot, not once per event.
+//
+// Counting requires draining continuously rather than reading the trigger
+// once: the channel holds a single poke and drops the rest, so an
+// undebounced watcher looks identical to a debounced one from the outside
+// unless something is emptying it. Draining also makes the count
+// independent of how fast the writes land — twenty pokes are twenty pokes
+// whether the burst takes a millisecond or a second — which matters
+// because CI runs this under -race on four shared cores.
 func TestWatcherPokesOnceForABurst(t *testing.T) {
+	// Comfortably longer than twenty small writes need even under
+	// contention, so a straggling burst can't debounce twice for a
+	// legitimate reason and fail a test that isn't about that.
+	const burstSettle = 500 * time.Millisecond
+
 	dir := t.TempDir()
-	trigger := startWatcher(t, dir, testSettle)
+	trigger := startWatcher(t, dir, burstSettle)
+
+	var pokes atomic.Int64
+	stop, drained := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			select {
+			case <-trigger:
+				pokes.Add(1)
+			case <-stop:
+				return
+			}
+		}
+	}()
 
 	for i := range 20 {
 		path := filepath.Join(dir, fmt.Sprintf("book-%02d.epub", i))
@@ -94,8 +122,13 @@ func TestWatcherPokesOnceForABurst(t *testing.T) {
 		}
 	}
 
-	awaitPoke(t, trigger, "twenty books were copied in")
-	expectNoPoke(t, trigger, "the burst should collapse into a single sweep")
+	time.Sleep(burstSettle * 3)
+	close(stop)
+	<-drained
+
+	if got := pokes.Load(); got != 1 {
+		t.Errorf("a burst of twenty books triggered %d sweeps, want exactly 1", got)
+	}
 }
 
 // A stream of events that never pauses would hold a naive debounce open
@@ -142,7 +175,7 @@ func TestWatcherIgnoresPartialDownloadsUntilRenamed(t *testing.T) {
 	if err := os.WriteFile(partial, []byte("not finished"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	expectNoPoke(t, trigger, "a .part file is not a book yet")
+	expectNoPoke(t, trigger, testSettle*4, "a .part file is not a book yet")
 
 	if err := os.Rename(partial, filepath.Join(dir, "book.epub")); err != nil {
 		t.Fatalf("Rename: %v", err)
@@ -180,7 +213,7 @@ func TestWatcherProbeDoesNotPoke(t *testing.T) {
 	defer cancel()
 	go w.Run(ctx)
 
-	expectNoPoke(t, trigger, "the delivery probe's own file must be inert")
+	expectNoPoke(t, trigger, testSettle*4, "the delivery probe's own file must be inert")
 
 	// And it cleans up after itself, so a restart loop can't litter.
 	entries, err := os.ReadDir(dir)
