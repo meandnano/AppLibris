@@ -125,9 +125,13 @@ full design.
   `MISSING_GRACE`, and the detail page lists it (annotated) for that whole
   window, so filtering them out here would make the grid and the detail
   page disagree about the same book's location count while linking
-  directly to each other. A book absent from the map has exactly one
-  location, not zero — the last location's deletion prunes the book in the
-  same transaction, so a summarized book can never actually have none.
+  directly to each other. A book id absent from the map counted zero rows —
+  the plain `GROUP BY` never emits one for a book_id with none — which a Go
+  map read returns the same as an explicit zero; zero rows should be
+  exceptional in practice (the last location's deletion prunes the book in
+  the same transaction) but that invariant is enforced by the scanner's
+  orphan-pruning, not by this query, which only reports `book_files` as it
+  stands.
 - `recipients` and `send_log` (`internal/storage/sends.go`) back
   send-to-Kindle. `recipients.address` is `COLLATE NOCASE` with a unique
   index on it — the same arrangement `books.sort_title` uses — so
@@ -427,9 +431,12 @@ full design.
   `BookSummary.Locations` — how many `book_files` rows a book has — comes
   from `storage.CountFilesByBook` alongside the author map, in the same
   helper, so both `ListBooks` and `SearchBooks` get it for free; a book
-  absent from that map (one location, the common case) is normalized to 1
-  here, not left as the storage layer's 0, since a book being summarized at
-  all can't actually have zero locations. `SearchBooks` sanitizes via
+  absent from that map counted zero rows at the storage layer, but since
+  zero and one both mean "don't show the multi-location badge," this
+  normalizes it to 1 rather than carrying the raw zero forward — one
+  location being the common real-world case an absent entry actually
+  represents, zero rows in `book_files` being the exceptional one orphan-
+  pruning is meant to prevent. `SearchBooks` sanitizes via
   `storage.SanitizeFTSQuery` first and returns
   a `SearchResult` — the books, whether a search actually ran, and which
   indexed fields matched. A query that sanitizes to nothing is treated as

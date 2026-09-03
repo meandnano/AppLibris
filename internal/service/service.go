@@ -215,10 +215,14 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 // plumbing a filtered version would need, and ListBooks already set that
 // precedent before SearchBooks needed the same shape.
 //
-// CountFilesByBook omits a book with no locations rather than mapping it to
-// zero; a book actually being summarized here can't have zero (the last
-// location's deletion prunes the book in the same transaction), so a missing
-// entry means exactly one location, not none.
+// locationsByBook[b.ID] reads as 0 for a book with no book_files rows — a
+// state that should be exceptional in practice (the last location's
+// deletion prunes the book in the same transaction) but that
+// CountFilesByBook itself does not rule out; it just reports book_files as
+// it stands. Since 0 and 1 both mean "don't show the multi-location badge",
+// this normalizes 0 up to 1 rather than carrying the storage layer's raw
+// count forward, so BookSummary.Locations reads as an actual location
+// count instead of an artifact of the map being unset.
 func (s *Service) summarize(ctx context.Context, books []storage.Book) ([]BookSummary, error) {
 	authorsByBook, err := s.db.ListBookAuthors(ctx)
 	if err != nil {

@@ -251,10 +251,16 @@ func (db *DB) ListAuthorsForBook(ctx context.Context, bookID int64) ([]string, e
 }
 
 // CountFilesByBook returns how many file locations each book has, keyed by
-// book id. Books with no locations are absent from the map rather than
-// present with a zero, which callers should treat as 1-or-fewer: the last
-// location's deletion prunes the book in the same transaction, so a book
-// with zero locations is a race, not a state.
+// book id — a plain GROUP BY, so a book with zero rows in book_files is
+// simply absent from the result rather than present with an explicit zero;
+// looking up an absent id in the returned map yields Go's int zero value,
+// which reads the same as an explicit zero to any caller. Zero rows should
+// be exceptional in practice, not routine: the last location's deletion
+// prunes the book in the same transaction, so book_files should never
+// actually hold a book_id with none. That invariant lives in the scanner's
+// orphan-pruning, though, not here — this reports book_files as it stands.
+// A caller only interested in the multi-location threshold can treat an
+// absent entry and an explicit 1 alike, since neither is worth flagging.
 //
 // Missing locations are counted. A row whose path has vanished stays in
 // book_files until it has been missing past MISSING_GRACE, and the detail
