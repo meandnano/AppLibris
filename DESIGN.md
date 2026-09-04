@@ -23,12 +23,21 @@ the code far enough that reading it without a map was misleading, and the
 map has been worth keeping since. Each section below carries a **Status**
 note. This table is the summary.
 
-The gap has closed. The primary flow this project exists for — see the
-library, find a book, send it to a Kindle, confirm it arrived — works end
-to end, and every feature designed below is built except one: **metadata
-provider enrichment**, which is now the only thing in this document that
-is in scope and unwritten. Everything else is either shipped or on the
-deferred list.
+The gap has closed completely. The primary flow this project exists for —
+see the library, find a book, send it to a Kindle, confirm it arrived —
+works end to end, and **every feature designed below is now built.**
+Nothing in this document is in scope and unwritten; what remains is the
+deferred list, which is deferred by design rather than by backlog.
+
+Metadata provider enrichment was the last of it, and it landed in three
+steps rather than one: the queue, worker and resolver
+(`docs/plans/completed/2026090304-enrichment-queue-and-resolver.md`),
+then the two providers and their decorators
+(`.../2026090305-metadata-providers.md`), then the UI that makes it
+something a person can ask for (`.../2026090306-enrichment-in-the-ui.md`).
+Splitting it that way was deliberate and is recorded here because the
+order mattered: a UI designed before the mechanism worked would have been
+shaped around states that turned out not to exist.
 
 That makes this table cheaper to read than it used to be, and it changes
 what the Status notes are for. They started as a map over a document that
@@ -36,8 +45,9 @@ had outrun its code; what they mostly record now is where the design was
 *wrong* and what the code does instead — which is the more useful half to
 keep.
 
-Legend: **Built** — done and in use. **Partial** — some of it exists, the
-note says which. **Not built** — designed here, no code yet.
+Legend: **Built** — done and in use. **Not built** — designed here, no
+code yet, which now means only the deferred items. (There is no longer a
+**Partial** row; `Metadata provenance` was the last one.)
 
 | Area | Status |
 |---|---|
@@ -50,8 +60,9 @@ note says which. **Not built** — designed here, no code yet.
 | Duplicate detection (byte-identical) | Built — one entry per content hash, multiple locations, flagged on the grid |
 | Embedded metadata | Built — EPUB and FB2 (including `.fb2.zip`), all schema columns populated |
 | Covers | Built — extracted, stored atomically, regenerated when missing |
-| Metadata providers, chain | Not built |
-| Metadata provenance | Partial — recorded on every create and edit; nothing reads it until providers exist |
+| Metadata providers, chain | Built — Open Library and Google Books, ordered by `METADATA_PROVIDERS` |
+| Metadata provider decorators (rate limit, cache, retry) | Built — composed once at construction, cache outermost |
+| Metadata provenance | Built — recorded on every create, edit and provider write; read by the resolver and shown on the detail page |
 | Books / authors / book_files schema | Built |
 | Recipients, send log, field sources schema | Built |
 | Send to Kindle: Resend transport + size limit | Built |
@@ -62,6 +73,7 @@ note says which. **Not built** — designed here, no code yet.
 | Web UI: htmx, search, book detail | Built |
 | Web UI: inline metadata editing | Built |
 | Web UI: send control | Built |
+| Web UI: enrichment control, provenance markers | Built — per book, from the detail page |
 | Format conversion, near-duplicate detection, programmatic API | Not built — deferred by design |
 | Authentication | Not built, by design |
 | Cross-site guard on state-changing routes | Built — `Sec-Fetch-Site`, see Authentication |
@@ -257,36 +269,58 @@ Enrichment is **optional and never blocks a book from appearing in the library.*
 The scanner and index are the source of truth; enrichment is a background job
 queue running against existing records.
 
-**Status: Embedded and provenance are built; providers are not.**
+**Status: Built** — embedded, provenance, both providers, the chain and
+the UI that reaches it.
 
 `internal/epub` reads title, authors, language, ISBN, description,
 publisher and publication date from the OPF package, and extracts the
 declared cover. ISBN is recognised in its EPUB 2 `opf:scheme` form, the
 `urn:isbn:` form EPUB 3 favours, and bare ISBN-shaped identifiers, and is
-normalised on the way in — it's the lookup key a future provider chain
-needs. `internal/fb2` mirrors the same field set for FB2 documents,
-including covers, `.fb2.zip` archives, and declared-but-wrong XML
-encodings. Author order as the source file lists it is preserved through
-to display.
-
-**Provenance is now built**; the provider chain, the provider interface,
-compile-time registration and the resolver remain design only.
+normalised on the way in — it is the lookup key the provider chain uses,
+and normalising at both ends is what makes it round-trip.
+`internal/fb2` mirrors the same field set for FB2 documents, including
+covers, `.fb2.zip` archives, and declared-but-wrong XML encodings.
+Author order as the source file lists it is preserved through to display.
 
 Provenance shipped first precisely because this section said it had to:
-it gates inline metadata editing, which is now built on top of it. A
-`field_sources` row records `embedded` or `manual` per field, written
-inside the same transaction as the book it describes and updated on every
-edit. It is deliberately write-only for now — nothing reads a source until
-there is a resolver to consult one — and that is the point rather than an
-oversight: a book edited today has to carry its marker by the time the
-enrichment step arrives, or that step overwrites hand-fixed values with no
-way to tell they were hand-fixed.
+it gates inline metadata editing, which is built on top of it. A
+`field_sources` row records `embedded`, `manual` or a provider's name per
+field, written inside the same transaction as the book it describes and
+updated on every edit.
 
-The rule the future resolver must honour, and the one easiest to get
-backwards: **a cleared field stays `manual`.** An empty value with a
-`manual` source is a decision someone made, not metadata that is missing.
-A resolver inferring provenance from emptiness would undo exactly the
-edits this table exists to protect.
+It was deliberately **write-only** for its first two steps, and that was
+the point rather than an oversight: a book edited in the meantime had to
+carry its marker by the time the enrichment step arrived, or that step
+would have overwritten hand-fixed values with no way to tell they were
+hand-fixed. Writing it from the start is what made every book edited
+before the resolver existed already correct once it did. It now has two
+readers — the resolver, which consults it to decide what to ask a provider
+for, and the detail page, which marks provider-sourced values.
+
+One column was added later than the rest: a fetched **cover** carries
+provenance too, which needed `field_sources.field`'s CHECK constraint
+widened by table rebuild. The step that fetches covers decided that, and
+the reason is worth keeping — a book with no cover renders as a dashed box
+and is the most visible gap in the grid, so enrichment that filled six
+text fields and left the one visible hole would have looked broken.
+
+The rule the resolver honours, and the one easiest to get backwards: **a
+cleared field stays `manual`.** An empty value with a `manual` source is a
+decision someone made, not metadata that is missing. A resolver inferring
+provenance from emptiness would undo exactly the edits this table exists
+to protect. It is one function (`isMissing`) with both halves in one
+place — a field is worth asking about only when it is *both* empty *and*
+not `manual` — because dropping either half breaks it in a different
+direction: without the emptiness test, re-enrichment overwrites good
+embedded metadata with a guess; without the `manual` test, a field
+someone deliberately cleared gets silently refilled.
+
+The same rule is enforced a second time at the write, not just at the
+decision: `ApplyEnrichedFields` re-reads each field's current value and
+provenance inside its own transaction and skips any that is no longer
+missing. `Resolve`'s snapshot can be minutes stale by the time a provider
+answers, and a concurrent manual edit has committed by then — so the
+recheck is what makes a provider's late answer unable to clobber it.
 
 There is no backfill migration and there never was one. The service has
 not been deployed, so no database predates the table; provenance is
@@ -302,6 +336,30 @@ but no cover, that result is kept and the cover stays in the "still missing" set
 for the next provider. When the set empties, the chain stops early and saves the
 API calls.
 
+**Status: Built as designed.** `internal/enrich.Resolve` takes no database
+and no clock — the book's whole current state is passed in — which is what
+makes ordering and merging testable against fakes, as the interface
+section below asks for. A test asserts the un-called provider really is
+never called once the missing set empties, rather than merely that its
+answer goes unused.
+
+One thing this section did not settle, and the providers had to: **what a
+provider does when the network is unhelpful.** Four cases, deliberately
+not collapsed into one:
+
+| Case | Behaviour |
+|---|---|
+| 200 with no match | Zero result, no error. **Not** a failure — this is the common case. |
+| 404 | Same. A missing record is an answer. |
+| 429 / 5xx | An error, marked retryable. |
+| Timeout / transport failure | An error, marked retryable. |
+
+Folding the first two into the third is the failure mode to avoid: it
+would turn "this book is obscure" into a logged error on most books, and
+an error log that fires constantly is one nobody reads. A provider erroring
+is logged and skipped, and the chain continues — it is not the resolver's
+own failure to report.
+
 ### Provider interface
 
 Deliberately tiny:
@@ -312,6 +370,45 @@ Deliberately tiny:
 
 Rate limiting, caching, and retries are **decorators wrapping providers**, not
 baked into each implementation.
+
+**Status: Built as designed**, and the interface stayed as tiny as this
+section promised. Each decorator satisfies the same interface, so they
+compose in any order and the resolver cannot tell they are there; each is
+tested against a fake with no HTTP at all, which is the point of them
+being decorators.
+
+The **composition order** is fixed once at construction and is easy to get
+backwards: `WithCache(WithRetry(WithRateLimit(p)))` — cache outermost, so
+an answer already in memory costs neither a rate-limit token nor a retry
+attempt; rate limit innermost, so every attempt a retry makes takes a
+token of its own. Rate limiting on the outside would make a cached hit
+wait a full interval for an answer it already has, and would leave retries
+paced only by their own backoff — sending a provider that had just
+answered 429 three requests inside one token, which is exactly when it
+must not.
+
+Two things the live APIs taught that this interface cannot express, both
+found by asking them rather than reading their docs:
+
+- Open Library's search endpoint answers about a **work**, not the
+  edition an ISBN names. Its `language` field lists every language any
+  edition was ever published in — 31 of them, beginning `bul`, for an
+  English printing of *The Hobbit* — and its date is the work's first
+  publication, 75 years off. So "fetch by ISBN" goes to an
+  edition-scoped endpoint, and the title/author search deliberately
+  returns **neither** language nor publication date: where the only
+  available value describes the work, the honest answer is to leave the
+  field empty. An empty field is one the chain offers to the next
+  provider and a person can still fill; a wrong one reads as answered and
+  is never reconsidered. That correction cost a whole step of its own
+  (`docs/plans/completed/2026090401-openlibrary-field-fidelity.md`), and
+  it was invisible to every test until someone made a real request.
+- Google Books has **no live verification yet** — an API key was not
+  available and the anonymous per-day quota was exhausted, so its parser
+  is still trusted against its documentation, which is exactly the
+  position Open Library was in when the above turned up. Tracked in
+  `docs/backlog/2026090403-googlebooks-has-no-live-verification.md`
+  rather than pretended away.
 
 ### Registration
 
@@ -325,11 +422,88 @@ unexported.
 The **resolver logic is kept separate** from the providers so ordering and
 merging are testable without any real provider.
 
+**Status: Built, in one place, with two corrections to the details.** The
+map lives in `internal/providers` rather than beside the resolver as this
+section implies: both provider packages import the resolver's package for
+the interface and its result type, so a registry in that package
+importing them back would be an import cycle. And the interface did *not*
+stay unexported — `enrich.Provider` has to be named by both provider
+packages, by the registry and by the worker's constructor, so it is
+exported and simply lives under `internal/`, which is what actually keeps
+it out of any public API.
+
+`METADATA_PROVIDERS` (default `openlibrary,googlebooks`) lists names in
+order. Two behaviours are worth stating because they differ from how the
+send transport treats its own missing config:
+
+- An **unknown name fails startup**, naming it and listing the valid
+  ones — where a missing `RESEND_API_KEY` only warns. The difference is
+  intent: an unset key means "I have not set this up", while a misspelled
+  provider name means "I asked for something specific and did not get
+  it", and silently running with fewer providers than requested is the
+  kind of thing nobody notices for months.
+- **`METADATA_PROVIDERS=` (empty) disables enrichment** and is the
+  documented way to run with no outbound calls at all — worth having
+  explicitly, since a LAN-only deployment is this project's assumed
+  setting.
+
 ### Provenance
 
 Each metadata field records where it came from: `embedded`, a specific provider
 name, or `manual`. This is what makes it safe to re-run enrichment without
 clobbering a hand-fixed value.
+
+### Reaching it from the UI
+
+Enrichment is **per book, on request**, from the detail page: a button
+that queues a job, a pending state that polls, and a result naming the
+fields it wrote. Nothing enriches automatically — not on scan, not on a
+schedule, and there is no library-wide "enrich everything".
+
+**Status: Built**, and it is the one part of this project that had **no
+mockup** — the handoff's plates never covered it and the section you are
+reading designs the mechanism without designing a surface. That absence
+shaped the step rather than being papered over: the rule followed was to
+add the smallest surface answering the questions enrichment actually
+creates, reusing existing patterns instead of inventing new ones. There
+are exactly three, one per question:
+
+1. *Where did this value come from?* — a provenance marker.
+2. *Can I fetch metadata for this book now?* — the trigger.
+3. *Did it do anything?* — the result it swaps into.
+
+Anything past those three would have been invention. So a library-wide
+enrich has no honest progress display short of building one; an
+enrichment history page would be a page nobody opens, since unlike a send
+— an irreversible outbound act you may need to prove happened —
+enrichment is repeatable and its result is visible in the fields
+themselves; and provenance is not editable, because a source is a fact
+about where a value came from rather than a setting.
+
+Two decisions inside those three are worth recording:
+
+- **Provenance is shown only where it is not obvious.** A marker appears
+  for a provider's name and for nothing else. Every field has a source,
+  and rendering all seven would double the metadata block's weight to say
+  "embedded" seven times — the default, and therefore not information.
+  The marker is a *caveat*: a value read out of a file is a fact about
+  the file, a value someone typed is theirs, and a value a third-party
+  API guessed at is the only one whose origin changes how much to trust
+  it. `manual` renders nothing deliberately, even though it is the source
+  the resolver cares most about — the person who typed it does not need
+  telling. Editing a field clears its marker because a save sets the
+  source to `manual` — a consequence of the rule, not a special case.
+- **"Nothing to add" is a success.** It is the ordinary outcome for a
+  book whose embedded metadata is already complete, and for any book no
+  provider had an answer for. Rendering it as a failure would train
+  people to distrust a feature working exactly as intended.
+
+Making the result name the fields — rather than just saying "done" —
+needed the job row to record what it wrote, which the queue's original
+schema did not carry. It records what was *written*, not what the
+resolver proposed: the two differ whenever the write's own recheck skips
+a field a concurrent edit has since filled, and the line exists to say
+what that run did.
 
 ## Data model (v1)
 
@@ -589,9 +763,13 @@ htmx is used only where dynamism is actually needed:
 - search-as-you-type against the FTS5 index
 - the send-to-Kindle button swapping into a status indicator that polls the job
 - inline metadata editing, per field, on the book detail page
+- the fetch-metadata button doing the same as the send button, for an
+  enrichment job
 
-**Status: Built.** All three htmx interactions this section names now
-exist.
+**Status: Built.** All four htmx interactions this section names now
+exist — the fourth was added with the enrichment UI and is deliberately
+the same shape as the second, because a queued background job against one
+book is the same thing whichever queue it lands on.
 
 Built: `internal/web` serves the library grid at `GET /`, a book detail
 page at `GET /books/{id}` and the send history at `GET /history`, with
@@ -613,10 +791,11 @@ htmx is vendored (`docs/plans/completed/2026090106-full-text-search.md`).
 Search-as-you-type narrows the grid through a partial swap on a `q`
 parameter; the send control swaps into a status box that polls until the
 job reaches a terminal state, then stops by construction because a
-terminal fragment carries no trigger; and inline editing swaps one field
-at a time between a read view and its editor.
+terminal fragment carries no trigger; the enrichment control does the
+same, sharing that state machine rather than repeating it; and inline
+editing swaps one field at a time between a read view and its editor.
 
-Every one of the three degrades without JavaScript, and by the same
+Every one of the four degrades without JavaScript, and by the same
 method: one markup path rather than a parallel no-JS path that drifts. A
 read affordance is an `<a>` carrying both an `href` and an `hx-get`, an
 editor is a `<form>` carrying both an `action` and an `hx-post`, and the
@@ -726,11 +905,32 @@ Worth keeping distinct from the rest of this document: *deferred* is not the
 same as *not yet built*. Everything in this list was consciously ruled out
 of scope. Only the six items above are decisions rather than backlog.
 
-That distinction now costs almost nothing to maintain, because the "in
-scope, not reached" set has emptied out to one item. The send job model,
-the filesystem watcher, the send history view and the multi-location
-badge have all left it. **Provider enrichment is what remains** — the
-largest thing still designed here and absent from the code, and the one
-with a prerequisite already waiting on it: the `field_sources` rows being
-written on every create and edit today exist for nothing else. Everything
-else designed in this document is either built or on the list above.
+That distinction now costs nothing at all to maintain, because the "in
+scope, not reached" set is **empty**. The send job model, the filesystem
+watcher, the send history view, the multi-location badge and finally
+provider enrichment have all left it. Everything designed in this
+document is either built or on the list above, and the `field_sources`
+rows that had no reader at all when they were introduced now have two.
+
+Three things ruled out *within* enrichment are decisions of the same kind
+as the six above, and belong here rather than reading as gaps:
+
+- **Automatic enrichment on scan**, and on any schedule. The first thing
+  a person should see is enrichment they asked for, on a book they chose.
+  It is a small change to make it automatic once the manual path has been
+  watched working, and much easier to add than to take back.
+- **A library-wide enrich.** The queue already supports it; the missing
+  piece is an honest progress display for something that takes hours
+  behind a rate limiter, which is its own piece of work.
+- **An enrichment history page.** `/history` exists for sends because a
+  send is an irreversible outbound act you may need to prove happened.
+  Enrichment is repeatable and its result is visible in the fields
+  themselves.
+
+If the first of those ever arrives, one thing has to arrive with it: a
+ceiling on how many times a book is asked about, and something in the job
+record that can tell "asked, and nothing exists to find" from "asked, and
+every provider was down". Today a run in which every provider failed is
+recorded exactly like an honest no-match, which is fine while a person is
+the trigger and wrong the moment anything else is
+(`docs/backlog/2026090402-enrichment-has-no-attempt-ceiling.md`).
