@@ -71,16 +71,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("parse WATCH_SETTLE: must not be negative: %s", watchSettle)
 	}
 
-	// Unlike envOrDefault's other uses, "set but empty" and "unset" must
-	// stay distinct here: METADATA_PROVIDERS= is the documented way to
-	// disable enrichment outright, while leaving it unset means "use the
-	// default pair", so os.LookupEnv is used instead of collapsing both to
-	// the same default.
-	rawMetadataProviders, metadataProvidersSet := os.LookupEnv("METADATA_PROVIDERS")
-	if !metadataProvidersSet {
-		rawMetadataProviders = "openlibrary,googlebooks"
-	}
-	metadataProviderNames := providers.ParseNames(rawMetadataProviders)
+	metadataProviderNames := metadataProviderNames(os.LookupEnv)
 
 	googleBooksAPIKey := os.Getenv("GOOGLE_BOOKS_API_KEY")
 	if googleBooksAPIKey == "" && slices.Contains(metadataProviderNames, "googlebooks") {
@@ -369,6 +360,21 @@ func runScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, 
 	} else {
 		slog.Info("scan complete", attrs...)
 	}
+}
+
+// metadataProviderNames reads METADATA_PROVIDERS. Unlike envOrDefault's
+// other uses, "set but empty" and "unset" must stay distinct here:
+// METADATA_PROVIDERS= is the documented way to disable enrichment outright
+// and make no outbound calls at all, while leaving it unset means "use the
+// default pair" — so this takes a lookup rather than collapsing both to the
+// same default. It takes that lookup as a parameter so the distinction is
+// testable without a whole run().
+func metadataProviderNames(lookup func(string) (string, bool)) []string {
+	raw, set := lookup("METADATA_PROVIDERS")
+	if !set {
+		raw = "openlibrary,googlebooks"
+	}
+	return providers.ParseNames(raw)
 }
 
 func envOrDefault(key, def string) string {

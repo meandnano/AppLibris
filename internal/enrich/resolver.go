@@ -85,6 +85,54 @@ func missingFields(book storage.Book, authors []string, sources map[storage.Meta
 	return missing
 }
 
+// A provider's answer goes into the same columns internal/service's
+// normalizeField guards for a person's edit, but never passes through it —
+// ApplyEnrichedFields is a second writer to those columns. These bound
+// what a remote source can put there, mirroring that function's own limits
+// rather than importing them: internal/service sits above this package,
+// and a background worker asking it to validate would invert the layering.
+// They have to match internal/service's numbers, not merely be of the same
+// kind: a value this package writes but that one would reject is a field
+// the app itself can no longer edit — opening the editor and pressing Save
+// unchanged fails validation on a value nobody typed.
+const (
+	maxEnrichedScalarBytes      = 4096
+	maxEnrichedTitleBytes       = 1024
+	maxEnrichedAuthorNameBytes  = 1024
+	maxEnrichedAuthors          = 100
+	maxEnrichedDescriptionBytes = 64 * 1024
+)
+
+// sanitizeValue makes a provider's answer safe to store in the column
+// field backs: trimmed, capped, and — for every field but description —
+// stripped of the line breaks that would break its single-line rendering
+// everywhere downstream. An over-long value is truncated on a rune
+// boundary rather than dropped: a description cut at 64 KiB is still worth
+// having, and the alternative is a book silently keeping nothing because a
+// provider was verbose.
+func sanitizeValue(field storage.MetadataField, value string) string {
+	if field != storage.FieldDescription {
+		value = strings.Join(strings.Fields(value), " ")
+	}
+	value = strings.TrimSpace(value)
+
+	limit := maxEnrichedScalarBytes
+	switch field {
+	case storage.FieldDescription:
+		limit = maxEnrichedDescriptionBytes
+	case storage.FieldTitle:
+		limit = maxEnrichedTitleBytes
+	case storage.FieldAuthors:
+		// One name at a time — metadataValues sanitises the list element
+		// by element, so this is the per-name limit, not the list's.
+		limit = maxEnrichedAuthorNameBytes
+	}
+	if len(value) > limit {
+		value = strings.ToValidUTF8(value[:limit], "")
+	}
+	return value
+}
+
 // metadataValues converts a provider's answer into the same
 // map[storage.MetadataField]string shape Resolve returns, so merging is a
 // matter of copying keys across. An empty field in m — the normal case,
@@ -92,15 +140,39 @@ func missingFields(book storage.Book, authors []string, sources map[storage.Meta
 // through as an empty string and is filtered out by the caller before it
 // can overwrite anything.
 func metadataValues(m Metadata) map[storage.MetadataField]string {
-	return map[storage.MetadataField]string{
+	// Author names are sanitised individually and re-joined, since
+	// authorsJoin is itself a newline: sanitising the joined string would
+	// collapse a three-author list into one name.
+	//
+	// The list is cut at maxEnrichedAuthors for the same reason each name
+	// is capped: a longer one is a list internal/service would refuse, so
+	// keeping it whole would cost the book its editable author field.
+	authors := make([]string, 0, len(m.Authors))
+	for _, name := range m.Authors {
+		if len(authors) == maxEnrichedAuthors {
+			break
+		}
+		if name = sanitizeValue(storage.FieldAuthors, name); name != "" {
+			authors = append(authors, name)
+		}
+	}
+
+	values := map[storage.MetadataField]string{
 		storage.FieldTitle:         m.Title,
-		storage.FieldAuthors:       strings.Join(m.Authors, authorsJoin),
+		storage.FieldAuthors:       strings.Join(authors, authorsJoin),
 		storage.FieldPublisher:     m.Publisher,
 		storage.FieldPublishedDate: m.PublishedDate,
 		storage.FieldLanguage:      m.Language,
 		storage.FieldISBN:          m.ISBN,
 		storage.FieldDescription:   m.Description,
 	}
+	for field, value := range values {
+		if field == storage.FieldAuthors {
+			continue
+		}
+		values[field] = sanitizeValue(field, value)
+	}
+	return values
 }
 
 // Resolve decides which of book's metadata fields are missing, asks
@@ -129,24 +201,24 @@ func metadataValues(m Metadata) map[storage.MetadataField]string {
 // earns.
 //
 // A cover is handled apart from the other six fields: values only ever
-// carries strings, but a fetched cover is bytes that still need
-// internal/cover.Store — an I/O step Resolve deliberately never performs
-// itself, per the "no database, no clock" contract above — to become the
-// path cover_path actually stores. So a provider's cover bytes come back
-// separately, as coverData and coverSource, for the worker to convert and
-// fold into values once it has. They are still subject to the same
-// missing-set membership, first-answer-wins and early-stop rules as every
-// other field: a book whose cover_path is already set is never handed a
-// provider's cover answer at all, matching Resolve's "never overwrites a
-// present value" rule for the other six.
+// carries strings that go straight into a column, and a cover's does not
+// exist until the image has been downloaded and passed through
+// internal/cover.Store — I/O Resolve deliberately never performs itself,
+// per the "no database, no clock" contract above. So a provider's cover
+// comes back separately, as coverURL and coverSource, for the worker to
+// fetch, store and fold into values once it has a path. It is still
+// subject to the same missing-set membership, first-answer-wins and
+// early-stop rules as every other field: a book whose cover_path is
+// already set never has a cover URL returned for it, so nothing downloads
+// an image the book has no use for.
 func Resolve(ctx context.Context, book storage.Book, authors []string,
 	sources map[storage.MetadataField]string, providers []Provider,
-) (values map[storage.MetadataField]string, sourceName map[storage.MetadataField]string, coverData []byte, coverSource string, err error) {
+) (values map[storage.MetadataField]string, sourceName map[storage.MetadataField]string, coverURL string, coverSource string, err error) {
 	missing := missingFields(book, authors, sources)
 	values = map[storage.MetadataField]string{}
 	sourceName = map[storage.MetadataField]string{}
 	if len(missing) == 0 {
-		return values, sourceName, nil, "", nil
+		return values, sourceName, "", "", nil
 	}
 
 	for _, p := range providers {
@@ -177,11 +249,11 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			delete(missing, field)
 		}
 
-		if missing[storage.FieldCover] && len(answer.Cover) > 0 {
-			coverData = answer.Cover
+		if missing[storage.FieldCover] && answer.CoverURL != "" {
+			coverURL = answer.CoverURL
 			coverSource = p.Name()
 			delete(missing, storage.FieldCover)
 		}
 	}
-	return values, sourceName, coverData, coverSource, nil
+	return values, sourceName, coverURL, coverSource, nil
 }

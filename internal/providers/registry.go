@@ -29,16 +29,24 @@ func constructors(googleBooksAPIKey string) map[string]func() enrich.Provider {
 }
 
 // compose wraps p in the three decorators in the order fixed at
-// construction: cache innermost so a cached hit costs neither a
-// rate-limit token nor a retry attempt, retry next so a retried attempt is
-// still paced, rate limit outermost so retries are paced too.
+// construction, outermost first, since the outermost wrapper is the one a
+// call reaches first: cache outermost, so a lookup already answered costs
+// neither a rate-limit token nor a retry attempt; retry next; rate limit
+// innermost, so every attempt retry makes — not just the first — takes a
+// token of its own.
+//
+// The order is easy to get backwards, and both halves matter. Rate
+// limiting on the outside would make a cached hit wait a full interval for
+// an answer already in memory, and would leave retries paced only by their
+// own backoff — sending a provider that just answered 429 three requests
+// inside one token, which is precisely when it must not be.
 func compose(p enrich.Provider) enrich.Provider {
-	return enrich.WithRateLimit(
+	return enrich.WithCache(
 		enrich.WithRetry(
-			enrich.WithCache(p, enrich.DefaultCacheSize),
+			enrich.WithRateLimit(p, enrich.DefaultRateLimitInterval),
 			enrich.DefaultRetryAttempts,
 		),
-		enrich.DefaultRateLimitInterval,
+		enrich.DefaultCacheSize,
 	)
 }
 
@@ -78,13 +86,21 @@ func validNames(ctor map[string]func() enrich.Provider) []string {
 // entirely blank, which parses to no names at all rather than one blank
 // one, so an explicitly empty METADATA_PROVIDERS resolves to no providers
 // rather than a resolution error.
+//
+// A name repeated in the list is kept once, at its first position, the
+// same rule internal/service's normalizeAuthors applies to a repeated
+// author: a repeat is a slip, and honouring it would build the provider
+// twice, each with its own cache and its own rate-limit budget — doubling
+// the calls the decorators exist to reduce.
 func ParseNames(raw string) []string {
 	var names []string
+	seen := map[string]bool{}
 	for _, part := range strings.Split(raw, ",") {
 		name := strings.TrimSpace(part)
-		if name == "" {
+		if name == "" || seen[name] {
 			continue
 		}
+		seen[name] = true
 		names = append(names, name)
 	}
 	return names

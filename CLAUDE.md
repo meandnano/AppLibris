@@ -47,10 +47,18 @@ full design.
   index. Every timestamp column is written as fixed-width UTC RFC 3339 text
   (`sqliteTimeLayout`/`formatTime` in `internal/storage`), so SQLite's own
   date functions and a plain `ORDER BY` both work on it.
-- `field_sources` (`internal/storage/metadata.go`) records where each of the
-  seven editable fields' current value came from — `embedded` when the
-  scanner read it out of the file, `manual` once a person has edited it,
-  or (since `internal/enrich`) a provider's name once it has answered one.
+- `field_sources` (`internal/storage/metadata.go`) records where a field's
+  current value came from: `embedded` when the scanner read it out of the
+  file, `manual` once a person has edited it, or (since `internal/enrich`)
+  a provider's name once it has answered one. That full range applies to
+  the seven fields a person may edit. The eighth, `cover`, is narrower and
+  the difference is easy to misread: a `cover` row exists **only** when a
+  provider supplied the image. `setEmbeddedFieldSourcesTx` doesn't list
+  `FieldCover`, so a cover the scanner extracted records nothing at all,
+  and `UpdateBookField` refuses `FieldCover`, so `manual` is unreachable
+  by construction. The discriminator between a provider's cover and the
+  scanner's is therefore "a row naming a provider" versus "no row" — not
+  "a provider's name versus `embedded`", which never matches.
   It was deliberately write-only until now: DESIGN.md forbade shipping
   manual editing before provenance, because the provider-enrichment step
   that came later would otherwise overwrite hand-fixed values with no way
@@ -87,17 +95,32 @@ full design.
   eighth value, `cover` (migrations `2026090304`–`2026090307`, the same
   create-copy-drop-rename shape `2026083010`–`2026083013` used for
   `book_files`, since SQLite cannot alter a CHECK constraint in place).
-  `MetadataField` gained `FieldCover` (`"cover"`); `UpdateBookField`
-  refuses it exactly as it already refuses `authors`, since nothing in the
-  UI lets a person type a cover — its source is always `embedded` (the
-  scanner) or a provider's name, never `manual`. `ApplyEnrichedFields` is
-  the only writer, storing a fetched cover's on-disk path (never a remote
-  URL) under the answering provider's name through the same
-  `updateBookColumnTx`/`fieldIsStillMissingTx` path every other field
-  uses — so a cover the scanner already found is never replaced by a
-  provider's guess, the same protection `isMissing` gives every text
-  field. See `internal/enrich` below for the fetch and storage side of
-  this.
+  `MetadataField` gained `FieldCover` (`"cover"`), but — unlike every
+  other member — it is deliberately **absent from `metadataFields`**, so
+  `ParseMetadataField("cover")` returns false. That map is the gate on
+  `internal/web`'s per-field edit routes, on the detail page's `?edit=`
+  parameter and on `service.UpdateBookMetadata`, and `cover_path` holds a
+  path `internal/cover.Store` produced rather than text a person types.
+  Accepting the name there is the mistake to avoid rather than an
+  oversight to fix: it makes `POST /books/{id}/metadata/cover` a route
+  that parses, reaches `UpdateBookField`, comes back with
+  `ErrInvalidMetadataField` — which is *not* `service.ErrInvalidMetadata`,
+  so the web layer logs and answers **500** — and makes the matching `GET`
+  render an empty field fragment pointing at `/books/0/metadata/`, where
+  a name nobody may edit should simply 404. `UpdateBookField` still
+  refuses `FieldCover` outright alongside `authors` as a second guard, and
+  `ApplyEnrichedFields` is the only writer, storing a fetched cover's
+  on-disk path (never a remote URL) under the answering provider's name
+  through the same `updateBookColumnTx`/`fieldIsStillMissingTx` path every
+  other field uses — so a cover the scanner already found is never
+  replaced by a provider's guess, the same protection `isMissing` gives
+  every text field. Writing `cover_path` also clears `cover_retry`, the
+  same pairing `UpdateBookCoverPath` makes: the marker means "a cover
+  store failed, try again next sweep", and the scanner skips its stat
+  check entirely while it is set, so leaving it would have the next sweep
+  re-extract the embedded cover over the provider's one while
+  `field_sources` went on naming the provider. See `internal/enrich` below
+  for the fetch and storage side of this.
 - `books_fts` is an FTS5 virtual table (`title`, `authors`, `description`,
   `isbn`, `tokenize='unicode61 remove_diacritics 2'`) — a plain table, not
   `content='books'`, since `authors` isn't a books column to begin with
@@ -315,7 +338,14 @@ full design.
   resized to ~400px on the long edge (never upscaling), JPEG, written to a
   derived directory keyed by content hash. `Store` creates that directory
   on demand and writes through a same-directory temporary file plus atomic
-  rename, so readers never observe a partial canonical cover.
+  rename, so readers never observe a partial canonical cover. It reads the
+  image header on its own first (`image.DecodeConfig`) and refuses anything
+  over `maxPixels` (50 MP) before `image.Decode` allocates a pixel buffer:
+  a byte cap on the input is not the same guarantee, since a small, highly
+  compressible file decodes to width × height × 4 bytes of RGBA. That
+  matters most for a cover a metadata provider supplied (`internal/enrich`),
+  where the bytes come from a third party, but an embedded cover is no more
+  trustworthy.
 - `internal/resend` — `Client.Send` POSTs one attachment to Resend's API
   (DESIGN.md's send-to-Kindle transport), enforcing the ~28MB size limit
   DESIGN.md derives before attempting a send, and setting a non-empty
@@ -385,8 +415,8 @@ full design.
   error arrives with `ctx` already cancelled), skips the write and leaves
   the row `sending` for startup recovery to surface.
 - `internal/enrich` is the metadata provider-enrichment queue: a single
-  `Worker` over `enrichment_jobs`, the `Provider` interface real providers
-  will implement (none do yet — that's a later step), and the `Resolve`
+  `Worker` over `enrichment_jobs`, the `Provider` interface
+  `internal/openlibrary` and `internal/googlebooks` implement, and the `Resolve`
   function that decides which fields a book still needs and merges what
   providers answer. Modeled directly on `internal/sender` — same
   claim/process/terminal-write shape, `Notify` poke plus `pollInterval`
@@ -434,19 +464,55 @@ full design.
   no grouping to do here; keeping every resolved field in one call is also
   what lets `ApplyEnrichedFields` apply (or skip, per its own re-check)
   the whole set as one transaction.
+  Every value a provider supplies is sanitised before it reaches that map
+  (`sanitizeValue`): trimmed, capped, and — for every field but
+  description — stripped of line breaks. `ApplyEnrichedFields` is a second
+  writer to the same columns `internal/service`'s `normalizeField` guards
+  for a person's edit and never passes through it, so this is the only
+  thing bounding what a remote source can put there; the limits are
+  restated here rather than imported, since `internal/service` sits above
+  this package — but restated at the *same numbers* (1024 bytes for a
+  title and for one author name, 4096 for the other scalars, 64 KiB for a
+  description, 100 names), which is the part that is easy to get wrong: a
+  value this package writes but `normalizeField`/`normalizeAuthors` would
+  reject is a field the app can no longer edit, since opening the editor
+  and pressing Save unchanged then fails on a value nobody typed. Author
+  names are sanitised one at a time and re-joined, because `authorsJoin`
+  is itself a newline and sanitising the joined string would collapse a
+  list into one name; the list is cut at 100 for the same reason each name
+  is capped.
   A cover is resolved the same way but kept out of that map: `Resolve`
-  returns it separately, as `coverData`/`coverSource`, since `values` is
-  string-valued and a fetched cover is still raw image bytes needing
+  returns it separately, as `coverURL`/`coverSource`, since `values` only
+  carries strings that go straight into a column and a cover's path does
+  not exist until the image has been downloaded and passed through
   `internal/cover.Store` — I/O `Resolve` deliberately never performs
   itself, per its "no database, no clock" contract. It is otherwise
   subject to the same rules as every other field — missing-set
   membership, first-answer-wins, the early stop once nothing is left
   missing — so a book whose `cover_path` is already set is never handed a
-  provider's cover answer at all. The worker converts it exactly like the
-  scanner converts an embedded one (`cover.Store`, resized, JPEG, named by
-  the book's content hash — never the remote URL) before folding the
-  resulting path into `values` under `storage.FieldCover`; a `Store`
-  failure only loses the cover — it is logged and the field is left out of
+  provider's cover answer at all, which is what makes "only fetch a cover
+  the book actually needs" a property of the whole chain rather than of the
+  write alone: no URL comes back, so nothing is downloaded. The worker
+  fetches it through `enrich.FetchCover` on its own `*http.Client`
+  (`coverFetchTimeout`) — the URL may name a host, Open Library's separate
+  covers domain for one, that has nothing to do with whichever provider
+  answered — capped at `MaxCoverBytes` (512 KiB) read *before* any decoding
+  and refused outright if its scheme is not `http`/`https`, since the URL
+  is a third party's string rather than one this process chose — a check
+  the worker's client re-applies to every redirect hop
+  (`CheckCoverRedirect`, which also bounds the hop count), because the URL
+  a redirect names is chosen by whichever host answered rather than by the
+  provider whose response named the cover, so checking only the first one
+  guards nothing. The request carries the same descriptive `User-Agent`
+  both provider clients set, for the same reason: the host answering it is
+  most often `covers.openlibrary.org`, Open Library's own, and a throttle
+  or block there would arrive as an ordinary fetch failure — every cover
+  silently unstored, nothing naming the cause. It then
+  converts it exactly like the scanner converts an embedded one
+  (`cover.Store`, resized, JPEG, named by the book's content hash — never
+  the remote URL) before folding the resulting path into `values` under
+  `storage.FieldCover`; a fetch or `Store` failure only loses the cover —
+  it is logged and the field is left out of
   `values`, the same tolerance the scanner gives a cover that fails to
   store, since it must not fail a job whose text fields already resolved.
   The job itself failing (the book vanished between
@@ -479,13 +545,47 @@ full design.
   for the retry decorator and the resolver's skip-and-continue to see as
   such. A matched result's cover — Open Library's separate
   `covers.openlibrary.org` host by numeric `cover_i` id, Google's
-  `imageLinks.thumbnail` URL already in the same response — is fetched
-  through the shared `enrich.FetchCover` and folded into `Metadata.Cover`;
-  a cover fetch failing only loses the cover, logged and never turning a
-  good text answer into a search error. Google Books' optional `apiKey` is
-  scrubbed from every returned error's text (`redactKey`/`redactKeyBytes`)
-  since a transport error embeds the full request URL and the key must
-  never reach a log line through one. Both packages are tested against
+  `imageLinks` already in the same response, largest size first and
+  upgraded to `https` — is **named, not downloaded**: it comes back as
+  `Metadata.CoverURL`, and the fetch is `internal/enrich`'s Worker's. That
+  split is the point. Fetching inside the provider spends a round trip and
+  up to `MaxCoverBytes` on every lookup, including the common case of a
+  book that already has an embedded cover and whose answer `Resolve` then
+  discards — and it puts image bytes into `WithCache`'s bounded map, where
+  512 entries times two providers is hundreds of megabytes held for the
+  process's lifetime. A `Metadata` of nothing but strings is what keeps
+  that cache kilobytes. Both clients classify their failures for the retry
+  decorator: a 429, a 5xx and a transport failure wrap
+  `enrich.ErrRetryable`, while a 400, a 403 (Google's over-quota and
+  rejected-key answer) and a malformed body do not, since another attempt
+  answers those identically. Both set a descriptive `User-Agent` — Open
+  Library's terms ask for one and throttle the generic Go default, and a
+  block there would be indistinguishable from any other transient failure,
+  so the resolver would silently skip the provider for every book. Open
+  Library's MARC three-letter language codes are mapped to the ISO 639-1
+  form `internal/epub`, `internal/fb2` and Google Books all produce, so the
+  column doesn't hold `eng` for one book and `en` for the next. Google's
+  `intitle:`/`inauthor:` values are quoted, which is load-bearing: the
+  Volumes API binds the qualifier to the single token after it, so an
+  unquoted multi-word title constrains only its first word. Google's
+  `description` is documented as *HTML-formatted* and is rendered to plain
+  text (`plainText`) before it leaves the package — block tags become line
+  breaks, inline ones are dropped, and entities are unescaped only
+  afterwards, so text that was itself escaped markup (`&lt;b&gt;`)
+  survives as the characters an author wrote rather than being stripped as
+  a tag. Nothing downstream treats a description as markup: `html/template`
+  escapes the detail page's, so a tag left in shows a reader a literal
+  `<p>` and then offers them the same markup to hand-fix in the edit
+  textarea. It lives here rather than in `internal/enrich`'s
+  `sanitizeValue` because Open Library's description is plain to begin
+  with, and stripping tags from every provider's answer would mangle one
+  that legitimately contains a `<`. Google Books'
+  optional `apiKey` is scrubbed from every returned error's text
+  (`redactKey`/`redactKeyBytes`) since a transport error embeds the full
+  request URL and the key must never reach a log line through one; the
+  redacting error keeps an `Unwrap`, so whether `errors.Is(err,
+  context.Canceled)` works doesn't depend on whether a key happens to be
+  configured. Both packages are tested against
   `httptest.Server` with hand-written fixtures under `testdata` standing
   in for a real capture — this sandboxed environment has no outbound
   network access, so the fixtures match each API's stable, publicly
@@ -514,13 +614,22 @@ full design.
   back would be a cycle. `Resolve(names, googleBooksAPIKey)` turns
   `METADATA_PROVIDERS`'s parsed, ordered names (`ParseNames`) into the
   decorated chain `enrich.New` expects, composing each provider once as
-  `WithRateLimit(WithRetry(WithCache(client)))` — cache innermost so a
-  cached hit spends neither a rate-limit token nor a retry attempt, rate
-  limit outermost so a retried attempt is paced too. An unknown name fails
-  outright, naming it and listing the valid ones sorted, rather than
-  silently running with fewer providers than configured; an empty name
-  list resolves to an empty, non-nil slice — `METADATA_PROVIDERS=` is the
-  documented way to disable enrichment outright, not an error.
+  `WithCache(WithRetry(WithRateLimit(client)))`. The order is easy to get
+  backwards, and it reads outermost-first because the outermost wrapper is
+  what a call reaches first: **cache outermost**, so a lookup already
+  answered spends neither a rate-limit token nor a retry attempt; **rate
+  limit innermost**, so every attempt `WithRetry` makes — not just the
+  first — takes a token of its own. Rate limiting on the outside instead
+  would make a cached hit wait a full interval for an answer already in
+  memory, and would leave retries paced only by `retryBaseDelay`, sending
+  a provider that just answered 429 three requests inside one token. An
+  unknown name fails outright, naming it and listing the valid ones
+  sorted, rather than silently running with fewer providers than
+  configured; a name repeated in the list is kept once at its first
+  position (two chains would mean two caches and two rate-limit budgets);
+  an empty name list resolves to an empty, non-nil slice —
+  `METADATA_PROVIDERS=` is the documented way to disable enrichment
+  outright, not an error.
 - `internal/scanner` — walks the library directory and syncs it into
   `internal/storage`. Cheap path+size+mtime check (against `book_files`)
   skips unchanged files; content hash (SHA-256) is a book's identity, so
@@ -1076,8 +1185,11 @@ full design.
   at `/`, on `ADDR` (default `:8080`), with `ReadHeaderTimeout`,
   `ReadTimeout`, `WriteTimeout` and `IdleTimeout` all set — rather than
   blocking startup on a scan; the initial full sweep of `LIBRARY_DIR`
-  (default `./library`) against `COVERS_DIR` (default `./data/covers`)
-  runs in the background alongside the `SCAN_INTERVAL`-timed (default
+  (default `./library`) against `COVERS_DIR` (default `./data/covers`,
+  passed to the enrichment worker as well as the scanner — a
+  provider-fetched cover goes through the same `internal/cover.Store` path,
+  so the directory has one shape regardless of which side produced a
+  thumbnail) runs in the background alongside the `SCAN_INTERVAL`-timed (default
   `15m`) periodic rescan, with missing-file grace period `MISSING_GRACE`
   (default `24h`). `WATCH_ENABLED` (default `true`) and `WATCH_SETTLE`
   (default `5s`, rejected as negative like `MISSING_GRACE`) configure the

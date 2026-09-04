@@ -2,6 +2,7 @@ package openlibrary
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,8 +91,10 @@ func TestByISBNMatchParsesFixture(t *testing.T) {
 	if got.PublishedDate != "1996" {
 		t.Errorf("PublishedDate = %q, want %q", got.PublishedDate, "1996")
 	}
-	if got.Language != "eng" {
-		t.Errorf("Language = %q, want %q", got.Language, "eng")
+	// The fixture answers MARC "eng"; the library stores ISO 639-1, the
+	// same form internal/epub and internal/fb2 produce.
+	if got.Language != "en" {
+		t.Errorf("Language = %q, want %q", got.Language, "en")
 	}
 	if got.ISBN != "9780262011532" {
 		t.Errorf("ISBN = %q, want %q (the 13-digit form, normalised)", got.ISBN, "9780262011532")
@@ -298,24 +301,21 @@ func TestNormalizeISBN(t *testing.T) {
 func isZeroMetadata(m enrich.Metadata) bool {
 	return m.Title == "" && len(m.Authors) == 0 && m.Publisher == "" &&
 		m.PublishedDate == "" && m.Language == "" && m.ISBN == "" && m.Description == "" &&
-		len(m.Cover) == 0
+		m.CoverURL == ""
 }
 
-// The fixture's cover_i (240727) is what drives the URL this test's cover
-// server expects — covers.openlibrary.org's documented id-based shape.
-func TestByISBNFetchesCoverWhenPresent(t *testing.T) {
+// The fixture's cover_i (240727) is what drives the URL this test expects —
+// covers.openlibrary.org's documented id-based shape. The provider names
+// the URL and downloads nothing: the fetch is internal/enrich's Worker's,
+// so it only happens for a book that actually needs a cover.
+func TestByISBNNamesCoverURLWithoutFetchingIt(t *testing.T) {
 	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write(readFixture(t, "search_match.json"))
 	})
 
-	wantCover := []byte("fake-jpeg-bytes")
 	coverHits := 0
 	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		coverHits++
-		if r.URL.Path != "/b/id/240727-L.jpg" {
-			t.Errorf("cover request path = %q, want /b/id/240727-L.jpg", r.URL.Path)
-		}
-		w.Write(wantCover)
 	}))
 	t.Cleanup(coverServer.Close)
 	client.coverBaseURL = coverServer.URL
@@ -324,52 +324,110 @@ func TestByISBNFetchesCoverWhenPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	if string(got.Cover) != string(wantCover) {
-		t.Errorf("Cover = %q, want %q", got.Cover, wantCover)
+	want := coverServer.URL + "/b/id/240727-L.jpg"
+	if got.CoverURL != want {
+		t.Errorf("CoverURL = %q, want %q", got.CoverURL, want)
 	}
-	if coverHits != 1 {
-		t.Errorf("cover server hits = %d, want 1", coverHits)
-	}
-}
-
-// A cover fetch failure must not fail the whole lookup — the rest of the
-// fixture's fields are still a good answer.
-func TestByISBNCoverFetchFailureDoesNotFailTheLookup(t *testing.T) {
-	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write(readFixture(t, "search_match.json"))
-	})
-	// client.coverBaseURL already points at testClient's default 404
-	// server, so no override is needed here.
-
-	got, err := client.ByISBN(context.Background(), "9780262011532")
-	if err != nil {
-		t.Fatalf("ByISBN: want nil error when only the cover fetch fails, got %v", err)
-	}
-	if got.Title == "" {
-		t.Error("Title is empty — a failed cover fetch must not lose the rest of the answer")
-	}
-	if got.Cover != nil {
-		t.Errorf("Cover = %q, want nil", got.Cover)
+	if coverHits != 0 {
+		t.Errorf("cover server hits = %d, want 0 — a lookup must never download an image", coverHits)
 	}
 }
 
-func TestByISBNNoCoverIDNeverCallsCoverServer(t *testing.T) {
+func TestByISBNNoCoverIDLeavesCoverURLEmpty(t *testing.T) {
 	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write(readFixture(t, "search_no_match.json"))
 	})
 
-	coverHits := 0
-	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		coverHits++
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(coverServer.Close)
-	client.coverBaseURL = coverServer.URL
-
-	if _, err := client.ByISBN(context.Background(), "0000000000"); err != nil {
+	got, err := client.ByISBN(context.Background(), "0000000000")
+	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	if coverHits != 0 {
-		t.Errorf("cover server hits = %d, want 0 — no match means no cover_i to fetch", coverHits)
+	if got.CoverURL != "" {
+		t.Errorf("CoverURL = %q, want empty — no match means no cover_i", got.CoverURL)
+	}
+}
+
+// Open Library answers MARC three-letter codes; internal/epub, internal/fb2
+// and internal/googlebooks all produce ISO 639-1. Without the mapping the
+// language column holds "eng" for one book and "en" for the next.
+func TestLanguageIsMappedToISO639(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"eng", "en"},
+		{"RUS", "ru"},
+		{"en", "en"},
+		{"zzz", "zzz"},
+	}
+	for _, c := range cases {
+		if got := isoLanguage(c.in); got != c.want {
+			t.Errorf("isoLanguage(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// publish_date wins when present; first_publish_year is the fallback for
+// the many docs that carry only it, and neither leaves the field empty
+// rather than inventing one.
+func TestPublishedDatePrefersPublishDateThenFirstPublishYear(t *testing.T) {
+	client := New()
+	cases := []struct {
+		name string
+		doc  searchDoc
+		want string
+	}{
+		{"publish_date wins", searchDoc{PublishDate: []string{"1996"}, FirstPublishYear: 1984}, "1996"},
+		{"first_publish_year is the fallback", searchDoc{FirstPublishYear: 1984}, "1984"},
+		{"neither invents nothing", searchDoc{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := client.toMetadata(c.doc).PublishedDate; got != c.want {
+				t.Errorf("PublishedDate = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A 429 or 5xx is worth another attempt; a 400 will be rejected identically
+// however many times it is asked, so WithRetry must be able to tell them
+// apart through enrich.ErrRetryable.
+func TestErrorsAreClassifiedRetryableOrNot(t *testing.T) {
+	cases := []struct {
+		status        int
+		wantRetryable bool
+	}{
+		{http.StatusTooManyRequests, true},
+		{http.StatusInternalServerError, true},
+		{http.StatusBadGateway, true},
+		{http.StatusBadRequest, false},
+		{http.StatusForbidden, false},
+	}
+	for _, c := range cases {
+		client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(c.status)
+		})
+		_, err := client.ByISBN(context.Background(), "9780262011532")
+		if err == nil {
+			t.Fatalf("status %d: want an error", c.status)
+		}
+		if got := errors.Is(err, enrich.ErrRetryable); got != c.wantRetryable {
+			t.Errorf("status %d: errors.Is(err, ErrRetryable) = %v, want %v", c.status, got, c.wantRetryable)
+		}
+	}
+}
+
+// Open Library's API terms ask for a descriptive User-Agent and throttle
+// the generic Go default; a block would look like any other transient
+// failure, so it would silently skip this provider for every book.
+func TestRequestsCarryAUserAgent(t *testing.T) {
+	var got string
+	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.Write(readFixture(t, "search_no_match.json"))
+	})
+	if _, err := client.ByISBN(context.Background(), "9780262011532"); err != nil {
+		t.Fatal(err)
+	}
+	if got != userAgent {
+		t.Errorf("User-Agent = %q, want %q", got, userAgent)
 	}
 }

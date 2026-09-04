@@ -27,6 +27,19 @@ func newMetadataTestService(t *testing.T) (*Service, *storage.DB, int64) {
 	return New(db), db, id
 }
 
+// "cover" is a storage.MetadataField, but not one a person may edit: it
+// holds a path internal/cover.Store produced, written only by
+// ApplyEnrichedFields. It must be rejected as an unknown field here rather
+// than reaching UpdateBookField, whose ErrInvalidMetadataField is not
+// ErrInvalidMetadata and so surfaces as a 500 rather than a 404.
+func TestUpdateBookMetadataRejectsCover(t *testing.T) {
+	svc, _, id := newMetadataTestService(t)
+	_, err := svc.UpdateBookMetadata(context.Background(), id, MetadataUpdate{Field: "cover", Value: "covers/x.jpg"})
+	if !errors.Is(err, ErrInvalidMetadata) {
+		t.Errorf("UpdateBookMetadata(cover) error = %v, want ErrInvalidMetadata", err)
+	}
+}
+
 func TestUpdateBookMetadataNormalizesAndReloads(t *testing.T) {
 	svc, _, id := newMetadataTestService(t)
 

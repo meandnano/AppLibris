@@ -16,7 +16,7 @@
         ],
         "publisher": "MIT Press",
         "publishedDate": "1996",
-        "description": "Structure and Interpretation of Computer Programs has had a dramatic impact on computer science curricula over the past decade.",
+        "description": "<p>Structure and Interpretation of Computer Programs has had a <b>dramatic</b> impact on computer science curricula over the past decade.</p><p>It is used at MIT &amp; elsewhere.</p>",
         "industryIdentifiers": [
           {
             "type": "ISBN_10",

@@ -31,9 +31,18 @@ var metadataFields = map[string]MetadataField{
 	string(FieldLanguage):      FieldLanguage,
 	string(FieldISBN):          FieldISBN,
 	string(FieldDescription):   FieldDescription,
-	string(FieldCover):         FieldCover,
 }
 
+// ParseMetadataField turns a request-supplied field name into a
+// MetadataField. It deliberately does not accept "cover": the map is the
+// gate on internal/web's per-field edit routes and internal/service's
+// UpdateBookMetadata, and cover_path holds a path internal/cover.Store
+// produced rather than anything a person types. Accepting it there would
+// make /books/{id}/metadata/cover a route that parses, renders an empty
+// field fragment and then 500s on save, instead of the 404 a name nobody
+// may edit deserves. FieldCover still exists as a constant — field_sources
+// records it and ApplyEnrichedFields writes it — it is just never parsed
+// from a request.
 func ParseMetadataField(value string) (MetadataField, bool) {
 	field, ok := metadataFields[value]
 	return field, ok
@@ -130,7 +139,13 @@ func updateBookColumnTx(ctx context.Context, tx *sql.Tx, bookID int64, field Met
 	case FieldDescription:
 		_, err = tx.ExecContext(ctx, `UPDATE books SET description = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
 	case FieldCover:
-		_, err = tx.ExecContext(ctx, `UPDATE books SET cover_path = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
+		// cover_retry is cleared with the path, exactly as
+		// UpdateBookCoverPath does: it marks "a cover store failed, try
+		// again next sweep", and a book that now has a cover has nothing
+		// left to retry. Leaving it set would make the scanner skip its
+		// stat check and re-extract the embedded cover over this one,
+		// while field_sources went on naming the provider.
+		_, err = tx.ExecContext(ctx, `UPDATE books SET cover_path = ?, cover_retry = 0, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
 	default:
 		return ErrInvalidMetadataField
 	}

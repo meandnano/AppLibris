@@ -3,6 +3,7 @@ package enrich
 import (
 	"container/list"
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +18,9 @@ const DefaultRateLimitInterval = 1 * time.Second
 // WithRateLimit paces p's calls — ByISBN and Search share one budget — to
 // at most one every `every`. The wait honours ctx cancellation, so a
 // shutdown mid-wait returns promptly instead of blocking until the next
-// slot opens.
+// slot opens. internal/providers wraps it closest to the client, so every
+// attempt WithRetry makes takes its own token: a provider answering 429 is
+// exactly the one that must not then be sent a burst.
 func WithRateLimit(p Provider, every time.Duration) Provider {
 	return &rateLimitedProvider{Provider: p, limiter: newRateLimiter(every)}
 }
@@ -55,6 +58,13 @@ type rateLimiter struct {
 }
 
 func newRateLimiter(every time.Duration) *rateLimiter {
+	// time.NewTicker panics below zero, and WithRateLimit is exported —
+	// falling back to the default matches how WithRetry and newCache
+	// normalise an unusable argument rather than taking the caller down.
+	if every <= 0 {
+		every = DefaultRateLimitInterval
+	}
+
 	rl := &rateLimiter{tokens: make(chan struct{}, 1)}
 	rl.tokens <- struct{}{}
 
@@ -93,6 +103,13 @@ const DefaultCacheSize = 512
 // negative answer forever. An error is never cached — DESIGN.md's
 // four-case contract treats an error as a transient, retryable condition,
 // not an answer worth remembering.
+//
+// internal/providers wraps it outermost, so a hit costs neither a
+// rate-limit token nor a retry attempt — the whole point of having
+// answered once already. Cached values are Metadata, which holds only
+// strings: a cover's bytes are the Worker's to fetch and never enter this
+// map, so a full cache is kilobytes rather than the hundreds of megabytes
+// MaxCoverBytes times DefaultCacheSize would allow.
 func WithCache(p Provider, size int) Provider {
 	return &cachedProvider{Provider: p, cache: newCache(size)}
 }
@@ -204,11 +221,15 @@ const (
 	retryMaxDelay  = 4 * time.Second
 )
 
-// WithRetry retries p's call when it returns an error — the 429/5xx/
-// transport case DESIGN.md's four-case contract draws a hard line
-// around — up to attempts total tries, with a backoff and a ctx check
-// between them. A "no match" (zero Metadata, nil error) is never
-// retried: it is not a failure, it is an answer.
+// WithRetry retries p's call when it fails with an error wrapping
+// ErrRetryable — the 429/5xx/transport case DESIGN.md's four-case contract
+// draws a hard line around — up to attempts total tries, with a backoff
+// and a ctx check between them. Any other error is returned on the first
+// attempt: a 400, a rejected API key or a malformed body will fail the
+// same way however many times it is asked, and spending three requests and
+// ~1.5s per book discovering that is waste a background worker pays on
+// every book in the library. A "no match" (zero Metadata, nil error) is
+// never retried either: it is not a failure, it is an answer.
 func WithRetry(p Provider, attempts int) Provider {
 	return &retryProvider{Provider: p, attempts: attempts}
 }
@@ -250,6 +271,9 @@ func (r *retryProvider) call(ctx context.Context, fn func() (Metadata, error)) (
 		m, err := fn()
 		if err == nil {
 			return m, nil
+		}
+		if !errors.Is(err, ErrRetryable) {
+			return Metadata{}, err
 		}
 		lastErr = err
 	}

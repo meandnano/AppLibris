@@ -2,6 +2,7 @@ package googlebooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -92,8 +93,46 @@ func TestByISBNMatchParsesFixture(t *testing.T) {
 	if got.ISBN != "9780262011532" {
 		t.Errorf("ISBN = %q, want %q (the 13-digit form, normalised)", got.ISBN, "9780262011532")
 	}
-	if got.Description == "" {
-		t.Error("Description is empty")
+	// The Volumes API documents description as HTML-formatted, and nothing
+	// downstream renders markup — html/template escapes the detail page's
+	// description, so a tag left in shows up literally.
+	wantDescription := "Structure and Interpretation of Computer Programs has had a dramatic " +
+		"impact on computer science curricula over the past decade.\n\n" +
+		"It is used at MIT & elsewhere."
+	if got.Description != wantDescription {
+		t.Errorf("Description = %q, want %q", got.Description, wantDescription)
+	}
+}
+
+func TestPlainText(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"plain text is untouched", "A plain synopsis.", "A plain synopsis."},
+		{"inline tags are dropped", "A <b>bold</b> and <i>italic</i> claim.", "A bold and italic claim."},
+		{"br becomes a line break", "First line.<br>Second line.", "First line.\nSecond line."},
+		{"self-closing br becomes a line break", "First.<br/>Second.", "First.\nSecond."},
+		{"paragraphs are separated by a blank line", "<p>One.</p><p>Two.</p>", "One.\n\nTwo."},
+		{"entities are unescaped", "Salt &amp; pepper &mdash; a pair.", "Salt & pepper — a pair."},
+		{
+			"escaped markup survives as text",
+			"Use &lt;b&gt; for bold.",
+			"Use <b> for bold.",
+		},
+		{"a bare less-than is not a tag", "a < b and c > d", "a < b and c > d"},
+		{"an unterminated tag is not stripped", "ends with <p", "ends with <p"},
+		{"attributes are dropped with their tag", `<a href="http://x/">link</a>`, "link"},
+		{"surrounding whitespace is trimmed", "<p>  Trimmed.  </p>", "Trimmed."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := plainText(tt.raw); got != tt.want {
+				t.Errorf("plainText(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -208,10 +247,10 @@ func TestByISBNEmptyISBNNeverCallsServer(t *testing.T) {
 func TestSearchSendsTitleAndAuthor(t *testing.T) {
 	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("q")
-		if !strings.Contains(q, "intitle:Structure and Interpretation of Computer Programs") {
+		if !strings.Contains(q, `intitle:"Structure and Interpretation of Computer Programs"`) {
 			t.Errorf("q = %q, want it to contain intitle:...", q)
 		}
-		if !strings.Contains(q, "inauthor:Harold Abelson") {
+		if !strings.Contains(q, `inauthor:"Harold Abelson"`) {
 			t.Errorf("q = %q, want it to contain inauthor:...", q)
 		}
 		w.Write(readFixture(t, "volumes_match.json"))
@@ -363,15 +402,16 @@ func TestNormalizeISBN(t *testing.T) {
 func isZeroMetadata(m enrich.Metadata) bool {
 	return m.Title == "" && len(m.Authors) == 0 && m.Publisher == "" &&
 		m.PublishedDate == "" && m.Language == "" && m.ISBN == "" && m.Description == "" &&
-		len(m.Cover) == 0
+		m.CoverURL == ""
 }
 
-func TestByISBNFetchesCoverWhenPresent(t *testing.T) {
-	wantCover := []byte("fake-jpeg-bytes")
+// The provider names the cover's URL and downloads nothing: the fetch is
+// internal/enrich's Worker's, so it only happens for a book that actually
+// needs a cover.
+func TestByISBNNamesCoverURLWithoutFetchingIt(t *testing.T) {
 	coverHits := 0
 	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		coverHits++
-		w.Write(wantCover)
 	}))
 	t.Cleanup(coverServer.Close)
 
@@ -387,43 +427,18 @@ func TestByISBNFetchesCoverWhenPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	if string(got.Cover) != string(wantCover) {
-		t.Errorf("Cover = %q, want %q", got.Cover, wantCover)
+	// best() upgrades http to https; the test server only speaks http, so
+	// the expectation is the upgraded form rather than the URL as served.
+	want := strings.Replace(coverServer.URL+"/cover.jpg", "http://", "https://", 1)
+	if got.CoverURL != want {
+		t.Errorf("CoverURL = %q, want %q", got.CoverURL, want)
 	}
-	if coverHits != 1 {
-		t.Errorf("cover server hits = %d, want 1", coverHits)
-	}
-}
-
-// A cover fetch failure must not fail the whole lookup — the rest of the
-// volume's fields are still a good answer.
-func TestByISBNCoverFetchFailureDoesNotFailTheLookup(t *testing.T) {
-	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(coverServer.Close)
-
-	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
-		body := fmt.Sprintf(`{"totalItems":1,"items":[{"volumeInfo":{
-			"title":"Structure and Interpretation of Computer Programs",
-			"imageLinks":{"thumbnail":%q}
-		}}]}`, coverServer.URL+"/cover.jpg")
-		w.Write([]byte(body))
-	})
-
-	got, err := client.ByISBN(context.Background(), "9780262011532")
-	if err != nil {
-		t.Fatalf("ByISBN: want nil error when only the cover fetch fails, got %v", err)
-	}
-	if got.Title == "" {
-		t.Error("Title is empty — a failed cover fetch must not lose the rest of the answer")
-	}
-	if got.Cover != nil {
-		t.Errorf("Cover = %q, want nil", got.Cover)
+	if coverHits != 0 {
+		t.Errorf("cover server hits = %d, want 0 — a lookup must never download an image", coverHits)
 	}
 }
 
-func TestByISBNNoImageLinksNeverFetchesCover(t *testing.T) {
+func TestByISBNNoImageLinksLeavesCoverURLEmpty(t *testing.T) {
 	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(readFixture(t, "volumes_match.json"))
 	})
@@ -432,7 +447,126 @@ func TestByISBNNoImageLinksNeverFetchesCover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	if got.Cover != nil {
-		t.Errorf("Cover = %q, want nil — volumes_match.json carries no imageLinks", got.Cover)
+	if got.CoverURL != "" {
+		t.Errorf("CoverURL = %q, want empty — volumes_match.json carries no imageLinks", got.CoverURL)
+	}
+}
+
+// thumbnail is ~128px wide, under internal/cover's 400px target, which
+// never upscales — so a larger link wins when the volume offers one. The
+// http URLs Google answers with are upgraded to https, since these bytes
+// end up served from /covers/.
+func TestCoverURLPrefersTheLargestLinkAndUpgradesToHTTPS(t *testing.T) {
+	cases := []struct {
+		name  string
+		links imageLinks
+		want  string
+	}{
+		{
+			name:  "largest wins",
+			links: imageLinks{Large: "https://books.example/large", Medium: "https://books.example/medium", Thumbnail: "https://books.example/thumb"},
+			want:  "https://books.example/large",
+		},
+		{
+			name:  "thumbnail is the fallback",
+			links: imageLinks{Thumbnail: "https://books.example/thumb"},
+			want:  "https://books.example/thumb",
+		},
+		{
+			name:  "http is upgraded",
+			links: imageLinks{Thumbnail: "http://books.google.com/books/content?id=1"},
+			want:  "https://books.google.com/books/content?id=1",
+		},
+		{name: "no links at all", links: imageLinks{}, want: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.links.best(); got != c.want {
+				t.Errorf("best() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The Volumes API binds intitle: to the single token after it, so an
+// unquoted multi-word title constrains only its first word and lets the
+// rest drift into free-text terms — matching some other book whose
+// metadata is then written under this one's provenance.
+func TestSearchQuotesItsQualifiers(t *testing.T) {
+	var gotQuery string
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("q")
+		w.Write(readFixture(t, "volumes_no_match.json"))
+	})
+
+	if _, err := client.Search(context.Background(), `Structure and "Interpretation"`, []string{"Harold Abelson"}); err != nil {
+		t.Fatal(err)
+	}
+	want := `intitle:"Structure and Interpretation" inauthor:"Harold Abelson"`
+	if gotQuery != want {
+		t.Errorf("q = %q, want %q", gotQuery, want)
+	}
+}
+
+// A 429 or 5xx is worth another attempt; a 403 (Google's over-quota and
+// rejected-key answer) and a 400 will be rejected identically however many
+// times they are asked, so WithRetry must be able to tell them apart
+// through enrich.ErrRetryable.
+func TestErrorsAreClassifiedRetryableOrNot(t *testing.T) {
+	cases := []struct {
+		status        int
+		wantRetryable bool
+	}{
+		{http.StatusTooManyRequests, true},
+		{http.StatusInternalServerError, true},
+		{http.StatusServiceUnavailable, true},
+		{http.StatusBadRequest, false},
+		{http.StatusForbidden, false},
+	}
+	for _, c := range cases {
+		client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(c.status)
+		})
+		_, err := client.ByISBN(context.Background(), "9780262011532")
+		if err == nil {
+			t.Fatalf("status %d: want an error", c.status)
+		}
+		if got := errors.Is(err, enrich.ErrRetryable); got != c.wantRetryable {
+			t.Errorf("status %d: errors.Is(err, ErrRetryable) = %v, want %v", c.status, got, c.wantRetryable)
+		}
+	}
+}
+
+// Redaction must not cost the error chain: without Unwrap, whether
+// context.Canceled were detectable on a transport failure would depend on
+// whether an API key happened to be configured.
+func TestRedactedTransportErrorStillUnwraps(t *testing.T) {
+	client, _ := testClient(t, "secret-key", func(w http.ResponseWriter, r *http.Request) {})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.ByISBN(ctx, "9780262011532")
+	if err == nil {
+		t.Fatal("want an error from a cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false for %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-key") {
+		t.Errorf("error text leaks the API key: %v", err)
+	}
+}
+
+func TestRequestsCarryAUserAgent(t *testing.T) {
+	var got string
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.Write(readFixture(t, "volumes_no_match.json"))
+	})
+	if _, err := client.ByISBN(context.Background(), "9780262011532"); err != nil {
+		t.Fatal(err)
+	}
+	if got != userAgent {
+		t.Errorf("User-Agent = %q, want %q", got, userAgent)
 	}
 }

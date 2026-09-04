@@ -203,3 +203,36 @@ func TestPeriodicScanDoesNotSweepOnACancelledContext(t *testing.T) {
 		t.Errorf("a cancelled shutdown swept anyway and logged an error:\n%s", got)
 	}
 }
+
+// METADATA_PROVIDERS= (set, empty) is the documented way to run with no
+// outbound requests at all, which only works because it stays distinct from
+// the variable being unset. Collapsing the two — the pattern every other
+// env var in run() uses — would silently give a deployment that asked for
+// no outbound calls the default provider pair.
+func TestMetadataProviderNamesDistinguishesEmptyFromUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		env   map[string]string
+		want  []string
+		isSet bool
+	}{
+		{name: "unset uses the default pair", want: []string{"openlibrary", "googlebooks"}},
+		{name: "set but empty disables enrichment", env: map[string]string{"METADATA_PROVIDERS": ""}, want: nil},
+		{name: "one name", env: map[string]string{"METADATA_PROVIDERS": "openlibrary"}, want: []string{"openlibrary"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := metadataProviderNames(func(key string) (string, bool) {
+				v, ok := tc.env[key]
+				return v, ok
+			})
+			if len(got) != len(tc.want) {
+				t.Fatalf("names = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("names[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}

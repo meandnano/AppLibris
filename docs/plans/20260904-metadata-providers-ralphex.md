@@ -103,10 +103,18 @@ func WithCache(p Provider, size int) Provider
 func WithRetry(p Provider, attempts int) Provider
 ```
 
-Composed once at construction:
-`WithRateLimit(WithRetry(WithCache(client)))` — cache innermost of the
-three wrappers so a cached hit costs neither a rate-limit token nor a
-retry budget, rate limit outermost so retries are also paced.
+Composed once at construction as `WithCache(WithRetry(WithRateLimit(
+client)))` — **cache outermost**, so a lookup already answered spends
+neither a rate-limit token nor a retry attempt; **rate limit innermost**,
+so every attempt `WithRetry` makes takes a token of its own.
+
+(This corrects the order first written here, `WithRateLimit(WithRetry(
+WithCache(client)))`, which contradicted its own stated reasons: with
+`WithRateLimit` outermost a cached hit *would* spend a token, and retries
+would *not* each take one — they would be paced only by `retryBaseDelay`,
+sending a provider that just answered 429 three requests inside one
+token. The composition reads outermost-first because the outermost
+wrapper is what a call reaches first.)
 
 - **Rate limit**: a ticker-gated token honouring `ctx` cancellation while
   waiting. Open Library asks for courtesy limits rather than enforcing
@@ -188,10 +196,20 @@ keep the key out of logs.
       `field_sources` with `cover` accepted by the `field` CHECK, one
       statement per file, following the `2026083010`–`2026083013`
       precedent
-- [x] add the `cover` member to `internal/storage`'s `MetadataField` enum
-      and its `metadataFields` parse map, keeping `UpdateBookField`'s
-      existing rejection of fields it cannot write as a plain column
-      correct
+- [x] add the `cover` member to `internal/storage`'s `MetadataField` enum,
+      keeping `UpdateBookField`'s existing rejection of fields it cannot
+      write as a plain column correct.
+      **Deviation, decided during implementation:** `cover` is
+      deliberately *not* added to the `metadataFields` parse map, contrary
+      to this line as first written. That map gates `internal/web`'s
+      per-field edit routes, the detail page's `?edit=` parameter and
+      `service.UpdateBookMetadata`, and `cover_path` holds a path
+      `internal/cover.Store` produced rather than text a person types.
+      Accepting the name there makes `POST /books/{id}/metadata/cover` a
+      route that parses, reaches `UpdateBookField`, comes back with
+      `ErrInvalidMetadataField` — which is not `service.ErrInvalidMetadata`
+      — and so answers 500, and makes the matching `GET` render an empty
+      field fragment where a 404 is what a name nobody may edit deserves
 - [x] make `ApplyEnrichedFields` able to write `cover_path` with `cover`
       provenance, through the same `fieldIsStillMissingTx` re-check every
       other field goes through
@@ -265,7 +283,10 @@ keep the key out of logs.
       for exactly that reason and is the only thing that imports all
       three.
 - [x] compose each provider once at construction as
-      `WithRateLimit(WithRetry(WithCache(client)))`
+      `WithCache(WithRetry(WithRateLimit(client)))` — the corrected order,
+      per the Decisions section above; `registry_test.go` asserts both
+      properties it exists for (a cached hit spends no token, and each
+      retry attempt takes its own)
 - [x] read `METADATA_PROVIDERS` (default `openlibrary,googlebooks`) in
       `cmd/server`, resolve names in order through the map, and pass the
       slice to `enrich.New` in place of today's `nil`
@@ -315,20 +336,23 @@ keep the key out of logs.
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented
-- [ ] run full project test suite with the race detector
-- [ ] run project linter and formatter - all issues must be fixed
-- [ ] build with cgo disabled to confirm the static-binary property
+- [x] verify all requirements from Overview are implemented
+- [x] run full project test suite with the race detector
+- [x] run project linter and formatter - all issues must be fixed (project's
+      actual tooling is `go vet` + `gofmt`, per `.github/workflows/verify.yaml`
+      and the Makefile — no golangci-lint config exists in the repo; both are
+      clean)
+- [x] build with cgo disabled to confirm the static-binary property
       survives the new dependencies
-- [ ] mutation check: make a 404 an error → the "no match is not an error"
+- [x] mutation check: make a 404 an error → the "no match is not an error"
       test must fail
-- [ ] mutation check: remove the cache's negative caching → the
+- [x] mutation check: remove the cache's negative caching → the
       repeat-call test must fail
-- [ ] mutation check: store the remote URL in `cover_path` instead of the
+- [x] mutation check: store the remote URL in `cover_path` instead of the
       stored file → the cover test must fail
-- [ ] mutation check: accept an unknown provider name at startup → its
+- [x] mutation check: accept an unknown provider name at startup → its
       test must fail
-- [ ] revert all four mutations and re-run the suite
+- [x] revert all four mutations and re-run the suite
 
 ## Post-Completion
 

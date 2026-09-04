@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,10 +31,26 @@ const coverBaseURL = "https://covers.openlibrary.org"
 
 const providerName = "openlibrary"
 
+// userAgent identifies this client to Open Library, whose API terms ask
+// for a descriptive one with a contact address and throttle or block the
+// generic Go default. A block would arrive as a 403 or 429 indistinguishable
+// from any other transient failure, so the resolver would go on silently
+// skipping this provider for every book.
+const userAgent = "library/1.0 (+https://github.com/meandnano/AppLibris)"
+
 // maxErrorBodyBytes bounds how much of an error response body is read into
 // the returned error's text — enough for a message, not an unbounded read
 // of whatever a misbehaving upstream sends back.
 const maxErrorBodyBytes = 512
+
+// maxResponseBytes bounds the success path the same way maxErrorBodyBytes
+// bounds the failure one: a search document is a third party's response
+// body, and decoding it straight off the wire lets a misbehaving or
+// hijacked upstream allocate in this process without limit. Generous
+// against a real /search.json answer for limit=1 — even a heavily-reissued
+// work's document is well under this — so the cap only ever trips on a
+// response nothing here should be parsing anyway.
+const maxResponseBytes = 4 * 1024 * 1024
 
 // Client looks books up against Open Library's Search API.
 type Client struct {
@@ -119,9 +134,13 @@ func (c *Client) search(ctx context.Context, query url.Values) (enrich.Metadata,
 		return enrich.Metadata{}, fmt.Errorf("openlibrary: build request: %w", err)
 	}
 
+	req.Header.Set("User-Agent", userAgent)
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return enrich.Metadata{}, fmt.Errorf("openlibrary: request failed: %w", err)
+		// A transport or timeout failure is the retryable case: nothing
+		// about the request itself was rejected.
+		return enrich.Metadata{}, fmt.Errorf("openlibrary: request failed: %w: %w", enrich.ErrRetryable, err)
 	}
 	defer resp.Body.Close()
 
@@ -130,26 +149,28 @@ func (c *Client) search(ctx context.Context, query url.Values) (enrich.Metadata,
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		if isRetryableStatus(resp.StatusCode) {
+			return enrich.Metadata{}, fmt.Errorf("openlibrary: unexpected status %d: %s: %w", resp.StatusCode, body, enrich.ErrRetryable)
+		}
 		return enrich.Metadata{}, fmt.Errorf("openlibrary: unexpected status %d: %s", resp.StatusCode, body)
 	}
 
 	var parsed searchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&parsed); err != nil {
 		return enrich.Metadata{}, fmt.Errorf("openlibrary: parse response: %w", err)
 	}
 	if len(parsed.Docs) == 0 {
 		return enrich.Metadata{}, nil
 	}
 
-	return c.toMetadata(ctx, parsed.Docs[0]), nil
+	return c.toMetadata(parsed.Docs[0]), nil
 }
 
-// toMetadata converts doc, and — when it names one — fetches its cover
-// image via the separate covers.openlibrary.org host. A cover fetch
-// failure only loses the cover: it is logged and otherwise ignored, never
-// turned into a search error, since the rest of doc is still a good answer
-// on its own.
-func (c *Client) toMetadata(ctx context.Context, doc searchDoc) enrich.Metadata {
+// toMetadata converts doc, naming its cover's URL on the separate
+// covers.openlibrary.org host when doc carries a cover id. Nothing is
+// downloaded here: internal/enrich's Worker fetches the image, and only
+// for a book whose cover_path is actually empty.
+func (c *Client) toMetadata(doc searchDoc) enrich.Metadata {
 	m := enrich.Metadata{
 		Title:   strings.TrimSpace(doc.Title),
 		Authors: doc.AuthorName,
@@ -165,18 +186,42 @@ func (c *Client) toMetadata(ctx context.Context, doc searchDoc) enrich.Metadata 
 		m.PublishedDate = fmt.Sprintf("%d", doc.FirstPublishYear)
 	}
 	if len(doc.Language) > 0 {
-		m.Language = doc.Language[0]
+		m.Language = isoLanguage(doc.Language[0])
 	}
 	if doc.CoverID > 0 {
-		coverURL := fmt.Sprintf("%s/b/id/%d-L.jpg", c.coverBaseURL, doc.CoverID)
-		data, err := enrich.FetchCover(ctx, c.httpClient, coverURL)
-		if err != nil {
-			slog.Warn("openlibrary: fetch cover failed", "cover_id", doc.CoverID, "error", err)
-		} else {
-			m.Cover = data
-		}
+		m.CoverURL = fmt.Sprintf("%s/b/id/%d-L.jpg", c.coverBaseURL, doc.CoverID)
 	}
 	return m
+}
+
+// marcToISO639 maps the MARC language codes search.json answers with
+// ("eng", "rus") onto the two-letter ISO 639-1 codes internal/epub,
+// internal/fb2 and internal/googlebooks all produce. Without it the
+// language column holds "eng" for one book and "en" for the next, rendered
+// raw side by side on the detail page. Only the languages this library
+// plausibly contains are listed; anything else passes through unchanged,
+// which is still better than a wrong guess.
+var marcToISO639 = map[string]string{
+	"ara": "ar", "ces": "cs", "chi": "zh", "dan": "da", "dut": "nl",
+	"eng": "en", "fin": "fi", "fre": "fr", "ger": "de", "gre": "el",
+	"heb": "he", "hun": "hu", "ita": "it", "jpn": "ja", "kor": "ko",
+	"lat": "la", "nor": "no", "pol": "pl", "por": "pt", "rus": "ru",
+	"spa": "es", "swe": "sv", "tur": "tr", "ukr": "uk",
+}
+
+func isoLanguage(code string) string {
+	if iso, ok := marcToISO639[strings.ToLower(strings.TrimSpace(code))]; ok {
+		return iso
+	}
+	return code
+}
+
+// isRetryableStatus reports whether status is one another attempt could
+// plausibly answer differently: 429 (asked to slow down) and any 5xx. A
+// 4xx other than that is the server rejecting this request in particular,
+// and will reject the next one identically.
+func isRetryableStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
 }
 
 // bestISBN picks the search result's ISBN-13 form when one is present,

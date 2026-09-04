@@ -841,3 +841,36 @@ func TestFieldSourcesForBook(t *testing.T) {
 		t.Errorf("sources = %v, want no row for an empty, never-set field", sources)
 	}
 }
+
+// A book whose earlier embedded-cover store failed carries cover_retry;
+// filling cover_path from a provider has to clear it, since the scanner
+// skips its stat check entirely while the marker is set and would
+// re-extract the embedded cover over the provider's one on the next sweep.
+func TestApplyEnrichedFieldsClearsCoverRetry(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, Book{
+		ContentHash: "cover-retry-hash", Title: "Book", SortTitle: "book", CoverRetry: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	values := map[MetadataField]string{FieldCover: "covers/cover-retry-hash.jpg"}
+	sourceName := map[MetadataField]string{FieldCover: "openlibrary"}
+	if _, err := db.ApplyEnrichedFields(ctx, id, values, sourceName, time.Now()); err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID: %+v, %v", book, err)
+	}
+	if book.CoverPath != "covers/cover-retry-hash.jpg" {
+		t.Errorf("CoverPath = %q, want the enriched path", book.CoverPath)
+	}
+	if book.CoverRetry {
+		t.Error("CoverRetry is still set after a cover was stored")
+	}
+}

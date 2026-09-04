@@ -7,6 +7,8 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,7 +97,7 @@ func TestWorkerAppliesResolvedFieldsAndMarksDone(t *testing.T) {
 
 // With no providers configured, every job still resolves cleanly to done
 // having called nothing and changed nothing — the wiring stays exercised
-// before step 05 gives the worker a real provider to call.
+// which is what METADATA_PROVIDERS= configures.
 func TestWorkerWithNoProvidersResolvesDoneAndTouchesNothing(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -363,11 +365,35 @@ func TestWorkerAppliesEachProvidersFieldsUnderItsOwnSource(t *testing.T) {
 	}
 }
 
+// jobStatus reads a book's job status, for tests asserting the terminal
+// state rather than what was written to the book.
+func jobStatus(t *testing.T, db *storage.DB, bookID int64) string {
+	t.Helper()
+	var status string
+	if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE book_id = ?`, bookID).Scan(&status); err != nil {
+		t.Fatalf("query job status: %v", err)
+	}
+	return status
+}
+
+// coverServer serves img at /cover.jpg and counts how many times it was
+// asked for one, which is what lets a test assert that no request is made
+// at all for a book that already has a cover.
+func coverServer(t *testing.T, img []byte) (url string, requests *int) {
+	t.Helper()
+	count := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count++
+		w.Write(img)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/cover.jpg", &count
+}
+
 // A fetched cover must end up resized and stored under the book's own
-// content hash — never the provider's URL, which Resolve never even sees
-// (it only ever gets raw bytes; see Metadata.Cover's doc comment) — with
-// provenance recorded under the provider that answered it, the same as any
-// other field.
+// content hash — never the provider's URL, which is all Resolve ever sees
+// (see Metadata.CoverURL's doc comment) — with provenance recorded under
+// the provider that answered it, the same as any other field.
 func TestWorkerStoresFetchedCoverUnderContentHashWithProvenance(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -381,12 +407,16 @@ func TestWorkerStoresFetchedCoverUnderContentHashWithProvenance(t *testing.T) {
 		t.Fatalf("EnqueueEnrichment: %v", err)
 	}
 
-	img := solidPNG(t)
+	coverURL, requests := coverServer(t, solidPNG(t))
 	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		return Metadata{Cover: img}, nil
+		return Metadata{CoverURL: coverURL}, nil
 	}}
 	w := New(db, []Provider{p}, coversDir)
 	w.drain(ctx)
+
+	if *requests != 1 {
+		t.Errorf("cover requests = %d, want 1", *requests)
+	}
 
 	book, err := db.FindBookByID(ctx, id)
 	if err != nil || book == nil {
@@ -427,11 +457,18 @@ func TestWorkerNeverOverwritesAnExistingCover(t *testing.T) {
 		t.Fatalf("EnqueueEnrichment: %v", err)
 	}
 
+	coverURL, requests := coverServer(t, solidPNG(t))
 	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		return Metadata{Cover: solidPNG(t)}, nil
+		return Metadata{CoverURL: coverURL}, nil
 	}}
 	w := New(db, []Provider{p}, coversDir)
 	w.drain(ctx)
+
+	// The stronger half of "never asked for one": no image is downloaded
+	// either, so a book that already has a cover costs no bandwidth.
+	if *requests != 0 {
+		t.Errorf("cover requests = %d, want 0 — the book already has a cover", *requests)
+	}
 
 	book, err := db.FindBookByID(ctx, id)
 	if err != nil || book == nil {
@@ -448,5 +485,130 @@ func TestWorkerNeverOverwritesAnExistingCover(t *testing.T) {
 	derivedPath := filepath.Join(coversDir, "worker-cover-2.jpg")
 	if _, err := os.Stat(derivedPath); err == nil {
 		t.Errorf("a cover was stored at %s for a book that should never have been asked for one", derivedPath)
+	}
+}
+
+// A cover is the one field whose loss costs nothing but a dashed box in
+// the grid, so a fetch or store failure must not fail a job whose text
+// fields already resolved — and must not record a path or provenance for a
+// cover that was never stored.
+func TestWorkerCoverFailureStillFinishesTheJob(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"undecodable image", []byte("not-an-image")},
+		{"empty body", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			ctx := context.Background()
+			coversDir := t.TempDir()
+
+			id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-cover-fail", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
+			if err != nil {
+				t.Fatalf("CreateBook: %v", err)
+			}
+			if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+				t.Fatalf("EnqueueEnrichment: %v", err)
+			}
+
+			coverURL, _ := coverServer(t, tc.body)
+			p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+				return Metadata{CoverURL: coverURL, Publisher: "Ace Books"}, nil
+			}}
+			New(db, []Provider{p}, coversDir).drain(ctx)
+
+			if got := jobStatus(t, db, id); got != "done" {
+				t.Errorf("job status = %q, want done — a lost cover must not fail a job whose text fields resolved", got)
+			}
+			book, err := db.FindBookByID(ctx, id)
+			if err != nil || book == nil {
+				t.Fatalf("FindBookByID: %+v, %v", book, err)
+			}
+			if book.Publisher != "Ace Books" {
+				t.Errorf("Publisher = %q, want it applied regardless of the cover", book.Publisher)
+			}
+			if book.CoverPath != "" {
+				t.Errorf("CoverPath = %q, want empty — nothing was stored", book.CoverPath)
+			}
+			var source string
+			err = db.Read().QueryRow(`SELECT source FROM field_sources WHERE book_id = ? AND field = ?`, id, storage.FieldCover).Scan(&source)
+			if err == nil {
+				t.Errorf("cover provenance = %q, want no row at all", source)
+			}
+		})
+	}
+}
+
+// A provider answering a cover URL with a scheme other than http or https
+// must be refused before any request is made — the URL is a third party's
+// string, not something this process chose.
+func TestWorkerRefusesANonHTTPCoverURL(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	coversDir := t.TempDir()
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-cover-scheme", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{CoverURL: "file:///etc/passwd"}, nil
+	}}
+	New(db, []Provider{p}, coversDir).drain(ctx)
+
+	if got := jobStatus(t, db, id); got != "done" {
+		t.Errorf("job status = %q, want done", got)
+	}
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID: %+v, %v", book, err)
+	}
+	if book.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", book.CoverPath)
+	}
+}
+
+// Enrichment fills cover_path for a book whose earlier embedded-cover store
+// failed (cover_retry set). The marker has to clear with it: the scanner
+// skips its stat check entirely while cover_retry is true, so it would
+// re-extract the embedded cover over the provider's one on the next sweep
+// while field_sources went on naming the provider.
+func TestWorkerClearsCoverRetryWhenItStoresACover(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	coversDir := t.TempDir()
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "worker-cover-retry", Title: "Book", SortTitle: "book",
+		ISBN: "9780000000001", CoverRetry: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	coverURL, _ := coverServer(t, solidPNG(t))
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{CoverURL: coverURL}, nil
+	}}
+	New(db, []Provider{p}, coversDir).drain(ctx)
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID: %+v, %v", book, err)
+	}
+	if book.CoverPath == "" {
+		t.Fatal("CoverPath is empty, want the stored cover")
+	}
+	if book.CoverRetry {
+		t.Error("CoverRetry is still set; the scanner will overwrite this cover on its next sweep")
 	}
 }
