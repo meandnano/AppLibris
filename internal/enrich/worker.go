@@ -216,8 +216,9 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 	// field against the book's *current* state (not the snapshot Resolve
 	// saw) is what keeps this safe against an edit racing the provider
 	// calls above.
+	var written []storage.MetadataField
 	if len(values) > 0 {
-		applied, err := w.db.ApplyEnrichedFields(ctx, job.BookID, values, sourceName, time.Now())
+		fields, applied, err := w.db.ApplyEnrichedFields(ctx, job.BookID, values, sourceName, time.Now())
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -234,9 +235,14 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 			w.fail(ctx, job.ID, bookGoneReason)
 			return
 		}
+		// What ApplyEnrichedFields actually wrote, not what Resolve
+		// proposed: its own re-check skips a field a concurrent edit has
+		// since filled, and the result line exists to say what *this* run
+		// did.
+		written = fields
 	}
 
-	w.done(ctx, job.ID)
+	w.done(ctx, job.ID, written)
 }
 
 // storeCover downloads coverURL and stores it as book's cover thumbnail,
@@ -260,14 +266,15 @@ func (w *Worker) storeCover(ctx context.Context, book storage.Book, coverURL str
 	return path, true
 }
 
-// done records job's successful completion. Like internal/sender's
-// terminal writes, it runs on a context detached from ctx: process has
-// already established there is nothing left to lose by writing the
-// verdict, so a shutdown landing in this exact gap shouldn't cost it.
-func (w *Worker) done(ctx context.Context, jobID int64) {
+// done records job's successful completion, naming the fields written so
+// the UI can report them. Like internal/sender's terminal writes, it runs
+// on a context detached from ctx: process has already established there is
+// nothing left to lose by writing the verdict, so a shutdown landing in
+// this exact gap shouldn't cost it.
+func (w *Worker) done(ctx context.Context, jobID int64, written []storage.MetadataField) {
 	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)
 	defer cancel()
-	if err := w.db.MarkEnrichmentDone(markCtx, jobID, time.Now()); err != nil {
+	if err := w.db.MarkEnrichmentDone(markCtx, jobID, written, time.Now()); err != nil {
 		slog.Error("mark enrichment done", "job_id", jobID, "error", err)
 	}
 }

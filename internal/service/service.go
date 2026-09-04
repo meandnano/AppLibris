@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"net/mail"
+	"strings"
 	"time"
 
 	"library/internal/storage"
@@ -30,6 +31,13 @@ type Service struct {
 	// and an interface would make this package depend on internal/sender,
 	// which depends on storage — a cycle waiting to happen.
 	Notify func()
+
+	// NotifyEnrichment is the same hook for the enrichment worker, kept
+	// separate rather than multiplexed: the two queues are drained by two
+	// workers, and poking the wrong one would leave a job sitting until
+	// its own poll tick. nil in tests and whenever no provider is
+	// configured.
+	NotifyEnrichment func()
 }
 
 // New returns a Service backed by db.
@@ -137,6 +145,28 @@ type BookDetail struct {
 	HasFileSize   bool
 	AddedAt       time.Time
 	Locations     []FileLocation
+	// FieldSources maps a field name to where its current value came from
+	// — "embedded", "manual", or a provider's name. The detail page marks
+	// only the provider ones; see internal/web's makeFieldViews for why
+	// provenance is rendered as a caveat rather than a label on all three.
+	FieldSources map[string]string
+}
+
+// EnrichmentState is one enrichment job as the detail page's control needs
+// it, shaped exactly as SendState is — see enrichmentStateFrom for why the
+// two stay separate rather than sharing a generic job type.
+type EnrichmentState struct {
+	ID            int64
+	BookID        int64
+	Status        string
+	FailureReason string
+	// UpdatedFields names what the run wrote, so the terminal fragment can
+	// say which fields moved. Empty is the "nothing to add" case, which is
+	// a success: it is the common outcome for a book whose embedded
+	// metadata is already complete, and rendering it as a failure would
+	// train people to distrust a working feature.
+	UpdatedFields []string
+	At            time.Time // finished_at once terminal, else queued_at
 }
 
 // FileLocation is one of a book's physical file locations, as the detail
@@ -180,6 +210,15 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 		return nil, err
 	}
 
+	sources, err := s.db.FieldSourcesForBook(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	fieldSources := make(map[string]string, len(sources))
+	for field, source := range sources {
+		fieldSources[string(field)] = source
+	}
+
 	var fileSize int64
 	hasFileSize := len(files) > 0
 	locations := make([]FileLocation, len(files))
@@ -205,6 +244,7 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 		HasFileSize:   hasFileSize,
 		AddedAt:       book.AddedAt,
 		Locations:     locations,
+		FieldSources:  fieldSources,
 	}, nil
 }
 
@@ -359,6 +399,103 @@ func (s *Service) LatestSend(ctx context.Context, bookID int64) (*SendState, err
 		return nil, err
 	}
 	return sendStateFrom(send), nil
+}
+
+// EnrichBook puts bookID on the enrichment queue and returns the resulting
+// state, or nil, nil for a book that doesn't exist — the same
+// absent-isn't-an-error contract GetBook uses, so the handler turns it into
+// a 404 the same way.
+//
+// The state is read back rather than synthesised, because EnqueueEnrichment
+// is idempotent while a job is already queued: pressing the button twice
+// does not make a second promise, and what the caller wants back either way
+// is the job the book actually has. LatestEnrichmentForBook returns that in
+// both cases — the newly inserted row, or the queued one that blocked it.
+func (s *Service) EnrichBook(ctx context.Context, bookID int64) (*EnrichmentState, error) {
+	book, err := s.db.FindBookByID(ctx, bookID)
+	if err != nil {
+		return nil, err
+	}
+	if book == nil {
+		return nil, nil
+	}
+
+	if _, err := s.db.EnqueueEnrichment(ctx, bookID, s.now()); err != nil {
+		return nil, err
+	}
+
+	if s.NotifyEnrichment != nil {
+		s.NotifyEnrichment()
+	}
+
+	job, err := s.db.LatestEnrichmentForBook(ctx, bookID)
+	if err != nil {
+		return nil, err
+	}
+	return enrichmentStateFrom(job), nil
+}
+
+// EnrichmentState returns jobID's current state, or nil if it doesn't
+// exist — the status poll's lookup, mirroring SendState.
+func (s *Service) EnrichmentState(ctx context.Context, jobID int64) (*EnrichmentState, error) {
+	job, err := s.db.GetEnrichmentJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return enrichmentStateFrom(job), nil
+}
+
+// LatestEnrichment returns the most recent job for bookID, or nil if it has
+// never been enriched — the detail page's initial render, mirroring
+// LatestSend, so a page loaded mid-job resumes polling instead of showing a
+// bare button.
+func (s *Service) LatestEnrichment(ctx context.Context, bookID int64) (*EnrichmentState, error) {
+	job, err := s.db.LatestEnrichmentForBook(ctx, bookID)
+	if err != nil {
+		return nil, err
+	}
+	return enrichmentStateFrom(job), nil
+}
+
+// enrichmentAt is enrichment's half of the same collapse sendAt makes:
+// finished_at once the job is terminal, queued_at otherwise, so the
+// template picks one field and never branches on which produced it.
+func enrichmentAt(job storage.EnrichmentJob) time.Time {
+	if job.FinishedAt.Valid {
+		return job.FinishedAt.Time
+	}
+	return job.QueuedAt
+}
+
+// enrichmentStateFrom shapes a storage.EnrichmentJob into an
+// EnrichmentState, splitting the stored comma-separated field list back
+// into names.
+//
+// The symmetry with sendStateFrom is now three pairs deep — state, latest,
+// shaping — and it stays two parallel surfaces rather than one generic job
+// type on purpose. An abstraction over exactly two cases has no third
+// instance to test its shape against, and the two differ in the part that
+// would have to be generic anyway: a send's terminal detail is an address
+// and a failure reason, an enrichment's is a list of fields it wrote. If a
+// third queued-job type ever appears, that is the moment.
+func enrichmentStateFrom(job *storage.EnrichmentJob) *EnrichmentState {
+	if job == nil {
+		return nil
+	}
+	var updated []string
+	for _, name := range strings.Split(job.UpdatedFields, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			updated = append(updated, name)
+		}
+	}
+	return &EnrichmentState{
+		ID:            job.ID,
+		BookID:        job.BookID,
+		Status:        string(job.Status),
+		FailureReason: job.FailureReason,
+		UpdatedFields: updated,
+		At:            enrichmentAt(*job),
+	}
 }
 
 // sendAt collapses a send's "when did this happen" to one instant —

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 )
@@ -22,6 +23,28 @@ const (
 	FieldDescription   MetadataField = "description"
 	FieldCover         MetadataField = "cover"
 )
+
+// metadataFieldOrder is every metadata field in one fixed order. Where a
+// field set has to be reported rather than merely applied — the list
+// ApplyEnrichedFields hands back for the "added publisher, description"
+// line — iterating this instead of ranging over the caller's map keeps the
+// same input reading the same way twice, since Go's map order is
+// deliberately random. internal/enrich's resolver keeps the same order for
+// the same reason.
+var metadataFieldOrder = []MetadataField{
+	FieldTitle,
+	FieldAuthors,
+	FieldPublisher,
+	FieldPublishedDate,
+	FieldLanguage,
+	FieldISBN,
+	FieldDescription,
+	FieldCover,
+}
+
+func isKnownMetadataField(field MetadataField) bool {
+	return slices.Contains(metadataFieldOrder, field)
+}
 
 var metadataFields = map[string]MetadataField{
 	string(FieldTitle):         FieldTitle,

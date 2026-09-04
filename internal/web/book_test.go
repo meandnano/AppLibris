@@ -39,7 +39,7 @@ func TestBookDetailHandlerRendersFullMetadata(t *testing.T) {
 	}
 
 	svc := service.New(db)
-	handler := Routes(svc, t.TempDir(), false)
+	handler := Routes(svc, t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -97,7 +97,7 @@ func TestBookDetailHandlerRendersNoCoverBox(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -132,7 +132,7 @@ func TestBookDetailHandlerRendersEveryAuthorInSourceOrder(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -168,7 +168,7 @@ func TestBookDetailHandlerSparseMetadataShowsEmDashRows(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -201,7 +201,7 @@ func TestBookDetailHandler404sOnNonNumericAndUnknownID(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	for _, path := range []string{"/books/not-a-number", "/books/99999"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -228,7 +228,7 @@ func TestGridCardsLinkToBookDetail(t *testing.T) {
 		t.Fatalf("CreateBook: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -262,7 +262,7 @@ func TestBookDetailHandlerShowsLocationsAndMissingAnnotation(t *testing.T) {
 		t.Fatalf("SetFilesMissing: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -313,7 +313,7 @@ func TestBookDetailHandlerRendersNoSizeWhenBookHasNoLocation(t *testing.T) {
 		t.Fatalf("CreateBook: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -351,7 +351,7 @@ func TestBookDetailHandlerRendersZeroByteFileAsZeroBytes(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

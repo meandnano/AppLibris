@@ -275,6 +275,25 @@ full design.
   to call a send "delivered" because there was nothing left to send. The
   cascade normally removes a claimed job's row along with its book before
   this can be observed; it exists for the narrow claim-then-delete race.
+  `updated_fields` (migration `2026090308`) is a comma-separated list of
+  the fields a run actually wrote, so the UI can name them instead of
+  saying "done" — comma-separated rather than a join table because it is
+  display text for one fragment, never queried, and a table would imply
+  it is data. `MarkEnrichmentDone` takes that list and stores it in the
+  same statement as the terminal state; empty is the ordinary
+  "nothing to add" success. It is what `ApplyEnrichedFields` *wrote*, not
+  what `Resolve` proposed — the two differ whenever its own re-check
+  skips a field a concurrent edit has since filled, and the result line
+  exists to say what this run did. So `ApplyEnrichedFields` returns
+  `(written []MetadataField, exists bool, err error)`, iterating
+  `metadataFieldOrder` rather than ranging over the caller's map so the
+  same input reads the same way twice; it still validates every key up
+  front and fails on an unrecognised field, since iterating the known
+  fields would otherwise pass silently over a typo'd constant, and a
+  silent no-op is how that bug survives to production.
+  `GetEnrichmentJob` and `LatestEnrichmentForBook` are the poll route's
+  and the detail page's lookups, mirroring `GetSend`/`LatestSendForBook`
+  including the `queued_at DESC, id DESC` tie-break.
   `FieldSourcesForBook` is `field_sources`' first reader since it was
   introduced with inline editing — a field absent from the returned map
   (never embedded, never edited) reads back as an empty source, which the
@@ -925,6 +944,29 @@ full design.
   truncated list would be a claim the page cannot support, and the history
   view exists to be believed. `RemoveRecipient` is a thin pass-through to
   `storage.DeleteRecipient`.
+  Enrichment has the matching trio: `EnrichBook` (enqueue, poke the
+  worker via `NotifyEnrichment`, return the state — `nil, nil` for an
+  unknown book, `GetBook`'s contract), `EnrichmentState(ctx, jobID)` and
+  `LatestEnrichment(ctx, bookID)`, shaped through `enrichmentStateFrom`
+  and its own `enrichmentAt` — the same "collapse when-did-this-happen to
+  one `At` field" `sendAt` makes, so a template picks one field and never
+  branches on which produced it. `EnrichBook` reads the state back rather
+  than synthesising it, because `EnqueueEnrichment` is idempotent while a
+  job is queued: pressing the button twice makes no second promise, and
+  what the caller wants back either way is the job the book actually has,
+  which `LatestEnrichmentForBook` returns in both cases.
+  `NotifyEnrichment` is a second function field beside `Notify` rather
+  than one multiplexed hook — two queues, two workers, and poking the
+  wrong one would leave a job sitting until its own poll tick.
+  The symmetry with sending is now three pairs deep (state, latest,
+  shaping) and stays two parallel surfaces on purpose: an abstraction over
+  exactly two cases has no third instance to test its shape against, and
+  the two differ in precisely the part that would have to be generic — a
+  send's terminal detail is an address and a failure reason, an
+  enrichment's is the list of fields it wrote. If a third queued-job type
+  ever appears, that is the moment, not now.
+  `BookDetail.FieldSources` maps a field name to where its current value
+  came from, for the detail page's provenance markers.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
@@ -1156,6 +1198,63 @@ full design.
   none (curl, a script, a browser predating the header) isn't the
   ambient-authority vector this guards, and failing closed there would
   cost the UI for no security gain.
+- Enrichment's surface is three affordances and no more, because this is
+  the one step in the sequence with **no mockup** — the handoff's seven
+  plates never cover it and DESIGN.md designs the mechanism without a
+  surface. Rather than invent one, it answers the three questions
+  enrichment actually raises: where did this value come from
+  (provenance), can I fetch metadata now (a trigger), and did it do
+  anything (a result). A library-wide "enrich everything", an enrichment
+  history page and editing provenance are all deliberately absent — the
+  first has no honest progress display short of building one, the second
+  would be a page nobody opens since the result is visible in the fields
+  themselves, and a source is a fact rather than a setting.
+  **Provenance is shown only where it isn't obvious**: `providerSourceNote`
+  (`book.go`) renders a marker for a provider's name and *nothing* for
+  `embedded`, `manual` or an absent source, so `editableFieldView.SourceNote`
+  is empty for six fields out of seven on a typical book. Every field has
+  a source, and rendering all of them would double the metadata block's
+  weight to say "embedded" seven times — the default, and therefore not
+  information. The marker is a **caveat**: a value the scanner read out of
+  a file is a fact about the file, a value someone typed is theirs, and a
+  value a third-party API guessed at is the only one whose origin changes
+  how much to trust it. `manual` renders nothing deliberately even though
+  it is the source the resolver cares most about — the person who typed it
+  does not need telling, and a label beside a field that already carries
+  an edit affordance is noise. It is derived in `makeFieldViews`, the one
+  place every field view is built, which is also what makes **editing
+  clear the marker for free**: saving sets the source to `manual`, and the
+  metadata POST handler reloads the book rather than echoing the submitted
+  value, so the rebuilt fragment reads the new provenance. A test pins
+  that, because it is exactly what a later "optimisation" removes.
+- `POST /books/{id}/enrich` and `GET /books/{id}/enrichment/{jobID}`
+  (`internal/web/enrich.go`) are the trigger and its poll target, reusing
+  the send control's state machine rather than inventing a second one —
+  not a coincidence to be tidied away but the same underlying thing, a
+  queued background job against one book. Same `sameSiteOnly` wrapper on
+  the POST, same book-id scoping on the poll route so a mismatched pairing
+  404s instead of leaking one book's job state under another's page, same
+  one-swap-region-with-a-stable-id (`#enrich`), and the same
+  progressive-enhancement split: an `HX-Request` gets the fragment,
+  everyone else a `303` back to the book page, whose initial render picks
+  the job up through `LatestEnrichment`. Polling stops **by
+  construction**: only the pending block carries `hx-get`/`hx-trigger`, so
+  a terminal fragment has nothing left to re-arm — no counter, no limit.
+  The form's own `hx-post` survives every state, keeping "Fetch
+  again"/"Retry" htmx-enhanced, and a re-run is a new row the same way a
+  retried send is. Where it differs from sending, and why: there is no
+  recipient picker, so the control is a single button; and the terminal
+  states are "Added publisher, description" or "Nothing to add" rather
+  than delivered/failed. **"Nothing to add" is a success** — it is the
+  ordinary outcome for a book whose embedded metadata is already complete
+  and for any book no provider had an answer for, and rendering it as a
+  failure would train people to distrust a working feature. That is what
+  `EnrichResultOK` carries, and a mutation test asserts it. The result
+  names the fields rather than saying "done" (`enrichmentResultLine`, the
+  `searchSummary` convention) so nobody has to hunt the page for what
+  moved. With no provider configured the control renders the same disabled
+  treatment the send control shows without Resend, and the POST 503s with
+  that fragment rather than 404ing.
 - The masthead's `site-header` partial takes two fields shared by every
   full-page render — `Nav` (`[]navItem`, composed by the package-private
   `navFor`) and `HeaderNote` (a plain string) — replacing what used to be
@@ -1270,6 +1369,13 @@ full design.
   when absent (Google's own anonymous quota still works); its value never
   reaches a log line, in `cmd/server` or inside `internal/googlebooks`
   itself.
+  `enrichEnabled` — whether any provider resolved — is what the *UI* gets,
+  rather than a config flag of its own: a control offering to fetch
+  metadata from nowhere would be a button that cannot do what it says, so
+  with `METADATA_PROVIDERS=` the enrichment control renders the same
+  disabled treatment the send control shows without Resend, and
+  `Service.NotifyEnrichment` is left nil. The worker still runs either
+  way, per the paragraph above.
   `storage.RequeueInterruptedEnrichment` runs once before it starts
   claiming jobs, unconditionally too — the requeue-not-fail counterpart to
   `FailInterruptedSends` above, run every startup rather than only when
@@ -1299,12 +1405,11 @@ full design.
   used everywhere else via `slog`'s package-level functions against that
   default logger.
 
-Still missing from DESIGN.md: any UI surfacing enrichment — the queue,
-worker, provider interface, resolver, both providers and the decorator/
-registry wiring are all built (`internal/enrich`, `internal/openlibrary`,
-`internal/googlebooks`, `internal/providers`) but nothing in production
-enqueues a job yet — near-duplicate detection, format conversion, and
-library grid paging.
+Still missing from DESIGN.md: near-duplicate detection, format conversion,
+and library grid paging. DESIGN.md's metadata feature is complete as of
+the enrichment UI — the queue, worker, provider interface, resolver, both
+providers, the decorator/registry wiring and the per-book control that
+puts a job on the queue all exist.
 
 ## Planning
 

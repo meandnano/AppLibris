@@ -52,6 +52,10 @@
            is the reason the page gets opened". */}}
       {{template "send-control" .}}
 
+      {{/* Below sending, deliberately: this is a maintenance action on the
+           page's data, not the reason the page gets opened. */}}
+      {{template "enrich-control" .}}
+
       {{template "book-field-description" .DescriptionField}}
 
       <dl class="detail__meta">

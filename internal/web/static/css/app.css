@@ -1197,3 +1197,129 @@ a.masthead__link:hover {
 .detail__send:empty {
   display: none;
 }
+
+/* Provenance marker. The same mono --fg-faint register a missing
+   location's note already uses for secondary annotation — no new colour,
+   no badge, no icon, because the marker is a caveat on one value rather
+   than a status of its own. Rendered only for a provider source; see
+   providerSourceNote in book.go. */
+.editable__source {
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+
+/* The enrichment control borrows the send control's frame and status-box
+   vocabulary deliberately — it is the same kind of thing, a queued
+   background job against one book — but sits lower on the page and needs
+   no picker, so it is a single row rather than a form with a stack. */
+.enrich {
+  border: 1px solid var(--rule);
+  background: var(--bg-sunken);
+  padding: 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 560px;
+}
+
+.enrich__disabled {
+  margin: 0;
+  color: var(--fg-faint);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.enrich__form {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.enrich__button {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 9px 16px;
+  border: 1px solid var(--rule);
+  background: var(--bg-raised);
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.enrich__button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.enrich__button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.enrich__spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--accent-soft);
+  border-top-color: currentcolor;
+  border-radius: 50%;
+  animation: search-spin 0.7s linear infinite;
+}
+
+.enrich__hint {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+.enrich__status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--rule);
+}
+
+.enrich__status-label {
+  font-size: 13.5px;
+}
+
+.enrich__status-detail {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.enrich__status--pending {
+  border-left-color: var(--accent);
+}
+
+.enrich__status--pending .enrich__status-label {
+  color: var(--accent);
+}
+
+.enrich__status--ok {
+  border-left-color: var(--ok);
+}
+
+.enrich__status--ok .enrich__status-label {
+  color: var(--ok);
+}
+
+.enrich__status--err {
+  border-left-color: var(--err);
+  background: var(--err-soft);
+}
+
+.enrich__status--err .enrich__status-label {
+  color: var(--err);
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -24,17 +25,22 @@ type EnrichmentJob struct {
 	BookID        int64
 	Status        EnrichmentStatus
 	FailureReason string
+	// UpdatedFields names the fields this run actually wrote, so the UI
+	// can say what changed rather than just "done". Comma-separated
+	// rather than a join table because it is display text for one
+	// fragment, never queried — a table would imply it is data.
+	UpdatedFields string
 	QueuedAt      time.Time
 	StartedAt     sql.NullTime
 	FinishedAt    sql.NullTime
 }
 
-const enrichmentJobColumns = `id, book_id, status, failure_reason, queued_at, started_at, finished_at`
+const enrichmentJobColumns = `id, book_id, status, failure_reason, updated_fields, queued_at, started_at, finished_at`
 
 func scanEnrichmentJob(row rowScanner) (*EnrichmentJob, error) {
 	var j EnrichmentJob
 	var status string
-	err := row.Scan(&j.ID, &j.BookID, &status, &j.FailureReason, &j.QueuedAt, &j.StartedAt, &j.FinishedAt)
+	err := row.Scan(&j.ID, &j.BookID, &status, &j.FailureReason, &j.UpdatedFields, &j.QueuedAt, &j.StartedAt, &j.FinishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -100,16 +106,43 @@ func (db *DB) ClaimNextEnrichment(ctx context.Context, now time.Time) (*Enrichme
 
 // MarkEnrichmentDone records id's successful completion — "successful"
 // meaning the job ran to term, not that any field actually changed; most
-// jobs will have nothing missing or nothing a provider answered. Scoped to
-// WHERE status = 'running' so a terminal row can never be rewritten by a
-// late call, the same guard MarkSend* uses.
-func (db *DB) MarkEnrichmentDone(ctx context.Context, id int64, at time.Time) error {
+// jobs will have nothing missing or nothing a provider answered, and
+// "nothing to add" is an ordinary success. updatedFields names what this
+// run wrote, in the order given, and is stored comma-separated for the
+// one fragment that reads it back; empty is the nothing-to-add case.
+// Scoped to WHERE status = 'running' so a terminal row can never be
+// rewritten by a late call, the same guard MarkSend* uses.
+func (db *DB) MarkEnrichmentDone(ctx context.Context, id int64, updatedFields []MetadataField, at time.Time) error {
+	names := make([]string, 0, len(updatedFields))
+	for _, f := range updatedFields {
+		names = append(names, string(f))
+	}
 	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			UPDATE enrichment_jobs SET status = ?, finished_at = ? WHERE id = ? AND status = ?`,
-			string(EnrichmentDone), formatTime(at), id, string(EnrichmentRunning))
+			UPDATE enrichment_jobs SET status = ?, updated_fields = ?, finished_at = ? WHERE id = ? AND status = ?`,
+			string(EnrichmentDone), strings.Join(names, ","), formatTime(at), id, string(EnrichmentRunning))
 		return err
 	})
+}
+
+// GetEnrichmentJob returns id's job, or nil, nil if there is none — the
+// status poll's lookup, mirroring GetSend's absent-isn't-an-error contract.
+func (db *DB) GetEnrichmentJob(ctx context.Context, id int64) (*EnrichmentJob, error) {
+	row := db.Read().QueryRowContext(ctx, `
+		SELECT `+enrichmentJobColumns+` FROM enrichment_jobs WHERE id = ?`, id)
+	return scanEnrichmentJob(row)
+}
+
+// LatestEnrichmentForBook returns bookID's most recent job, or nil, nil if
+// it has never been enriched — the detail page's initial render, so a page
+// loaded mid-job resumes polling and one loaded after a finished job shows
+// its outcome instead of a bare button. Same ordering and tie-break as
+// LatestSendForBook.
+func (db *DB) LatestEnrichmentForBook(ctx context.Context, bookID int64) (*EnrichmentJob, error) {
+	row := db.Read().QueryRowContext(ctx, `
+		SELECT `+enrichmentJobColumns+` FROM enrichment_jobs
+		WHERE book_id = ? ORDER BY queued_at DESC, id DESC LIMIT 1`, bookID)
+	return scanEnrichmentJob(row)
 }
 
 // MarkEnrichmentFailed records id's failure with reason. Same terminal-state
@@ -331,13 +364,39 @@ func fieldIsStillMissingTx(ctx context.Context, tx *sql.Tx, bookID int64, field 
 // authorsSeparator; every other field is a plain column write via
 // updateBookColumnTx. Returns false for an unknown book, the same
 // absent-isn't-an-error contract UpdateBookField uses.
-func (db *DB) ApplyEnrichedFields(ctx context.Context, bookID int64, values map[MetadataField]string, sourceName map[MetadataField]string, modifiedAt time.Time) (exists bool, err error) {
+func (db *DB) ApplyEnrichedFields(ctx context.Context, bookID int64, values map[MetadataField]string, sourceName map[MetadataField]string, modifiedAt time.Time) (written []MetadataField, exists bool, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Reset on every attempt: db.Write may run the callback more than
+		// once, and appending to a slice from an outer scope would
+		// otherwise report a field twice.
+		written = nil
+
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM books WHERE id = ?)`, bookID).Scan(&exists); err != nil || !exists {
 			return err
 		}
 
-		for field, value := range values {
+		// Every key is checked before anything is written, because the
+		// loop below iterates the known fields rather than the caller's
+		// map and would otherwise pass silently over a name it does not
+		// recognise. An unrecognised MetadataField is a caller bug — a
+		// typo'd constant, a provider inventing a field — and must fail
+		// the call rather than be dropped: a silent no-op is how such a
+		// bug survives to production.
+		for field := range values {
+			if !isKnownMetadataField(field) {
+				return fmt.Errorf("%w: %q", ErrInvalidMetadataField, field)
+			}
+		}
+
+		// Iterated in a fixed order rather than over the map, so the
+		// reported list reads the same way twice for the same input —
+		// range over a map is deliberately unordered, and this list is
+		// display text.
+		for _, field := range metadataFieldOrder {
+			value, ok := values[field]
+			if !ok {
+				continue
+			}
 			stillMissing, err := fieldIsStillMissingTx(ctx, tx, bookID, field)
 			if err != nil {
 				return err
@@ -351,6 +410,7 @@ func (db *DB) ApplyEnrichedFields(ctx context.Context, bookID int64, values map[
 				if err := updateBookAuthorsTx(ctx, tx, bookID, splitAuthors(value), source, modifiedAt); err != nil {
 					return err
 				}
+				written = append(written, field)
 				continue
 			}
 			if err := updateBookColumnTx(ctx, tx, bookID, field, value, modifiedAt); err != nil {
@@ -359,8 +419,9 @@ func (db *DB) ApplyEnrichedFields(ctx context.Context, bookID int64, values map[
 			if err := setFieldSourceTx(ctx, tx, bookID, field, source); err != nil {
 				return err
 			}
+			written = append(written, field)
 		}
 		return syncBookFTSTx(ctx, tx, bookID)
 	})
-	return exists, err
+	return written, exists, err
 }

@@ -40,7 +40,7 @@ func TestEnqueueEnrichmentIsIdempotentWhileQueued(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("ClaimNextEnrichment: %+v, %v", job, err)
 	}
-	if err := db.MarkEnrichmentDone(ctx, job.ID, now.Add(2*time.Minute)); err != nil {
+	if err := db.MarkEnrichmentDone(ctx, job.ID, nil, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("MarkEnrichmentDone: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestMarkEnrichmentIsNoOpUnlessRunning(t *testing.T) {
 	}
 
 	// Still queued, not running: both terminal writes must no-op.
-	if err := db.MarkEnrichmentDone(ctx, jobID, now); err != nil {
+	if err := db.MarkEnrichmentDone(ctx, jobID, nil, now); err != nil {
 		t.Fatalf("MarkEnrichmentDone: %v", err)
 	}
 	if err := db.MarkEnrichmentFailed(ctx, jobID, "reason", now); err != nil {
@@ -147,7 +147,7 @@ func TestMarkEnrichmentIsNoOpUnlessRunning(t *testing.T) {
 	if _, err := db.ClaimNextEnrichment(ctx, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.MarkEnrichmentDone(ctx, jobID, now); err != nil {
+	if err := db.MarkEnrichmentDone(ctx, jobID, nil, now); err != nil {
 		t.Fatalf("MarkEnrichmentDone after claim: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestRequeueInterruptedEnrichmentLeavesTerminalRowsAlone(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("ClaimNextEnrichment: %+v, %v", job, err)
 	}
-	if err := db.MarkEnrichmentDone(ctx, job.ID, now); err != nil {
+	if err := db.MarkEnrichmentDone(ctx, job.ID, nil, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -358,7 +358,7 @@ func TestApplyEnrichedFieldsWritesValueProvenanceAndFTSInOneTransaction(t *testi
 	}
 	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 
-	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldPublisher:   "Gollancz",
 		FieldISBN:        "9780575000001",
 		FieldDescription: "A story.",
@@ -416,7 +416,7 @@ func TestApplyEnrichedFieldsRollsBackOnFailureAcrossMixedProviders(t *testing.T)
 		t.Fatal(err)
 	}
 
-	_, err = db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, _, err = db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldPublisher:         "Gollancz",
 		MetadataField("bogus"): "x",
 	}, map[MetadataField]string{
@@ -521,7 +521,7 @@ func TestApplyEnrichedFieldsRollsBackAllFieldsWhenFTSyncFails(t *testing.T) {
 		t.Fatalf("drop books_fts: %v", err)
 	}
 
-	_, err = db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, _, err = db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldPublisher:   "Gollancz",
 		FieldDescription: "A story.",
 	}, map[MetadataField]string{
@@ -581,7 +581,7 @@ func TestApplyEnrichedFieldsSkipsAFieldManuallyEditedSinceResolve(t *testing.T) 
 	}
 
 	// The stale answer Resolve computed before that edit landed.
-	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldDescription: "Provider description",
 		FieldPublisher:   "Ace Books",
 	}, map[MetadataField]string{
@@ -640,7 +640,7 @@ func TestApplyEnrichedFieldsSkipsAClearedManualField(t *testing.T) {
 		t.Fatalf("UpdateBookField clear: %v, %v", exists, err)
 	}
 
-	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldPublisher: "Provider's Guess Press",
 	}, map[MetadataField]string{
 		FieldPublisher: "openlibrary",
@@ -680,7 +680,7 @@ func TestApplyEnrichedFieldsSkipsManuallySetAuthors(t *testing.T) {
 		t.Fatalf("UpdateBookAuthors: %v, %v", exists, err)
 	}
 
-	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldAuthors: "Provider Author",
 	}, map[MetadataField]string{
 		FieldAuthors: "openlibrary",
@@ -721,7 +721,7 @@ func TestApplyEnrichedFieldsSkipsClearedManualAuthors(t *testing.T) {
 		t.Fatalf("UpdateBookAuthors clear: %v, %v", exists, err)
 	}
 
-	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldAuthors: "Provider's Guess Author",
 	}, map[MetadataField]string{
 		FieldAuthors: "openlibrary",
@@ -756,7 +756,7 @@ func TestApplyEnrichedFieldsWritesCoverPathWithCoverProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldCover: "covers/ab/abcdef.jpg",
 	}, map[MetadataField]string{
 		FieldCover: "openlibrary",
@@ -794,7 +794,7 @@ func TestApplyEnrichedFieldsSkipsABookThatAlreadyHasACover(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+	_, exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
 		FieldCover: "covers/provider-fetched.jpg",
 	}, map[MetadataField]string{
 		FieldCover: "openlibrary",
@@ -816,7 +816,7 @@ func TestApplyEnrichedFieldsUnknownBook(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	exists, err := db.ApplyEnrichedFields(ctx, 99999, map[MetadataField]string{FieldPublisher: "Press"}, map[MetadataField]string{FieldPublisher: "openlibrary"}, time.Now())
+	_, exists, err := db.ApplyEnrichedFields(ctx, 99999, map[MetadataField]string{FieldPublisher: "Press"}, map[MetadataField]string{FieldPublisher: "openlibrary"}, time.Now())
 	if err != nil || exists {
 		t.Errorf("ApplyEnrichedFields for an unknown book = %v, %v; want false, nil", exists, err)
 	}
@@ -859,7 +859,7 @@ func TestApplyEnrichedFieldsClearsCoverRetry(t *testing.T) {
 
 	values := map[MetadataField]string{FieldCover: "covers/cover-retry-hash.jpg"}
 	sourceName := map[MetadataField]string{FieldCover: "openlibrary"}
-	if _, err := db.ApplyEnrichedFields(ctx, id, values, sourceName, time.Now()); err != nil {
+	if _, _, err := db.ApplyEnrichedFields(ctx, id, values, sourceName, time.Now()); err != nil {
 		t.Fatalf("ApplyEnrichedFields: %v", err)
 	}
 
@@ -872,5 +872,188 @@ func TestApplyEnrichedFieldsClearsCoverRetry(t *testing.T) {
 	}
 	if book.CoverRetry {
 		t.Error("CoverRetry is still set after a cover was stored")
+	}
+}
+
+func TestMarkEnrichmentDoneRecordsUpdatedFields(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-fields-1", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.ClaimNextEnrichment(ctx, time.Now())
+	if err != nil || job == nil {
+		t.Fatalf("ClaimNextEnrichment: %+v, %v", job, err)
+	}
+
+	if err := db.MarkEnrichmentDone(ctx, job.ID, []MetadataField{FieldPublisher, FieldDescription}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetEnrichmentJob(ctx, job.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetEnrichmentJob: %+v, %v", got, err)
+	}
+	if got.UpdatedFields != "publisher,description" {
+		t.Errorf("UpdatedFields = %q, want %q", got.UpdatedFields, "publisher,description")
+	}
+	if got.Status != EnrichmentDone {
+		t.Errorf("Status = %q, want done", got.Status)
+	}
+}
+
+// Nothing written is the ordinary case, and it must be storable as such —
+// an empty list, not an absent job or a failure.
+func TestMarkEnrichmentDoneWithNoFields(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-fields-2", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := db.ClaimNextEnrichment(ctx, time.Now())
+	if err := db.MarkEnrichmentDone(ctx, job.ID, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetEnrichmentJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpdatedFields != "" {
+		t.Errorf("UpdatedFields = %q, want empty", got.UpdatedFields)
+	}
+	if got.Status != EnrichmentDone {
+		t.Errorf("Status = %q, want done — nothing to add is a success", got.Status)
+	}
+}
+
+func TestGetEnrichmentJobUnknownIsNotAnError(t *testing.T) {
+	db := openTestDB(t)
+	job, err := db.GetEnrichmentJob(context.Background(), 9999)
+	if err != nil {
+		t.Fatalf("GetEnrichmentJob: %v", err)
+	}
+	if job != nil {
+		t.Errorf("job = %+v, want nil", job)
+	}
+}
+
+func TestLatestEnrichmentForBook(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-latest", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if job, err := db.LatestEnrichmentForBook(ctx, id); err != nil || job != nil {
+		t.Fatalf("LatestEnrichmentForBook before any job = %+v, %v; want nil, nil", job, err)
+	}
+
+	older := time.Now().Add(-time.Hour)
+	if _, err := db.EnqueueEnrichment(ctx, id, older); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := db.ClaimNextEnrichment(ctx, older)
+	if err := db.MarkEnrichmentDone(ctx, first.ID, nil, older); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	if _, err := db.EnqueueEnrichment(ctx, id, now); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := db.LatestEnrichmentForBook(ctx, id)
+	if err != nil || job == nil {
+		t.Fatalf("LatestEnrichmentForBook: %+v, %v", job, err)
+	}
+	if job.ID == first.ID {
+		t.Errorf("returned the older job; want the newest, so a page loaded mid-run resumes the right one")
+	}
+	if job.Status != EnrichmentQueued {
+		t.Errorf("Status = %q, want queued", job.Status)
+	}
+}
+
+// The list is display text, so the same input has to read the same way
+// twice — which ranging over the caller's map would not guarantee.
+func TestApplyEnrichedFieldsReportsWrittenFieldsInAFixedOrder(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-order", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	values := map[MetadataField]string{
+		FieldDescription:   "A description",
+		FieldPublisher:     "Gollancz",
+		FieldLanguage:      "en",
+		FieldPublishedDate: "1984",
+	}
+	sources := map[MetadataField]string{}
+	for f := range values {
+		sources[f] = "openlibrary"
+	}
+
+	written, exists, err := db.ApplyEnrichedFields(ctx, id, values, sources, time.Now())
+	if err != nil || !exists {
+		t.Fatalf("ApplyEnrichedFields: %v, exists=%v", err, exists)
+	}
+	want := []MetadataField{FieldPublisher, FieldPublishedDate, FieldLanguage, FieldDescription}
+	if len(written) != len(want) {
+		t.Fatalf("written = %v, want %v", written, want)
+	}
+	for i := range want {
+		if written[i] != want[i] {
+			t.Fatalf("written = %v, want %v (metadataFieldOrder, not map order)", written, want)
+		}
+	}
+}
+
+// A field a concurrent edit has already filled is skipped by the
+// re-check, and must not be reported as written — the result line exists
+// to say what this run did.
+func TestApplyEnrichedFieldsOmitsSkippedFieldsFromWritten(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-skip", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Someone fills the publisher by hand first.
+	if _, err := db.UpdateBookField(ctx, id, FieldPublisher, "Hand-typed", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	written, exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+		FieldPublisher: "Provider Press",
+		FieldLanguage:  "en",
+	}, map[MetadataField]string{
+		FieldPublisher: "openlibrary",
+		FieldLanguage:  "openlibrary",
+	}, time.Now())
+	if err != nil || !exists {
+		t.Fatalf("ApplyEnrichedFields: %v, exists=%v", err, exists)
+	}
+	if len(written) != 1 || written[0] != FieldLanguage {
+		t.Errorf("written = %v, want just [language] — publisher was already manual", written)
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Publisher != "Hand-typed" {
+		t.Errorf("Publisher = %q, want the hand-typed value untouched", book.Publisher)
 	}
 }
