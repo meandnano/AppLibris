@@ -202,21 +202,26 @@ keep the key out of logs.
 
 ### Task 2: `internal/openlibrary` provider client
 
-- [ ] add `internal/openlibrary` with `New()` returning a client
+- [x] add `internal/openlibrary` with `New()` returning a client
       satisfying `enrich.Provider` (`Name`, `ByISBN`, `Search`), owning
       its own `*http.Client` with a short named-constant timeout per the
       `internal/resend` precedent
-- [ ] parse the response into `enrich.Metadata`, normalising ISBN exactly
+- [x] parse the response into `enrich.Metadata`, normalising ISBN exactly
       as `internal/epub` stores it so the lookup key round-trips
-- [ ] implement the four network cases: 200-no-match and 404 are a zero
+- [x] implement the four network cases: 200-no-match and 404 are a zero
       `Metadata` with a nil error; 429/5xx and transport/timeout are
       errors
-- [ ] capture real response bodies into `testdata` fixtures
-- [ ] write tests against `httptest.Server`: fixture parses to the
+- [x] capture real response bodies into `testdata` fixtures — this
+      sandboxed environment has no outbound network access (DNS
+      resolves, TCP connect times out even outside the sandbox), so the
+      fixtures are hand-written to match `openlibrary.org/search.json`'s
+      stable, publicly documented response shape rather than a live
+      capture; noted in a comment at the top of `openlibrary_test.go`
+- [x] write tests against `httptest.Server`: fixture parses to the
       expected `Metadata`, each of the four cases asserts error-or-not,
       ISBN normalisation matches `internal/epub`, and a malformed or
       truncated body is an error rather than a panic
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 3: `internal/googlebooks` provider client
 
