@@ -1,0 +1,42 @@
+{
+  "kind": "books#volumes",
+  "totalItems": 1,
+  "items": [
+    {
+      "kind": "books#volume",
+      "id": "MIhTDwAAQBAJ",
+      "etag": "abc123",
+      "selfLink": "https://www.googleapis.com/books/v1/volumes/MIhTDwAAQBAJ",
+      "volumeInfo": {
+        "title": "Structure and Interpretation of Computer Programs",
+        "subtitle": "Second Edition",
+        "authors": [
+          "Harold Abelson",
+          "Gerald Jay Sussman"
+        ],
+        "publisher": "MIT Press",
+        "publishedDate": "1996",
+        "description": "Structure and Interpretation of Computer Programs has had a dramatic impact on computer science curricula over the past decade.",
+        "industryIdentifiers": [
+          {
+            "type": "ISBN_10",
+            "identifier": "0262011530"
+          },
+          {
+            "type": "ISBN_13",
+            "identifier": "9780262011532"
+          }
+        ],
+        "pageCount": 657,
+        "categories": [
+          "Computers"
+        ],
+        "language": "en",
+        "imageLinks": {
+          "smallThumbnail": "http://books.google.com/books/content?id=MIhTDwAAQBAJ&printsec=frontcover&img=1&zoom=5",
+          "thumbnail": "http://books.google.com/books/content?id=MIhTDwAAQBAJ&printsec=frontcover&img=1&zoom=1"
+        }
+      }
+    }
+  ]
+}

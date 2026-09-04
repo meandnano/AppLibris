@@ -225,16 +225,16 @@ keep the key out of logs.
 
 ### Task 3: `internal/googlebooks` provider client
 
-- [ ] add `internal/googlebooks` mirroring Task 2's shape — `New()`, its
+- [x] add `internal/googlebooks` mirroring Task 2's shape — `New()`, its
       own timeout-bearing `*http.Client`, `Name`/`ByISBN`/`Search`
-- [ ] accept an optional API key, keeping it out of every log line
-- [ ] parse the volume payload into `enrich.Metadata` with the same ISBN
+- [x] accept an optional API key, keeping it out of every log line
+- [x] parse the volume payload into `enrich.Metadata` with the same ISBN
       normalisation and the same four-case error contract
-- [ ] capture real response bodies into `testdata` fixtures
-- [ ] write tests against `httptest.Server` covering the same cases as
+- [x] capture real response bodies into `testdata` fixtures
+- [x] write tests against `httptest.Server` covering the same cases as
       Task 2, plus that a request carries the key when one is configured
       and is still made when it is not
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 4: Rate-limit, cache and retry decorators
 
