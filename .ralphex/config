@@ -1,0 +1,4 @@
+task_model = sonnet:xhigh
+review_model = opus:high
+use_worktree = true
+
