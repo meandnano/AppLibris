@@ -133,7 +133,7 @@ func run(ctx context.Context) error {
 	// enrichment: METADATA_PROVIDERS= (empty) already resolves to an empty
 	// provider list above, which makes every job a no-op, so the worker
 	// always runs and its queue/worker wiring is exercised either way.
-	enrichWorker := enrich.New(db, metadataProviders)
+	enrichWorker := enrich.New(db, metadataProviders, coversDir)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

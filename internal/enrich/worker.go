@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"library/internal/cover"
 	"library/internal/storage"
 )
 
@@ -40,6 +41,7 @@ const applyFailedReason = "could not save enriched metadata"
 type Worker struct {
 	db        *storage.DB
 	providers []Provider
+	coversDir string
 	notify    chan struct{}
 }
 
@@ -47,9 +49,11 @@ type Worker struct {
 // order, for whatever's missing. A nil or empty providers is valid: every
 // job then resolves to "nothing missing, no providers", which is what lets
 // this worker run — and its wiring stay exercised — before step 05 gives
-// it something to call.
-func New(db *storage.DB, providers []Provider) *Worker {
-	return &Worker{db: db, providers: providers, notify: make(chan struct{}, 1)}
+// it something to call. coversDir is where a fetched cover is stored, via
+// internal/cover.Store, under the book's content hash — the same directory
+// the scanner and internal/web already share.
+func New(db *storage.DB, providers []Provider, coversDir string) *Worker {
+	return &Worker{db: db, providers: providers, coversDir: coversDir, notify: make(chan struct{}, 1)}
 }
 
 // Notify pokes the worker to check the queue immediately, instead of
@@ -149,7 +153,7 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		return
 	}
 
-	values, sourceName, err := Resolve(ctx, *book, authors, sources, w.providers)
+	values, sourceName, coverData, coverSource, err := Resolve(ctx, *book, authors, sources, w.providers)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -168,6 +172,23 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		// answer; RequeueInterruptedEnrichment picks it up at next
 		// startup and Resolve runs again from scratch.
 		return
+	}
+
+	// Resolve hands back raw cover bytes rather than a path — see its doc
+	// comment — because turning them into one is this worker's I/O to do,
+	// exactly like the scanner's own cover.Store calls: resized, JPEG,
+	// named by the book's content hash, never a remote URL. A Store
+	// failure is logged and the field is simply left out of values, the
+	// same tolerance the scanner gives an embedded cover that fails to
+	// store — it must not fail a job whose text fields already resolved.
+	if len(coverData) > 0 {
+		path, err := cover.Store(w.coversDir, book.ContentHash, coverData)
+		if err != nil {
+			slog.Warn("store enriched cover failed", "book_id", job.BookID, "error", err)
+		} else {
+			values[storage.FieldCover] = path
+			sourceName[storage.FieldCover] = coverSource
+		}
 	}
 
 	// One call, one transaction, whatever Resolve found — sourceName

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,6 +26,10 @@ const Timeout = 8 * time.Second
 
 const baseURL = "https://openlibrary.org"
 
+// coverBaseURL is Open Library's separate covers host — a cover is fetched
+// by numeric cover_i id, not by anything search.json itself serves.
+const coverBaseURL = "https://covers.openlibrary.org"
+
 const providerName = "openlibrary"
 
 // maxErrorBodyBytes bounds how much of an error response body is read into
@@ -34,8 +39,9 @@ const maxErrorBodyBytes = 512
 
 // Client looks books up against Open Library's Search API.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL      string
+	coverBaseURL string
+	httpClient   *http.Client
 }
 
 // New returns a Client with Timeout set on its own *http.Client, per
@@ -43,8 +49,9 @@ type Client struct {
 // has none at all.
 func New() *Client {
 	return &Client{
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: Timeout},
+		baseURL:      baseURL,
+		coverBaseURL: coverBaseURL,
+		httpClient:   &http.Client{Timeout: Timeout},
 	}
 }
 
@@ -96,6 +103,7 @@ type searchDoc struct {
 	FirstPublishYear int      `json:"first_publish_year"`
 	Language         []string `json:"language"`
 	ISBN             []string `json:"isbn"`
+	CoverID          int      `json:"cover_i"`
 }
 
 // search issues one GET against /search.json with query and turns the
@@ -133,10 +141,15 @@ func (c *Client) search(ctx context.Context, query url.Values) (enrich.Metadata,
 		return enrich.Metadata{}, nil
 	}
 
-	return toMetadata(parsed.Docs[0]), nil
+	return c.toMetadata(ctx, parsed.Docs[0]), nil
 }
 
-func toMetadata(doc searchDoc) enrich.Metadata {
+// toMetadata converts doc, and — when it names one — fetches its cover
+// image via the separate covers.openlibrary.org host. A cover fetch
+// failure only loses the cover: it is logged and otherwise ignored, never
+// turned into a search error, since the rest of doc is still a good answer
+// on its own.
+func (c *Client) toMetadata(ctx context.Context, doc searchDoc) enrich.Metadata {
 	m := enrich.Metadata{
 		Title:   strings.TrimSpace(doc.Title),
 		Authors: doc.AuthorName,
@@ -153,6 +166,15 @@ func toMetadata(doc searchDoc) enrich.Metadata {
 	}
 	if len(doc.Language) > 0 {
 		m.Language = doc.Language[0]
+	}
+	if doc.CoverID > 0 {
+		coverURL := fmt.Sprintf("%s/b/id/%d-L.jpg", c.coverBaseURL, doc.CoverID)
+		data, err := enrich.FetchCover(ctx, c.httpClient, coverURL)
+		if err != nil {
+			slog.Warn("openlibrary: fetch cover failed", "cover_id", doc.CoverID, "error", err)
+		} else {
+			m.Cover = data
+		}
 	}
 	return m
 }

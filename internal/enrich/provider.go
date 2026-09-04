@@ -29,15 +29,12 @@ type Provider interface {
 	Search(ctx context.Context, title string, authors []string) (Metadata, error)
 }
 
-// Metadata is what a Provider can answer about a book — the same seven
-// fields field_sources tracks, minus the cover: field_sources.field is
-// CHECK-constrained to text fields only, a cover has no provenance row to
-// record, and whether covers are even worth fetching is step 05's decision
-// once there's real provider output to judge it against (see the plan's
-// Scope). Every field is optional, mirroring internal/epub and
-// internal/fb2's own Metadata: a zero Metadata with a nil error means "no
-// answer", which is the common case for most books against most
-// providers, not an error condition.
+// Metadata is what a Provider can answer about a book: the seven text
+// fields field_sources tracks, plus a fetched cover's raw image bytes.
+// Every field is optional, mirroring internal/epub and internal/fb2's own
+// Metadata: a zero Metadata with a nil error means "no answer", which is
+// the common case for most books against most providers, not an error
+// condition.
 type Metadata struct {
 	Title         string
 	Authors       []string
@@ -46,4 +43,11 @@ type Metadata struct {
 	Language      string
 	ISBN          string
 	Description   string
+	// Cover is a fetched cover image's raw bytes, or nil when the provider
+	// found no cover image. It is bytes, not a URL, deliberately: storage
+	// is the worker's job (via internal/cover.Store, keyed by the book's
+	// content hash), and cover_path must never hold a remote URL — see
+	// Resolve's doc comment for why this field is kept out of Resolve's
+	// string-valued values map.
+	Cover []byte
 }

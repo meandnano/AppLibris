@@ -17,6 +17,13 @@ import (
 // Field names and nesting match the API's stable, publicly documented
 // shape.
 
+// testClient wires coverBaseURL to its own isolated server that 404s by
+// default, kept separate from the search server and its hits counter: a
+// match fixture carrying a cover_i (search_match.json does) would otherwise
+// make every test using it fire a second, uncounted request at the same
+// handler search assertions (query params, hit counts) don't expect. Tests
+// that care about the cover fetch itself override client.coverBaseURL
+// after the fact.
 func testClient(t *testing.T, handler http.HandlerFunc) (*Client, *int) {
 	t.Helper()
 	hits := 0
@@ -26,9 +33,15 @@ func testClient(t *testing.T, handler http.HandlerFunc) (*Client, *int) {
 	}))
 	t.Cleanup(server.Close)
 
+	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(coverServer.Close)
+
 	return &Client{
-		baseURL:    server.URL,
-		httpClient: server.Client(),
+		baseURL:      server.URL,
+		coverBaseURL: coverServer.URL,
+		httpClient:   server.Client(),
 	}, &hits
 }
 
@@ -284,5 +297,79 @@ func TestNormalizeISBN(t *testing.T) {
 // compile.
 func isZeroMetadata(m enrich.Metadata) bool {
 	return m.Title == "" && len(m.Authors) == 0 && m.Publisher == "" &&
-		m.PublishedDate == "" && m.Language == "" && m.ISBN == "" && m.Description == ""
+		m.PublishedDate == "" && m.Language == "" && m.ISBN == "" && m.Description == "" &&
+		len(m.Cover) == 0
+}
+
+// The fixture's cover_i (240727) is what drives the URL this test's cover
+// server expects — covers.openlibrary.org's documented id-based shape.
+func TestByISBNFetchesCoverWhenPresent(t *testing.T) {
+	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "search_match.json"))
+	})
+
+	wantCover := []byte("fake-jpeg-bytes")
+	coverHits := 0
+	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		coverHits++
+		if r.URL.Path != "/b/id/240727-L.jpg" {
+			t.Errorf("cover request path = %q, want /b/id/240727-L.jpg", r.URL.Path)
+		}
+		w.Write(wantCover)
+	}))
+	t.Cleanup(coverServer.Close)
+	client.coverBaseURL = coverServer.URL
+
+	got, err := client.ByISBN(context.Background(), "9780262011532")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if string(got.Cover) != string(wantCover) {
+		t.Errorf("Cover = %q, want %q", got.Cover, wantCover)
+	}
+	if coverHits != 1 {
+		t.Errorf("cover server hits = %d, want 1", coverHits)
+	}
+}
+
+// A cover fetch failure must not fail the whole lookup — the rest of the
+// fixture's fields are still a good answer.
+func TestByISBNCoverFetchFailureDoesNotFailTheLookup(t *testing.T) {
+	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "search_match.json"))
+	})
+	// client.coverBaseURL already points at testClient's default 404
+	// server, so no override is needed here.
+
+	got, err := client.ByISBN(context.Background(), "9780262011532")
+	if err != nil {
+		t.Fatalf("ByISBN: want nil error when only the cover fetch fails, got %v", err)
+	}
+	if got.Title == "" {
+		t.Error("Title is empty — a failed cover fetch must not lose the rest of the answer")
+	}
+	if got.Cover != nil {
+		t.Errorf("Cover = %q, want nil", got.Cover)
+	}
+}
+
+func TestByISBNNoCoverIDNeverCallsCoverServer(t *testing.T) {
+	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "search_no_match.json"))
+	})
+
+	coverHits := 0
+	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		coverHits++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(coverServer.Close)
+	client.coverBaseURL = coverServer.URL
+
+	if _, err := client.ByISBN(context.Background(), "0000000000"); err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if coverHits != 0 {
+		t.Errorf("cover server hits = %d, want 0 — no match means no cover_i to fetch", coverHits)
+	}
 }

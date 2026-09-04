@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -104,11 +105,19 @@ type volumeInfo struct {
 	Description         string               `json:"description"`
 	IndustryIdentifiers []industryIdentifier `json:"industryIdentifiers"`
 	Language            string               `json:"language"`
+	ImageLinks          imageLinks           `json:"imageLinks"`
 }
 
 type industryIdentifier struct {
 	Type       string `json:"type"`
 	Identifier string `json:"identifier"`
+}
+
+// imageLinks is the subset of the Volumes API's cover URLs this provider
+// reads — thumbnail is present whenever Google has any cover image at all,
+// the field this provider fetches through.
+type imageLinks struct {
+	Thumbnail string `json:"thumbnail"`
 }
 
 // search issues one GET against /volumes with q and turns the response into
@@ -151,7 +160,7 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 		return enrich.Metadata{}, nil
 	}
 
-	return toMetadata(parsed.Items[0]), nil
+	return c.toMetadata(ctx, parsed.Items[0]), nil
 }
 
 // redactKey scrubs a configured API key out of an error's text — request
@@ -171,9 +180,15 @@ func (c *Client) redactKeyBytes(body []byte) string {
 	return strings.ReplaceAll(string(body), c.apiKey, "REDACTED")
 }
 
-func toMetadata(v volume) enrich.Metadata {
+// toMetadata converts v, and — when the volume names one — fetches its
+// cover image via imageLinks.thumbnail, the URL Google's own response
+// already carries (unlike Open Library, there is no separate host to
+// build). A cover fetch failure only loses the cover: it is logged and
+// otherwise ignored, never turned into a search error, since the rest of v
+// is still a good answer on its own.
+func (c *Client) toMetadata(ctx context.Context, v volume) enrich.Metadata {
 	info := v.VolumeInfo
-	return enrich.Metadata{
+	m := enrich.Metadata{
 		Title:         strings.TrimSpace(info.Title),
 		Authors:       info.Authors,
 		Publisher:     info.Publisher,
@@ -182,6 +197,15 @@ func toMetadata(v volume) enrich.Metadata {
 		ISBN:          bestISBN(info.IndustryIdentifiers),
 		Description:   info.Description,
 	}
+	if info.ImageLinks.Thumbnail != "" {
+		data, err := enrich.FetchCover(ctx, c.httpClient, info.ImageLinks.Thumbnail)
+		if err != nil {
+			slog.Warn("googlebooks: fetch cover failed", "error", c.redactKey(err))
+		} else {
+			m.Cover = data
+		}
+	}
+	return m
 }
 
 // bestISBN prefers the volume's ISBN-13 identifier, falling back to its

@@ -31,11 +31,7 @@
         "categories": [
           "Computers"
         ],
-        "language": "en",
-        "imageLinks": {
-          "smallThumbnail": "http://books.google.com/books/content?id=MIhTDwAAQBAJ&printsec=frontcover&img=1&zoom=5",
-          "thumbnail": "http://books.google.com/books/content?id=MIhTDwAAQBAJ&printsec=frontcover&img=1&zoom=1"
-        }
+        "language": "en"
       }
     }
   ]

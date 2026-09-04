@@ -280,22 +280,22 @@ keep the key out of logs.
 
 ### Task 6: Cover fetch path
 
-- [ ] extend the provider surface so a fetched cover's bytes reach the
+- [x] extend the provider surface so a fetched cover's bytes reach the
       worker alongside the text fields, keeping "no cover" distinct from
       "no answer"
-- [ ] add a size cap constant (a few hundred KB) and reject an oversized
+- [x] add a size cap constant (a few hundred KB) and reject an oversized
       response body *before* decoding it
-- [ ] store a fetched cover through `internal/cover.Store` under the
+- [x] store a fetched cover through `internal/cover.Store` under the
       book's content hash and record the resulting path — never the remote
       URL — with `cover` provenance
-- [ ] only ask for a cover when the book's `cover_path` is empty, keeping
+- [x] only ask for a cover when the book's `cover_path` is empty, keeping
       the scanner's empty-string-means-"looked, found nothing" convention
       intact
-- [ ] write tests: a fetched image is resized and stored under the content
+- [x] write tests: a fetched image is resized and stored under the content
       hash rather than saved as a URL, an oversized body is rejected
       before decoding, and a book that already has a cover is never asked
       for one
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 7: Documentation
 

@@ -2,6 +2,7 @@ package googlebooks
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,7 +18,12 @@ import (
 // (https://developers.google.com/books/docs/v1/using) rather than a live
 // capture: this sandbox has no outbound network access, so a real request
 // can't be made from here. Field names and nesting match the API's stable,
-// publicly documented shape.
+// publicly documented shape. volumes_match.json omits imageLinks
+// deliberately — a real one is an absolute URL at a live Google host, and
+// this sandbox has no outbound network access, so any test that exercises
+// a cover fetch builds its own response inline with imageLinks.thumbnail
+// pointing at a local httptest.Server instead of reading it from a static
+// file — a fixture can't bake in a server address chosen at test run time.
 
 func testClient(t *testing.T, apiKey string, handler http.HandlerFunc) (*Client, *int) {
 	t.Helper()
@@ -356,5 +362,77 @@ func TestNormalizeISBN(t *testing.T) {
 // compile.
 func isZeroMetadata(m enrich.Metadata) bool {
 	return m.Title == "" && len(m.Authors) == 0 && m.Publisher == "" &&
-		m.PublishedDate == "" && m.Language == "" && m.ISBN == "" && m.Description == ""
+		m.PublishedDate == "" && m.Language == "" && m.ISBN == "" && m.Description == "" &&
+		len(m.Cover) == 0
+}
+
+func TestByISBNFetchesCoverWhenPresent(t *testing.T) {
+	wantCover := []byte("fake-jpeg-bytes")
+	coverHits := 0
+	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		coverHits++
+		w.Write(wantCover)
+	}))
+	t.Cleanup(coverServer.Close)
+
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		body := fmt.Sprintf(`{"totalItems":1,"items":[{"volumeInfo":{
+			"title":"Structure and Interpretation of Computer Programs",
+			"imageLinks":{"thumbnail":%q}
+		}}]}`, coverServer.URL+"/cover.jpg")
+		w.Write([]byte(body))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780262011532")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if string(got.Cover) != string(wantCover) {
+		t.Errorf("Cover = %q, want %q", got.Cover, wantCover)
+	}
+	if coverHits != 1 {
+		t.Errorf("cover server hits = %d, want 1", coverHits)
+	}
+}
+
+// A cover fetch failure must not fail the whole lookup — the rest of the
+// volume's fields are still a good answer.
+func TestByISBNCoverFetchFailureDoesNotFailTheLookup(t *testing.T) {
+	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(coverServer.Close)
+
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		body := fmt.Sprintf(`{"totalItems":1,"items":[{"volumeInfo":{
+			"title":"Structure and Interpretation of Computer Programs",
+			"imageLinks":{"thumbnail":%q}
+		}}]}`, coverServer.URL+"/cover.jpg")
+		w.Write([]byte(body))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780262011532")
+	if err != nil {
+		t.Fatalf("ByISBN: want nil error when only the cover fetch fails, got %v", err)
+	}
+	if got.Title == "" {
+		t.Error("Title is empty — a failed cover fetch must not lose the rest of the answer")
+	}
+	if got.Cover != nil {
+		t.Errorf("Cover = %q, want nil", got.Cover)
+	}
+}
+
+func TestByISBNNoImageLinksNeverFetchesCover(t *testing.T) {
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "volumes_match.json"))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780262011532")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if got.Cover != nil {
+		t.Errorf("Cover = %q, want nil — volumes_match.json carries no imageLinks", got.Cover)
+	}
 }

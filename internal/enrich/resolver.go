@@ -27,6 +27,7 @@ var fields = []storage.MetadataField{
 	storage.FieldLanguage,
 	storage.FieldISBN,
 	storage.FieldDescription,
+	storage.FieldCover,
 }
 
 // isMissing is the rule the whole enrichment step exists to get right —
@@ -58,6 +59,8 @@ func scalarValue(book storage.Book, field storage.MetadataField) string {
 		return book.ISBN
 	case storage.FieldDescription:
 		return book.Description
+	case storage.FieldCover:
+		return book.CoverPath
 	default:
 		return ""
 	}
@@ -124,14 +127,26 @@ func metadataValues(m Metadata) map[storage.MetadataField]string {
 // and a provider having nothing to say is the ordinary case, not an
 // error — the caller decides what job status a partial or empty result
 // earns.
+//
+// A cover is handled apart from the other six fields: values only ever
+// carries strings, but a fetched cover is bytes that still need
+// internal/cover.Store — an I/O step Resolve deliberately never performs
+// itself, per the "no database, no clock" contract above — to become the
+// path cover_path actually stores. So a provider's cover bytes come back
+// separately, as coverData and coverSource, for the worker to convert and
+// fold into values once it has. They are still subject to the same
+// missing-set membership, first-answer-wins and early-stop rules as every
+// other field: a book whose cover_path is already set is never handed a
+// provider's cover answer at all, matching Resolve's "never overwrites a
+// present value" rule for the other six.
 func Resolve(ctx context.Context, book storage.Book, authors []string,
 	sources map[storage.MetadataField]string, providers []Provider,
-) (values map[storage.MetadataField]string, sourceName map[storage.MetadataField]string, err error) {
+) (values map[storage.MetadataField]string, sourceName map[storage.MetadataField]string, coverData []byte, coverSource string, err error) {
 	missing := missingFields(book, authors, sources)
 	values = map[storage.MetadataField]string{}
 	sourceName = map[storage.MetadataField]string{}
 	if len(missing) == 0 {
-		return values, sourceName, nil
+		return values, sourceName, nil, "", nil
 	}
 
 	for _, p := range providers {
@@ -161,6 +176,12 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			sourceName[field] = p.Name()
 			delete(missing, field)
 		}
+
+		if missing[storage.FieldCover] && len(answer.Cover) > 0 {
+			coverData = answer.Cover
+			coverSource = p.Name()
+			delete(missing, storage.FieldCover)
+		}
 	}
-	return values, sourceName, nil
+	return values, sourceName, coverData, coverSource, nil
 }

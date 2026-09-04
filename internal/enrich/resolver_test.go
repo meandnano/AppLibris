@@ -65,7 +65,7 @@ func TestResolveAsksForEmptyEmbeddedField(t *testing.T) {
 		return Metadata{Publisher: "Ace Books"}, nil
 	}}
 
-	values, sourceName, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestResolveDoesNotAskForManuallyClearedField(t *testing.T) {
 		return Metadata{Publisher: "Ace Books", Description: "A description"}, nil
 	}}
 
-	values, sourceName, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestResolveNeverOverwritesAPresentValue(t *testing.T) {
 		return Metadata{Publisher: "A Different Press", Description: "New description"}, nil
 	}}
 
-	values, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	values, _, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,11 +136,12 @@ func TestResolveCallsNoProviderWhenNothingIsMissing(t *testing.T) {
 	book := storage.Book{
 		ID: 1, Title: "Book", Publisher: "Press", PublishedDate: "2020",
 		Language: "en", ISBN: "9780000000001", Description: "Text",
+		CoverPath: "covers/existing.jpg",
 	}
 	sources := map[storage.MetadataField]string{}
 	p := &fakeProvider{name: "fake"}
 
-	values, sourceName, err := Resolve(context.Background(), book, []string{"An Author"}, sources, []Provider{p})
+	values, sourceName, _, _, err := Resolve(context.Background(), book, []string{"An Author"}, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +166,7 @@ func TestResolveMergesFieldsAcrossProviders(t *testing.T) {
 		return Metadata{Description: "A description"}, nil
 	}}
 
-	values, sourceName, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +192,7 @@ func TestResolveStopsEarlyOnceNothingIsMissing(t *testing.T) {
 	book := storage.Book{
 		ID: 1, Title: "Book", Publisher: "", PublishedDate: "2020",
 		Language: "en", ISBN: "9780000000001", Description: "",
+		CoverPath: "covers/existing.jpg",
 	}
 	sources := map[storage.MetadataField]string{}
 	authors := []string{"An Author"}
@@ -203,7 +205,7 @@ func TestResolveStopsEarlyOnceNothingIsMissing(t *testing.T) {
 		return Metadata{}, nil
 	}}
 
-	values, _, err := Resolve(context.Background(), book, authors, sources, []Provider{a, b})
+	values, _, _, _, err := Resolve(context.Background(), book, authors, sources, []Provider{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +233,7 @@ func TestResolveSkipsAProviderThatErrors(t *testing.T) {
 		return Metadata{Publisher: "Ace Books"}, nil
 	}}
 
-	values, sourceName, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
 	if err != nil {
 		t.Fatalf("Resolve returned an error for a per-provider failure: %v", err)
 	}
@@ -253,7 +255,7 @@ func TestResolveDiscardsAnswersForFieldsNotMissing(t *testing.T) {
 		return Metadata{Publisher: "Uninvited Press", Description: "A description"}, nil
 	}}
 
-	values, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	values, _, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +276,7 @@ func TestResolveHandlesAuthorsAsAMissingField(t *testing.T) {
 		return Metadata{Authors: []string{"First Author", "Second Author"}}, nil
 	}}
 
-	values, sourceName, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,11 +296,95 @@ func TestResolveDoesNotAskForPresentAuthors(t *testing.T) {
 		return Metadata{Authors: []string{"Someone Else"}}, nil
 	}}
 
-	values, _, err := Resolve(context.Background(), book, []string{"Existing Author"}, sources, []Provider{p})
+	values, _, _, _, err := Resolve(context.Background(), book, []string{"Existing Author"}, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := values[storage.FieldAuthors]; ok {
 		t.Errorf("values contains authors = %q, want it absent — the book already has authors", values[storage.FieldAuthors])
+	}
+}
+
+// A cover is missing exactly like any other empty field, and a provider's
+// answer for it comes back through Resolve's separate coverData/coverSource
+// return values rather than the values map — see Resolve's doc comment for
+// why.
+func TestResolveAsksForCoverWhenMissing(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "Book", ISBN: "9780000000001"}
+	sources := map[storage.MetadataField]string{}
+	wantCover := []byte("fake-cover-bytes")
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Cover: wantCover}, nil
+	}}
+
+	_, _, coverData, coverSource, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(coverData) != string(wantCover) {
+		t.Errorf("coverData = %q, want %q", coverData, wantCover)
+	}
+	if coverSource != "fake" {
+		t.Errorf("coverSource = %q, want fake", coverSource)
+	}
+}
+
+// The regression this test guards: a book that already has a cover must
+// never be handed a provider's cover answer, even though the provider was
+// asked anyway (for some other, genuinely missing field) and happened to
+// include one.
+func TestResolveDoesNotAskForCoverWhenPresent(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "Book", Description: "", ISBN: "9780000000001", CoverPath: "covers/existing.jpg"}
+	sources := map[storage.MetadataField]string{}
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Cover: []byte("new-cover-bytes"), Description: "A description"}, nil
+	}}
+
+	values, _, coverData, coverSource, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coverData != nil {
+		t.Errorf("coverData = %q, want nil — the book already has a cover", coverData)
+	}
+	if coverSource != "" {
+		t.Errorf("coverSource = %q, want empty", coverSource)
+	}
+	if values[storage.FieldDescription] != "A description" {
+		t.Errorf("values[description] = %q, want %q (this field genuinely was missing)", values[storage.FieldDescription], "A description")
+	}
+}
+
+// Once one provider has answered the cover, an earlier provider's answer
+// wins and a later one's is discarded — the same first-answer-wins rule
+// every other field gets. Every field but the cover is already present, so
+// provider-a's cover answer truly empties the missing set — the same
+// isolation TestResolveStopsEarlyOnceNothingIsMissing applies to text
+// fields.
+func TestResolveKeepsFirstProvidersCoverAnswer(t *testing.T) {
+	book := storage.Book{
+		ID: 1, Title: "Book", Publisher: "Press", PublishedDate: "2020",
+		Language: "en", ISBN: "9780000000001", Description: "Text",
+	}
+	sources := map[storage.MetadataField]string{}
+	authors := []string{"An Author"}
+
+	a := &fakeProvider{name: "provider-a", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Cover: []byte("from-a")}, nil
+	}}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		t.Error("provider-b was called; provider-a already answered the only missing field (cover)")
+		return Metadata{}, nil
+	}}
+
+	_, _, coverData, coverSource, err := Resolve(context.Background(), book, authors, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(coverData) != "from-a" {
+		t.Errorf("coverData = %q, want %q", coverData, "from-a")
+	}
+	if coverSource != "provider-a" {
+		t.Errorf("coverSource = %q, want provider-a", coverSource)
 	}
 }
