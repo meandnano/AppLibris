@@ -267,6 +267,13 @@ a.masthead__link:hover {
   display: none;
 }
 
+/* Same specificity as the rule above and later in the file, so it wins:
+   on a deep page of the unfiltered library the box is empty but the link
+   back is the only one there is. */
+.search__input:placeholder-shown ~ .search__clear--persistent {
+  display: inline;
+}
+
 .search__spinner {
   display: none;
   width: 12px;
@@ -1192,6 +1199,30 @@ a.masthead__link:hover {
 
 .editable--meta .editable__actions {
   margin-top: 4px;
+}
+
+/* The reveal trigger sits in the grid's own list, so it has to opt out of
+   the card sizing its siblings get: full row, no card frame, and the same
+   mono --fg-faint register the rest of the page uses for a status line
+   the reader is not meant to act on. */
+.grid__more {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: center;
+  padding: 14px 0 4px;
+}
+
+.grid__more-link {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+  text-decoration: none;
+}
+
+.grid__more-link:hover,
+.grid__more-link:focus-visible {
+  color: var(--accent);
 }
 
 .detail__send:empty {

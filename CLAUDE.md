@@ -138,9 +138,12 @@ full design.
   this migration is synced by construction, but a database that predates
   it needs a one-time manual reset (delete the file, let the next sweep
   rescan) before that guarantee holds, since a pre-existing `books` row
-  never passes through `syncBookFTSTx` on its own. `SearchBooks(ctx, query)`
-  joins against it and orders by `sort_title`, not relevance — see
-  `internal/web` below for why. `MatchedSearchFields(ctx, query)` reports
+  never passes through `syncBookFTSTx` on its own.
+  `SearchBooks(ctx, query, page)` joins against it and orders by
+  `(sort_title, id)`, not relevance — see `internal/web` below for why the
+  ordering ignores relevance, and `BookPage` above for why the `id`
+  tie-break is load-bearing rather than cosmetic: the paging cursor
+  depends on the ordering being total. `MatchedSearchFields(ctx, query)` reports
   which of the four columns produced hits, for the results line that names
   them; it is one round trip of four `EXISTS`, each scoped with FTS5's
   `{col} : (expr)` filter — the parentheses are load-bearing, since
@@ -158,7 +161,31 @@ full design.
   non-nil slice rather than an error when there are none — `ListBookAuthors`
   loads the whole library's author map, right for the grid page and wrong
   for a single book). `CountBooks` is a plain `count(*)`, independent of
-  any search filter. `CountFilesByBook` mirrors `ListBookAuthors`: one
+  any search filter, and `CountSearchBooks` is its filtered sibling —
+  how many books a query matches, which the transport can no longer count
+  in hand now that it holds one bounded page, and without which the
+  results line would read "48 of 1,284" for a search that matched nine
+  hundred.
+  `BookPage` is the keyset cursor `ListBooks` and `SearchBooks` both page
+  by — `AfterTitle`, `AfterID`, `Limit`, zero value meaning the first
+  page. **Keyset, not `LIMIT`/`OFFSET`**, for a reason specific to this
+  application: the library changes underneath the reader. The scanner
+  sweeps every fifteen minutes and on every filesystem event, inserting
+  wherever a book's `sort_title` falls, and under `OFFSET` a book inserted
+  above the reader's position shifts every later row down by one — so the
+  next page repeats a card, or on a delete silently skips one. A cursor
+  naming the last row seen has no such window. **`AfterID` is part of the
+  cursor** because `sort_title` is emphatically not unique: it is a
+  normalised title with the article stripped and the case folded, so two
+  editions of one book collide by construction, and a cursor on a
+  non-unique column either loops on the collision or skips past it. The
+  comparison carries an explicit `COLLATE NOCASE` — it would be inherited
+  from the column's own declaration anyway, but the whole correctness of
+  paging rests on it matching the `ORDER BY`, and that is worth reading
+  off the query rather than off the schema. `Limit: 0` is unbounded,
+  which is what keeps the scanner's and the tests' whole-library calls
+  working untouched; the web transport never passes zero. Index
+  `books_sort_title_id` makes the range scan an index scan. `CountFilesByBook` mirrors `ListBookAuthors`: one
   `GROUP BY book_id` over `book_files`, keyed by book id, for the grid's
   multi-location badge. It counts every location row, missing ones
   included — a row stays in `book_files` until it has been missing past
@@ -856,8 +883,10 @@ full design.
   represents, zero rows in `book_files` being the exceptional one orphan-
   pruning is meant to prevent. `SearchBooks` sanitizes via
   `storage.SanitizeFTSQuery` first and returns
-  a `SearchResult` — the books, whether a search actually ran, and which
-  indexed fields matched. A query that sanitizes to nothing is treated as
+  a `SearchResult` — one page of books, whether a search actually ran,
+  which indexed fields matched, how many books matched in total
+  (`MatchCount`, which `Books` no longer tells you now that it holds a
+  bounded page) and where the next page starts (`Next`). A query that sanitizes to nothing is treated as
   `ListBooks`, so the empty search box and a freshly-loaded page are the
   same state and callers don't special-case it; `Searched` reports which
   of the two happened, because "sanitizes to nothing" is wider than "looks
@@ -967,6 +996,17 @@ full design.
   ever appears, that is the moment, not now.
   `BookDetail.FieldSources` maps a field name to where its current value
   came from, for the detail page's provenance markers.
+  `ListBooks` and `SearchBooks` take a `storage.BookPage` and return a
+  `NextPage` beside the summaries — `HasMore` plus the cursor the next
+  page starts at. The cursor is returned rather than left for the caller
+  to derive, because it is a `sort_title` and `BookSummary` deliberately
+  has no such field: that is a storage ordering detail, not something a
+  card renders. "Are there more?" is answered by asking storage for one
+  row past the limit and trimming it (`pageOf`), never by a second count
+  query — `SendHistory` already decides its own truncation that way, and
+  reusing a technique this codebase has beats introducing a second one.
+  `SearchResult.MatchCount` is the whole match total, which `Books` no
+  longer tells you now that it holds one page.
 - `internal/web` — the browser UI's HTTP transport: thin handlers over
   `internal/service`, `html/template` templates and CSS/JS embedded via
   `go:embed` (`internal/web/templates/`, `internal/web/static/`), no build
@@ -1075,6 +1115,35 @@ full design.
   query HTML-escaped by `html/template`) if nothing matched — kept visually
   and structurally separate from the "No books yet" empty-library block,
   since the two call for different next actions.
+- The grid is **paged**, not the whole library: `pageSize` (48, the
+  handoff's own "Loading next 48 of 1,284" figure — a number in a mockup
+  is a decision about how much scrolling one reveal buys) bounds every
+  render, and a reveal trigger appends the next batch. One route serves
+  three response shapes, which is one more than the `HX-Request` split can
+  tell apart, so the third says so in the query: the full page, the whole
+  `book-grid` fragment a keystroke gets, and — with `append=1` — just the
+  next batch of cards. `book-grid-cards` is that batch, and is the same
+  template the full grid renders inside its own `<ul>`, so a page of cards
+  looks identical however it arrived.
+  The trigger is a single `<li class="grid__more">` **inside** the same
+  `<ul>` as the cards, because it replaces *itself*
+  (`hx-target="this"`, `hx-swap="outerHTML"`) with the next batch plus a
+  fresh trigger — whatever it swaps in has to be a legal child of that
+  list. It carries both an `href` and an `hx-get`, the same
+  single-markup-path rule the read affordances follow, and here that
+  matters more than usual: before paging, an unpaged grid was the *only*
+  thing that worked with JavaScript off, so a paging implementation that
+  forgot the fallback would have made the no-JS case strictly worse than
+  before the change. The plain href is a whole page starting at the same
+  cursor. `MoreLabel` empty is how the last page renders no trigger at
+  all rather than a line offering zero more books, and the count in it is
+  the one the reader is looking at — the library total on an unfiltered
+  grid, `SearchResult.MatchCount` during a search, since "of 1,284"
+  beside a filtered grid names a number nothing on screen refers to.
+  A keystroke rebuilds the whole grid including its trigger, so **a new
+  search resets paging by construction** — a stale trigger left behind
+  would append page two of the previous query. That is invisible until it
+  breaks, so a test pins it.
 - `GET /books/{id}` is the detail page (`book.html`, alongside
   `library.html`). `r.PathValue("id")` is parsed with `strconv.ParseInt`;
   a non-numeric id and an unknown one both plain 404 (`http.NotFound`),
@@ -1405,11 +1474,10 @@ full design.
   used everywhere else via `slog`'s package-level functions against that
   default logger.
 
-Still missing from DESIGN.md: near-duplicate detection, format conversion,
-and library grid paging. DESIGN.md's metadata feature is complete as of
-the enrichment UI — the queue, worker, provider interface, resolver, both
-providers, the decorator/registry wiring and the per-book control that
-puts a job on the queue all exist.
+Nothing designed in DESIGN.md is unbuilt any more. What remains is its
+deferred list — series, tags, format conversion, near-duplicate
+detection, a programmatic API, authentication — every item of which was
+consciously ruled out of scope rather than left undone.
 
 ## Planning
 

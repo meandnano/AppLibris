@@ -27,7 +27,7 @@ func TestScanEnrollsBookIntoSearchIndex(t *testing.T) {
 		t.Fatalf("scan = %+v, want New=1 Errors=0", result)
 	}
 
-	books, err := db.SearchBooks(ctx, storage.SanitizeFTSQuery("Tokarczuk"))
+	books, err := db.SearchBooks(ctx, storage.SanitizeFTSQuery("Tokarczuk"), storage.BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks: %v", err)
 	}

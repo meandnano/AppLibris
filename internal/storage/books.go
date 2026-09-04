@@ -118,9 +118,83 @@ func (db *DB) FindBookByID(ctx context.Context, id int64) (*Book, error) {
 	return scanBook(row)
 }
 
-// ListBooks returns every book, ordered by sort_title.
-func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
-	rows, err := db.read.QueryContext(ctx, `SELECT `+bookColumns+` FROM books ORDER BY sort_title`)
+// BookPage is a keyset cursor into the (sort_title, id) ordering both
+// ListBooks and SearchBooks return rows in. The zero value is the first
+// page.
+//
+// Keyset rather than LIMIT/OFFSET, for a reason specific to this
+// application: the library changes underneath the reader. The scanner runs
+// every fifteen minutes and on every filesystem event, and it inserts
+// wherever a book's sort_title falls. With OFFSET, a book inserted above
+// the reader's position shifts every later row down by one, so the next
+// page repeats a card — or, on a delete, silently skips one. A cursor
+// naming the last row seen has no such window.
+//
+// AfterID is part of the cursor because sort_title is emphatically **not**
+// unique: it is a normalised title with the leading article stripped and
+// the case folded, so two editions of one book collide by construction.
+// A cursor on a non-unique column either loops on the collision or skips
+// past it.
+//
+// AfterTitle is compared with the same NOCASE collation the column
+// carries. That is the single most likely bug here — a case-sensitive
+// comparison disagrees with the ORDER BY, and pages then overlap or drop
+// rows between them — and it is inherited from the column's declaration
+// rather than spelled out in the query, which is not merely a style
+// choice: writing `(sort_title COLLATE NOCASE, id) > (?, ?)` turns the
+// plan from `SEARCH ... (sort_title>?)` back into a full `SCAN` of the
+// index, because an explicitly collated expression is no longer the
+// indexed one. So the collation is guaranteed by the schema plus
+// TestPagingRespectsNOCASECollation, not by being visible here.
+//
+// A Limit of zero means unbounded, which is what keeps the scanner's and
+// the tests' whole-library calls working unchanged. The web transport
+// never passes zero; that path exists for callers that genuinely want
+// every row.
+type BookPage struct {
+	AfterTitle string
+	AfterID    int64
+	Limit      int
+}
+
+// paginate extends query with the cursor comparison, the ordering and the
+// limit for p, returning the extended query and the arguments to append.
+// joiner is the keyword the comparison needs — "WHERE" for a query that
+// has no clause yet, "AND" for one that does.
+//
+// All three are emitted here together rather than assembled separately by
+// each caller, because the comparison and the ORDER BY have to agree about
+// both columns and their collation, and a reader should be able to see
+// that they do without holding two call sites in their head.
+//
+// The comparison is SQLite's row-value form. It is not merely tidier than
+// the equivalent `a > ? OR (a = ? AND b > ?)`: the expanded form plans as
+// a full `SCAN` of books_sort_title_id, while this one plans as
+// `SEARCH ... (sort_title>?)` and actually seeks — which is the whole
+// reason that index exists. (On the FTS join the index cannot be used
+// either way: the MATCH drives the query and the ordering falls back to a
+// temp B-tree. Bounded by the match set, and not worth contorting.)
+func (p BookPage) paginate(query, joiner, titleColumn, idColumn string) (string, []any) {
+	var args []any
+	if p.AfterTitle != "" || p.AfterID != 0 {
+		query += " " + joiner + " (" + titleColumn + ", " + idColumn + ") > (?, ?)"
+		args = append(args, p.AfterTitle, p.AfterID)
+	}
+	query += " ORDER BY " + titleColumn + ", " + idColumn
+	if p.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, p.Limit)
+	}
+	return query, args
+}
+
+// ListBooks returns one page of books, ordered by (sort_title, id). A zero
+// BookPage returns every book, which is what the scanner and the tests
+// want.
+func (db *DB) ListBooks(ctx context.Context, page BookPage) ([]Book, error) {
+	query, args := page.paginate(`SELECT `+bookColumns+` FROM books`, "WHERE", "sort_title", "id")
+
+	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -142,17 +216,42 @@ func (db *DB) CountBooks(ctx context.Context) (int, error) {
 // the user is actively scanning while they type would be jarring. query
 // must already be a valid FTS5 MATCH expression; SanitizeFTSQuery is what
 // produces one from raw user input.
-func (db *DB) SearchBooks(ctx context.Context, query string) ([]Book, error) {
-	rows, err := db.read.QueryContext(ctx, `
+// It pages through the same BookPage cursor ListBooks uses, and can
+// because this ordering is sort_title rather than relevance: one cursor
+// serves both paths, and a search matching nine hundred books is not the
+// case that got forgotten.
+func (db *DB) SearchBooks(ctx context.Context, query string, page BookPage) ([]Book, error) {
+	sql, pageArgs := page.paginate(`
 		SELECT `+qualifiedBookColumns+`
 		FROM books
 		JOIN books_fts ON books_fts.rowid = books.id
-		WHERE books_fts MATCH ?
-		ORDER BY books.sort_title`, query)
+		WHERE books_fts MATCH ?`, "AND", "books.sort_title", "books.id")
+	args := append([]any{query}, pageArgs...)
+
+	rows, err := db.read.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
 	return scanBooks(rows)
+}
+
+// CountSearchBooks returns how many books match query, independent of any
+// page — the "4" in the results line's "4 of 1,284".
+//
+// It exists because paging took that number away from the transport: an
+// unfiltered grid used to hold every match and could count them in hand,
+// and a bounded page cannot. The alternative was a results line reading
+// "48 of 1,284" for a search that matched nine hundred books, which is a
+// claim the page cannot support. query must already be a valid FTS5 MATCH
+// expression, as SearchBooks requires.
+func (db *DB) CountSearchBooks(ctx context.Context, query string) (int, error) {
+	var n int
+	err := db.read.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM books
+		JOIN books_fts ON books_fts.rowid = books.id
+		WHERE books_fts MATCH ?`, query).Scan(&n)
+	return n, err
 }
 
 // ftsColumns are the books_fts columns, in the order MatchedSearchFields

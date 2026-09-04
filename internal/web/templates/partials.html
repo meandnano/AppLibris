@@ -75,8 +75,14 @@
            navigating to the unfiltered library, which is what "/" already
            is. CSS hides it while the input is empty (:placeholder-shown),
            so it appears and disappears without the input being
-           re-rendered. */}}
-      <a class="search__clear" href="/">clear ×</a>
+           re-rendered.
+
+           One element serves two states because "/" is the answer to
+           both. On a deep page of the unfiltered library the box is empty
+           — so the CSS would hide the only link back — and "clear" would
+           name a search that isn't running, hence the modifier and the
+           different word. */}}
+      <a class="search__clear{{if .AtCursor}} search__clear--persistent{{end}}" href="/">{{if .AtCursor}}first page ×{{else}}clear ×{{end}}</a>
       <span class="search__spinner" aria-hidden="true"></span>
     </div>
     {{/* Hidden until search.js binds the shortcut — a hint for a key that
@@ -109,29 +115,7 @@
   <p class="search__count">{{.SearchSummary}}</p>
   {{end}}
   <ul class="grid">
-    {{range .Books}}
-    <li class="card">
-      <a class="card__link" href="/books/{{.ID}}">
-        <div class="card__shelf">
-          {{if .CoverURL}}
-          <img class="card__cover" src="{{.CoverURL}}" alt="" loading="lazy" decoding="async">
-          {{else}}
-          <div class="card__cover card__cover--missing"><span>no cover</span></div>
-          {{end}}
-        </div>
-        <h2 class="card__title">{{.Title}}</h2>
-        {{if .AuthorLine}}
-        <p class="card__author">{{.AuthorLine}}</p>
-        {{else}}
-        <p class="card__author card__author--unknown">Author unknown</p>
-        {{end}}
-        <p class="card__meta">
-          <span class="badge">{{.Format}}</span>
-          {{if .PathsLabel}}<span class="card__paths" title="Same file found in more than one location">{{.PathsLabel}}</span>{{end}}
-        </p>
-      </a>
-    </li>
-    {{end}}
+    {{template "book-grid-cards" .}}
   </ul>
   {{else if .Searching}}
   <div class="search__empty">
@@ -160,6 +144,44 @@
      computed once in book.go's applySendState, the same discipline
      searchSummary applies to the results line — this template only
      branches on which literal block to show, not how to phrase it. */}}
+{{define "book-grid-cards"}}
+{{range .Books}}
+<li class="card">
+  <a class="card__link" href="/books/{{.ID}}">
+    <div class="card__shelf">
+      {{if .CoverURL}}
+      <img class="card__cover" src="{{.CoverURL}}" alt="" loading="lazy" decoding="async">
+      {{else}}
+      <div class="card__cover card__cover--missing"><span>no cover</span></div>
+      {{end}}
+    </div>
+    <h2 class="card__title">{{.Title}}</h2>
+    {{if .AuthorLine}}
+    <p class="card__author">{{.AuthorLine}}</p>
+    {{else}}
+    <p class="card__author card__author--unknown">Author unknown</p>
+    {{end}}
+    <p class="card__meta">
+      <span class="badge">{{.Format}}</span>
+      {{if .PathsLabel}}<span class="card__paths" title="Same file found in more than one location">{{.PathsLabel}}</span>{{end}}
+    </p>
+  </a>
+</li>
+{{end}}
+{{/* The reveal trigger lives inside the same <ul> as the cards, because
+     it replaces itself with the next batch of <li>s plus a fresh trigger
+     — so whatever it swaps in has to be a legal child of the list. It
+     carries both an href and an hx-get: with htmx loaded the reveal
+     appends, and without it the link is an ordinary navigation to a page
+     starting at the same cursor. MoreLabel is empty on the last page, so
+     the trigger is simply absent there rather than offering zero more. */}}
+{{if .MoreLabel}}
+<li class="grid__more" hx-get="{{.MoreAppendURL}}" hx-trigger="revealed" hx-target="this" hx-swap="outerHTML">
+  <a class="grid__more-link" href="{{.MoreURL}}">{{.MoreLabel}}</a>
+</li>
+{{end}}
+{{end}}
+
 {{define "send-control"}}
 <div class="send detail__send" id="send">
   {{if not .SendEnabled}}

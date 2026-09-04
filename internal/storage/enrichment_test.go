@@ -396,7 +396,7 @@ func TestApplyEnrichedFieldsWritesValueProvenanceAndFTSInOneTransaction(t *testi
 		}
 	}
 
-	books, err := db.SearchBooks(ctx, `"story"*`)
+	books, err := db.SearchBooks(ctx, `"story"*`, BookPage{})
 	if err != nil || len(books) != 1 {
 		t.Errorf("search on enriched description = %v, %v", books, err)
 	}

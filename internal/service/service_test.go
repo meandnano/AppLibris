@@ -34,7 +34,7 @@ func TestListBooksAssemblesAuthors(t *testing.T) {
 		t.Fatalf("CreateBook none: %v", err)
 	}
 
-	books, err := svc.ListBooks(ctx)
+	books, _, err := svc.ListBooks(ctx, storage.BookPage{})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestListBooksReportsLocations(t *testing.T) {
 		t.Fatalf("UpsertBookFile two-b: %v", err)
 	}
 
-	books, err := svc.ListBooks(ctx)
+	books, _, err := svc.ListBooks(ctx, storage.BookPage{})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestSearchBooksReportsLocations(t *testing.T) {
 		t.Fatalf("UpsertBookFile: %v", err)
 	}
 
-	result, err := svc.SearchBooks(ctx, "Piranesi")
+	result, err := svc.SearchBooks(ctx, "Piranesi", storage.BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestSearchBooksBlankQueryReturnsFullList(t *testing.T) {
 	}
 
 	for _, q := range []string{"", "   ", "\t"} {
-		result, err := svc.SearchBooks(ctx, q)
+		result, err := svc.SearchBooks(ctx, q, storage.BookPage{})
 		if err != nil {
 			t.Fatalf("SearchBooks(%q): %v", q, err)
 		}
@@ -171,7 +171,7 @@ func TestSearchBooksMatchReturnsSummaryWithAuthors(t *testing.T) {
 		t.Fatalf("CreateBook unrelated: %v", err)
 	}
 
-	result, err := svc.SearchBooks(ctx, "Piranesi")
+	result, err := svc.SearchBooks(ctx, "Piranesi", storage.BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks: %v", err)
 	}
