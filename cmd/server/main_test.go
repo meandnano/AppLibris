@@ -143,12 +143,15 @@ func TestRunWithTheWatcherDisabled(t *testing.T) {
 
 // A negative settle window would poke on an event that hasn't happened yet;
 // like MISSING_GRACE, it is rejected at startup rather than quietly
-// producing nonsense.
+// producing nonsense. A misspelled METADATA_PROVIDERS entry gets the same
+// treatment for a different reason: silently running with fewer providers
+// than configured is the kind of thing nobody notices for months.
 func TestRunRejectsBadWatchConfiguration(t *testing.T) {
 	for _, tc := range []struct{ name, key, value string }{
 		{"negative settle", "WATCH_SETTLE", "-5s"},
 		{"unparseable settle", "WATCH_SETTLE", "soon"},
 		{"unparseable enabled", "WATCH_ENABLED", "sometimes"},
+		{"unknown metadata provider", "METADATA_PROVIDERS", "bogus"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "library.db"))
@@ -198,5 +201,38 @@ func TestPeriodicScanDoesNotSweepOnACancelledContext(t *testing.T) {
 
 	if got := logs.String(); strings.Contains(got, "level=ERROR") {
 		t.Errorf("a cancelled shutdown swept anyway and logged an error:\n%s", got)
+	}
+}
+
+// METADATA_PROVIDERS= (set, empty) is the documented way to run with no
+// outbound requests at all, which only works because it stays distinct from
+// the variable being unset. Collapsing the two — the pattern every other
+// env var in run() uses — would silently give a deployment that asked for
+// no outbound calls the default provider pair.
+func TestMetadataProviderNamesDistinguishesEmptyFromUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		env   map[string]string
+		want  []string
+		isSet bool
+	}{
+		{name: "unset uses the default pair", want: []string{"openlibrary", "googlebooks"}},
+		{name: "set but empty disables enrichment", env: map[string]string{"METADATA_PROVIDERS": ""}, want: nil},
+		{name: "one name", env: map[string]string{"METADATA_PROVIDERS": "openlibrary"}, want: []string{"openlibrary"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := metadataProviderNames(func(key string) (string, bool) {
+				v, ok := tc.env[key]
+				return v, ok
+			})
+			if len(got) != len(tc.want) {
+				t.Fatalf("names = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("names[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
 	}
 }

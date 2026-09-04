@@ -6,13 +6,27 @@
 // process/terminal-write structure — but see worker.go for where the two
 // deliberately diverge.
 //
-// No real Provider exists yet; that's step 05. This package is buildable
-// and fully testable without one, per DESIGN.md's "resolver logic is kept
+// internal/openlibrary and internal/googlebooks are the two real
+// implementations; a nil or empty provider list stays valid, since that is
+// what METADATA_PROVIDERS= configures. The package is buildable and fully
+// testable without any of them, per DESIGN.md's "resolver logic is kept
 // separate from the providers so ordering and merging are testable without
 // any real provider" — see resolver_test.go's fakes.
 package enrich
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrRetryable marks the subset of provider failures worth another try —
+// DESIGN.md's 429/5xx/transport case. A provider wraps it around those and
+// only those; WithRetry retries on errors.Is(err, ErrRetryable) and gives
+// up immediately on anything else, so a 400, a bad API key, or a malformed
+// body costs one request rather than three. A "no match" never reaches
+// here at all: that is a zero Metadata with a nil error, an answer rather
+// than a failure.
+var ErrRetryable = errors.New("retryable provider failure")
 
 // Provider is one metadata source. Implementations are HTTP clients;
 // nothing here knows that. Declared on the consumer side (this package),
@@ -29,15 +43,12 @@ type Provider interface {
 	Search(ctx context.Context, title string, authors []string) (Metadata, error)
 }
 
-// Metadata is what a Provider can answer about a book — the same seven
-// fields field_sources tracks, minus the cover: field_sources.field is
-// CHECK-constrained to text fields only, a cover has no provenance row to
-// record, and whether covers are even worth fetching is step 05's decision
-// once there's real provider output to judge it against (see the plan's
-// Scope). Every field is optional, mirroring internal/epub and
-// internal/fb2's own Metadata: a zero Metadata with a nil error means "no
-// answer", which is the common case for most books against most
-// providers, not an error condition.
+// Metadata is what a Provider can answer about a book: the seven text
+// fields field_sources tracks, plus a fetched cover's raw image bytes.
+// Every field is optional, mirroring internal/epub and internal/fb2's own
+// Metadata: a zero Metadata with a nil error means "no answer", which is
+// the common case for most books against most providers, not an error
+// condition.
 type Metadata struct {
 	Title         string
 	Authors       []string
@@ -46,4 +57,16 @@ type Metadata struct {
 	Language      string
 	ISBN          string
 	Description   string
+	// CoverURL locates a cover image, or is empty when the provider found
+	// none. It is a URL rather than the bytes themselves so that nothing
+	// downloads an image until the resolver has established the book
+	// actually needs one — most books already carry an embedded cover, and
+	// fetching inside the provider would spend a round trip and up to
+	// MaxCoverBytes per lookup on an answer Resolve then discards. The
+	// download and internal/cover.Store call are the Worker's, which is
+	// also what keeps image bytes out of WithCache's bounded map.
+	//
+	// It never reaches cover_path: the column holds the path Store
+	// produced, keyed by the book's content hash, never a remote URL.
+	CoverURL string
 }

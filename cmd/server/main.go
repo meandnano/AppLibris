@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
 
 	"library/internal/enrich"
+	"library/internal/providers"
 	"library/internal/resend"
 	"library/internal/scanner"
 	"library/internal/sender"
@@ -69,6 +71,22 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("parse WATCH_SETTLE: must not be negative: %s", watchSettle)
 	}
 
+	metadataProviderNames := metadataProviderNames(os.LookupEnv)
+
+	googleBooksAPIKey := os.Getenv("GOOGLE_BOOKS_API_KEY")
+	if googleBooksAPIKey == "" && slices.Contains(metadataProviderNames, "googlebooks") {
+		slog.Warn("GOOGLE_BOOKS_API_KEY is not set: Google Books enrichment will use anonymous access at a low quota")
+	}
+
+	// An unknown name fails startup outright (unlike a missing
+	// RESEND_API_KEY, which only warns): asking for a specific provider
+	// and silently getting fewer than requested is the kind of thing
+	// nobody notices for months.
+	metadataProviders, err := providers.Resolve(metadataProviderNames, googleBooksAPIKey)
+	if err != nil {
+		return fmt.Errorf("resolve METADATA_PROVIDERS: %w", err)
+	}
+
 	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
 		return fmt.Errorf("create library directory: %w", err)
 	}
@@ -102,13 +120,11 @@ func run(ctx context.Context) error {
 		slog.Warn("sending disabled: RESEND_FROM is not set")
 	}
 
-	// No real Provider exists yet — that's a later step — so the worker
-	// runs with an empty chain and every job resolves to "nothing
-	// missing, no providers". Unlike sending, there's no config that
-	// disables this: an empty provider list already makes it a no-op, and
-	// running it unconditionally keeps its queue/worker wiring exercised
-	// ahead of a real provider needing it.
-	enrichWorker := enrich.New(db, nil)
+	// Unlike sending, there's no separate config flag that disables
+	// enrichment: METADATA_PROVIDERS= (empty) already resolves to an empty
+	// provider list above, which makes every job a no-op, so the worker
+	// always runs and its queue/worker wiring is exercised either way.
+	enrichWorker := enrich.New(db, metadataProviders, coversDir)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +360,21 @@ func runScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, 
 	} else {
 		slog.Info("scan complete", attrs...)
 	}
+}
+
+// metadataProviderNames reads METADATA_PROVIDERS. Unlike envOrDefault's
+// other uses, "set but empty" and "unset" must stay distinct here:
+// METADATA_PROVIDERS= is the documented way to disable enrichment outright
+// and make no outbound calls at all, while leaving it unset means "use the
+// default pair" — so this takes a lookup rather than collapsing both to the
+// same default. It takes that lookup as a parameter so the distinction is
+// testable without a whole run().
+func metadataProviderNames(lookup func(string) (string, bool)) []string {
+	raw, set := lookup("METADATA_PROVIDERS")
+	if !set {
+		raw = "openlibrary,googlebooks"
+	}
+	return providers.ParseNames(raw)
 }
 
 func envOrDefault(key, def string) string {

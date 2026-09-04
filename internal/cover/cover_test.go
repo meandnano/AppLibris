@@ -2,12 +2,15 @@ package cover
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -139,5 +142,33 @@ func TestStoreReplacesExistingCover(t *testing.T) {
 	}
 	if width, height := decodedSize(t, path); width != 80 || height != 100 {
 		t.Errorf("stored size = %dx%d, want 80x100", width, height)
+	}
+}
+
+// A byte cap on the input is not a bound on the decode: width x height x 4
+// bytes of RGBA comes out of a small, highly compressible file, so a cover
+// fetched from a metadata provider could otherwise make this allocate
+// gigabytes. The header is read on its own first so an oversized image is
+// refused before any pixel buffer exists.
+func TestStoreRefusesAnImageOverThePixelLimit(t *testing.T) {
+	// A PNG header claiming far more pixels than maxPixels, with no image
+	// data behind it: DecodeConfig reads only the header, which is the
+	// point — this must be refused without ever decoding.
+	var buf bytes.Buffer
+	buf.Write([]byte("\x89PNG\r\n\x1a\n"))
+	ihdr := make([]byte, 0, 25)
+	ihdr = append(ihdr, 0, 0, 0, 13, 'I', 'H', 'D', 'R')
+	ihdr = binary.BigEndian.AppendUint32(ihdr, 40000) // width
+	ihdr = binary.BigEndian.AppendUint32(ihdr, 40000) // height
+	ihdr = append(ihdr, 8, 6, 0, 0, 0)
+	ihdr = binary.BigEndian.AppendUint32(ihdr, crc32.ChecksumIEEE(ihdr[4:]))
+	buf.Write(ihdr)
+
+	_, err := Store(t.TempDir(), "huge", buf.Bytes())
+	if err == nil {
+		t.Fatal("Store: want an error for a 40000x40000 image")
+	}
+	if !strings.Contains(err.Error(), "pixel limit") {
+		t.Errorf("error = %v, want it to name the pixel limit", err)
 	}
 }

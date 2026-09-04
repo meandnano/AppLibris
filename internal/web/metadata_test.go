@@ -230,6 +230,22 @@ func TestMetadataUnknownFieldAndBookAre404(t *testing.T) {
 	if rec := postField(handler, id, "cover_path", url.Values{"value": {"x"}}, htmx); rec.Code != http.StatusNotFound {
 		t.Errorf("POST to a field that is not editable = %d, want 404", rec.Code)
 	}
+	// "cover" is a real storage.MetadataField — field_sources records it and
+	// ApplyEnrichedFields writes it — but it is not one a person may edit,
+	// so it must not parse here. If it did, this POST would reach
+	// UpdateBookField, come back with ErrInvalidMetadataField (which is not
+	// service.ErrInvalidMetadata), and answer 500; the GET would render an
+	// empty field fragment pointing at /books/0/metadata/.
+	if rec := postField(handler, id, "cover", url.Values{"value": {"x"}}, htmx); rec.Code != http.StatusNotFound {
+		t.Errorf("POST to the cover field = %d, want 404", rec.Code)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id)+"/metadata/cover", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET the cover field = %d, want 404", rec.Code)
+	}
 	if rec := postField(handler, 99999, "title", url.Values{"value": {"x"}}, htmx); rec.Code != http.StatusNotFound {
 		t.Errorf("POST for an unknown book = %d, want 404", rec.Code)
 	}

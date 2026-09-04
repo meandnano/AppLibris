@@ -270,6 +270,8 @@ func scalarColumnName(field MetadataField) (string, bool) {
 		return "isbn", true
 	case FieldDescription:
 		return "description", true
+	case FieldCover:
+		return "cover_path", true
 	default:
 		return "", false
 	}

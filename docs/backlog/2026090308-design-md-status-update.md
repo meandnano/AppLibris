@@ -20,11 +20,11 @@ understates what actually shipped.
 
 ## Why this is backlog, not a plan
 
-It doesn't corrupt data, doesn't block step 05 (Open Library / Google
-Books providers) or step 06 (enrichment UI) from being planned or built —
-both already exist as plan files and neither depends on DESIGN.md's prose
-— and it isn't visibly wrong in the shipped app, since DESIGN.md isn't
-part of what ships. It's a documentation drift between two branches that
+It doesn't corrupt data, didn't block step 05 (Open Library / Google
+Books providers, since landed) or step 06 (enrichment UI) from being
+planned or built — both already exist as plan files and neither depends
+on DESIGN.md's prose — and it isn't visibly wrong in the shipped app,
+since DESIGN.md isn't part of what ships. It's a documentation drift between two branches that
 were already diverging before this step (the whole reason the plan calls
 the edit out as its own section rather than folding it into the code
 change).
@@ -34,11 +34,16 @@ change).
 On the `init` branch (not `master`), update DESIGN.md's Metadata section
 (the block starting "**Provenance is now built**; the provider chain, the
 provider interface, compile-time registration and the resolver remain
-design only.") to reflect that the queue, worker, `Provider` interface and
-resolver are now built (`internal/enrich`), and only the provider
-implementations (`ByISBN`/`Search` against Open Library and Google Books)
-remain outstanding. The status-table row (`| Metadata providers, chain |
-Not built |`) should move to something like `Partial — queue, interface
-and resolver built; no provider implementations yet`, matching the
-`Metadata provenance` row's own `Partial` phrasing one line above it. Stays
-`Partial` rather than `Built` until step 05 lands a real provider.
+design only.") to reflect that the whole chain is now built: the queue,
+worker, `Provider` interface and resolver (`internal/enrich`), both
+provider implementations (`internal/openlibrary`, `internal/googlebooks`),
+the rate-limit/cache/retry decorators, and the compile-time registry
+(`internal/providers`) that `METADATA_PROVIDERS` drives.
+
+Step 05 has since landed, so the status-table rows go straight to `Built`
+rather than the `Partial` this item originally proposed as an intermediate:
+`| Metadata providers, chain | Built |`, and `Metadata provenance` from
+`Partial` to `Built` (the `cover` value and `ApplyEnrichedFields` completed
+it). With those two, DESIGN.md has no in-scope unbuilt items left, which is
+worth saying plainly in that document's implementation-status intro rather
+than leaving a reader to compare every row.

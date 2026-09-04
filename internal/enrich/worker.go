@@ -3,8 +3,10 @@ package enrich
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"time"
 
+	"library/internal/cover"
 	"library/internal/storage"
 )
 
@@ -35,21 +37,41 @@ const lookupFailedReason = "could not read the library index — try again"
 // result back failed.
 const applyFailedReason = "could not save enriched metadata"
 
+// coverFetchTimeout bounds one cover download. The worker owns this client
+// rather than borrowing a provider's, because the download is the worker's
+// step (see Metadata.CoverURL) and the URL may name a host — Open Library's
+// separate covers domain, for one — that has nothing to do with whichever
+// provider answered. It is the same order as a provider's own Timeout, for
+// the same reason: enrichment is a background nicety, and a slow image is
+// skipped rather than waited out.
+const coverFetchTimeout = 8 * time.Second
+
 // Worker claims and processes enrichment_jobs rows one at a time, in queue
 // order — internal/sender's shape, with providers in place of a Transport.
 type Worker struct {
-	db        *storage.DB
-	providers []Provider
-	notify    chan struct{}
+	db          *storage.DB
+	providers   []Provider
+	coversDir   string
+	coverClient *http.Client
+	notify      chan struct{}
 }
 
 // New returns a Worker that reads jobs from db and asks providers, in
 // order, for whatever's missing. A nil or empty providers is valid: every
-// job then resolves to "nothing missing, no providers", which is what lets
-// this worker run — and its wiring stay exercised — before step 05 gives
-// it something to call.
-func New(db *storage.DB, providers []Provider) *Worker {
-	return &Worker{db: db, providers: providers, notify: make(chan struct{}, 1)}
+// job then resolves to "nothing missing, no providers", which is what
+// METADATA_PROVIDERS= configures and what keeps this worker's wiring
+// exercised on a deployment that makes no outbound calls at all. coversDir
+// is where a fetched cover is stored, via internal/cover.Store, under the
+// book's content hash — the same directory the scanner and internal/web
+// already share.
+func New(db *storage.DB, providers []Provider, coversDir string) *Worker {
+	return &Worker{
+		db:          db,
+		providers:   providers,
+		coversDir:   coversDir,
+		coverClient: &http.Client{Timeout: coverFetchTimeout, CheckRedirect: CheckCoverRedirect},
+		notify:      make(chan struct{}, 1),
+	}
 }
 
 // Notify pokes the worker to check the queue immediately, instead of
@@ -149,7 +171,7 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		return
 	}
 
-	values, sourceName, err := Resolve(ctx, *book, authors, sources, w.providers)
+	values, sourceName, coverURL, coverSource, err := Resolve(ctx, *book, authors, sources, w.providers)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -170,6 +192,23 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		return
 	}
 
+	// Resolve hands back a cover URL rather than a path — see its doc
+	// comment — because both the download and turning it into a path are
+	// this worker's I/O to do. Resolve only ever returns one for a book
+	// whose cover_path is empty, so nothing is downloaded for a book that
+	// already has a cover. Storing is exactly the scanner's own cover.Store
+	// call: resized, JPEG, named by the book's content hash, never a remote
+	// URL. A fetch or store failure only loses the cover — it is logged and
+	// the field left out of values, the same tolerance the scanner gives an
+	// embedded cover that fails to store, since it must not fail a job
+	// whose text fields already resolved.
+	if coverURL != "" {
+		if path, ok := w.storeCover(ctx, *book, coverURL); ok {
+			values[storage.FieldCover] = path
+			sourceName[storage.FieldCover] = coverSource
+		}
+	}
+
 	// One call, one transaction, whatever Resolve found — sourceName
 	// carries each field's own provider, so a job that pulled fields from
 	// more than one provider still records each under the one that
@@ -178,7 +217,8 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 	// saw) is what keeps this safe against an edit racing the provider
 	// calls above.
 	if len(values) > 0 {
-		if _, err := w.db.ApplyEnrichedFields(ctx, job.BookID, values, sourceName, time.Now()); err != nil {
+		applied, err := w.db.ApplyEnrichedFields(ctx, job.BookID, values, sourceName, time.Now())
+		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -186,9 +226,38 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 			w.fail(ctx, job.ID, applyFailedReason)
 			return
 		}
+		// A book that vanished between the claim above and this write is
+		// the same failed job the claim-time check records, not a done one
+		// with nothing to enrich — calling a run that wrote nothing
+		// successful is exactly what MarkEnrichmentDone must not mean.
+		if !applied {
+			w.fail(ctx, job.ID, bookGoneReason)
+			return
+		}
 	}
 
 	w.done(ctx, job.ID)
+}
+
+// storeCover downloads coverURL and stores it as book's cover thumbnail,
+// reporting the stored path. It reports false — logging why — for every
+// failure, since a cover is the one field whose absence costs nothing but
+// a dashed box in the grid.
+func (w *Worker) storeCover(ctx context.Context, book storage.Book, coverURL string) (string, bool) {
+	data, err := FetchCover(ctx, w.coverClient, coverURL)
+	if err != nil {
+		slog.Warn("fetch enriched cover failed", "book_id", book.ID, "error", err)
+		return "", false
+	}
+	if len(data) == 0 {
+		return "", false
+	}
+	path, err := cover.Store(w.coversDir, book.ContentHash, data)
+	if err != nil {
+		slog.Warn("store enriched cover failed", "book_id", book.ID, "error", err)
+		return "", false
+	}
+	return path, true
 }
 
 // done records job's successful completion. Like internal/sender's

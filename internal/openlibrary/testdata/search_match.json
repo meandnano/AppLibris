@@ -1,0 +1,43 @@
+{
+  "numFound": 1,
+  "start": 0,
+  "numFoundExact": true,
+  "docs": [
+    {
+      "key": "/works/OL5883847W",
+      "type": "work",
+      "title": "Structure and Interpretation of Computer Programs",
+      "subtitle": "Second Edition",
+      "author_name": [
+        "Harold Abelson",
+        "Gerald Jay Sussman"
+      ],
+      "author_key": [
+        "OL225460A",
+        "OL225461A"
+      ],
+      "first_publish_year": 1985,
+      "publish_date": [
+        "1996",
+        "1985"
+      ],
+      "publisher": [
+        "MIT Press",
+        "McGraw-Hill"
+      ],
+      "language": [
+        "eng"
+      ],
+      "isbn": [
+        "0262011530",
+        "9780262011532",
+        "978-0-262-01153-2"
+      ],
+      "edition_count": 12,
+      "cover_i": 240727,
+      "ia": [
+        "structureinterpr00abel"
+      ]
+    }
+  ]
+}
