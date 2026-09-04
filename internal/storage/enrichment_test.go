@@ -514,6 +514,13 @@ func TestApplyEnrichedFieldsTransactionRollsBackAnAlreadyAppliedFieldOnLaterFail
 // is what makes this safe without any explicit locking: the manual edit
 // below stands in for one that committed while a provider call was still
 // in flight.
+//
+// This case alone only exercises isMissing's emptiness half: the field's
+// value is non-empty, so it would be skipped even if the provenance check
+// were deleted outright. TestApplyEnrichedFieldsSkipsAClearedManualField
+// and TestApplyEnrichedFieldsSkipsManuallySetAuthors, below, cover the
+// half this one can't — a deliberately *cleared* field, and the separate
+// row-count branch fieldIsStillMissingTx takes for authors.
 func TestApplyEnrichedFieldsSkipsAFieldManuallyEditedSinceResolve(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -563,6 +570,131 @@ func TestApplyEnrichedFieldsSkipsAFieldManuallyEditedSinceResolve(t *testing.T) 
 	}
 	if pubSource != "openlibrary" {
 		t.Errorf("publisher source = %q, want openlibrary", pubSource)
+	}
+}
+
+// The half TestApplyEnrichedFieldsSkipsAFieldManuallyEditedSinceResolve
+// can't exercise: a field can be manually *emptied*, not just manually
+// filled, and field_sources still says "manual" either way. A manually
+// filled field is skipped by isMissing's emptiness check alone, whatever
+// its provenance — this is the case where the provenance check is the
+// only thing standing between the field and being silently refilled,
+// which is Decision 1's whole point and the failure field_sources exists
+// to prevent.
+func TestApplyEnrichedFieldsSkipsAClearedManualField(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-11c", Title: "Book", SortTitle: "book", Publisher: "Ace Books"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Deliberately cleared, standing in for a person clearing a wrong
+	// value while a provider call was still in flight.
+	if exists, err := db.UpdateBookField(ctx, id, FieldPublisher, "", time.Now()); err != nil || !exists {
+		t.Fatalf("UpdateBookField clear: %v, %v", exists, err)
+	}
+
+	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+		FieldPublisher: "Provider's Guess Press",
+	}, map[MetadataField]string{
+		FieldPublisher: "openlibrary",
+	}, time.Now())
+	if err != nil || !exists {
+		t.Fatalf("ApplyEnrichedFields = %v, %v", exists, err)
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Publisher != "" {
+		t.Errorf("Publisher = %q, want empty — a deliberately cleared field must not be refilled", book.Publisher)
+	}
+	var source string
+	if err := db.Read().QueryRow(`SELECT source FROM field_sources WHERE book_id = ? AND field = ?`, id, FieldPublisher).Scan(&source); err != nil {
+		t.Fatal(err)
+	}
+	if source != "manual" {
+		t.Errorf("source = %q, want manual (unchanged)", source)
+	}
+}
+
+// fieldIsStillMissingTx takes a separate branch for FieldAuthors — a
+// book_authors row count, not a books column — which none of the scalar
+// tests above ever reach.
+func TestApplyEnrichedFieldsSkipsManuallySetAuthors(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-11d", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if exists, err := db.UpdateBookAuthors(ctx, id, []string{"Hand-Typed Author"}, time.Now()); err != nil || !exists {
+		t.Fatalf("UpdateBookAuthors: %v, %v", exists, err)
+	}
+
+	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+		FieldAuthors: "Provider Author",
+	}, map[MetadataField]string{
+		FieldAuthors: "openlibrary",
+	}, time.Now())
+	if err != nil || !exists {
+		t.Fatalf("ApplyEnrichedFields = %v, %v", exists, err)
+	}
+
+	authors, err := db.ListAuthorsForBook(ctx, id)
+	if err != nil || len(authors) != 1 || authors[0] != "Hand-Typed Author" {
+		t.Errorf("authors = %v, %v, want [Hand-Typed Author] unchanged", authors, err)
+	}
+	var source string
+	if err := db.Read().QueryRow(`SELECT source FROM field_sources WHERE book_id = ? AND field = ?`, id, FieldAuthors).Scan(&source); err != nil {
+		t.Fatal(err)
+	}
+	if source != "manual" {
+		t.Errorf("source = %q, want manual (unchanged)", source)
+	}
+}
+
+// The authors counterpart to TestApplyEnrichedFieldsSkipsAClearedManualField:
+// a manually-set author list is non-empty, so it's already skipped by
+// isMissing's emptiness check alone regardless of provenance — an author
+// list manually *cleared* to none is the case where the manual guard is
+// the only thing stopping it from being refilled.
+func TestApplyEnrichedFieldsSkipsClearedManualAuthors(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-11e", Title: "Book", SortTitle: "book"}, []string{"Embedded Author"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Deliberately cleared to none, standing in for a person removing a
+	// wrong author while a provider call was still in flight.
+	if exists, err := db.UpdateBookAuthors(ctx, id, nil, time.Now()); err != nil || !exists {
+		t.Fatalf("UpdateBookAuthors clear: %v, %v", exists, err)
+	}
+
+	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+		FieldAuthors: "Provider's Guess Author",
+	}, map[MetadataField]string{
+		FieldAuthors: "openlibrary",
+	}, time.Now())
+	if err != nil || !exists {
+		t.Fatalf("ApplyEnrichedFields = %v, %v", exists, err)
+	}
+
+	authors, err := db.ListAuthorsForBook(ctx, id)
+	if err != nil || len(authors) != 0 {
+		t.Errorf("authors = %v, %v, want none — a deliberately cleared author list must not be refilled", authors, err)
+	}
+	var source string
+	if err := db.Read().QueryRow(`SELECT source FROM field_sources WHERE book_id = ? AND field = ?`, id, FieldAuthors).Scan(&source); err != nil {
+		t.Fatal(err)
+	}
+	if source != "manual" {
+		t.Errorf("source = %q, want manual (unchanged)", source)
 	}
 }
 
