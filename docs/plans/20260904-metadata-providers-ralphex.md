@@ -256,21 +256,27 @@ keep the key out of logs.
 
 ### Task 5: Registry, `METADATA_PROVIDERS` and `cmd/server` wiring
 
-- [ ] add `internal/enrich/registry.go` with the compile-time name →
-      constructor map for `openlibrary` and `googlebooks`
-- [ ] compose each provider once at construction as
+- [x] add the compile-time name → constructor map for `openlibrary` and
+      `googlebooks` — as `internal/providers/registry.go`, not
+      `internal/enrich/registry.go` as first sketched: both provider
+      packages import `internal/enrich` for `Provider`/`Metadata`, so a
+      registry inside `internal/enrich` importing them back would be an
+      import cycle. `internal/providers` sits outside `internal/enrich`
+      for exactly that reason and is the only thing that imports all
+      three.
+- [x] compose each provider once at construction as
       `WithRateLimit(WithRetry(WithCache(client)))`
-- [ ] read `METADATA_PROVIDERS` (default `openlibrary,googlebooks`) in
+- [x] read `METADATA_PROVIDERS` (default `openlibrary,googlebooks`) in
       `cmd/server`, resolve names in order through the map, and pass the
       slice to `enrich.New` in place of today's `nil`
-- [ ] fail startup on an unknown provider name with a message naming it
+- [x] fail startup on an unknown provider name with a message naming it
       and listing the valid ones; treat `METADATA_PROVIDERS=` as
       "enrichment disabled" rather than an error
-- [ ] read the optional `GOOGLE_BOOKS_API_KEY`, warning rather than
+- [x] read the optional `GOOGLE_BOOKS_API_KEY`, warning rather than
       failing when it is absent
-- [ ] write tests for name resolution: order is preserved, an unknown name
+- [x] write tests for name resolution: order is preserved, an unknown name
       is an error naming it, empty resolves to no providers
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 6: Cover fetch path
 

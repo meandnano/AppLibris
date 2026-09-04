@@ -143,12 +143,15 @@ func TestRunWithTheWatcherDisabled(t *testing.T) {
 
 // A negative settle window would poke on an event that hasn't happened yet;
 // like MISSING_GRACE, it is rejected at startup rather than quietly
-// producing nonsense.
+// producing nonsense. A misspelled METADATA_PROVIDERS entry gets the same
+// treatment for a different reason: silently running with fewer providers
+// than configured is the kind of thing nobody notices for months.
 func TestRunRejectsBadWatchConfiguration(t *testing.T) {
 	for _, tc := range []struct{ name, key, value string }{
 		{"negative settle", "WATCH_SETTLE", "-5s"},
 		{"unparseable settle", "WATCH_SETTLE", "soon"},
 		{"unparseable enabled", "WATCH_ENABLED", "sometimes"},
+		{"unknown metadata provider", "METADATA_PROVIDERS", "bogus"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "library.db"))
