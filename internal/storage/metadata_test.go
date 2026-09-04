@@ -144,6 +144,12 @@ func TestUpdateBookFieldRejectsAuthorsAndUnknownBooks(t *testing.T) {
 		t.Errorf("UpdateBookField(authors) error = %v, want ErrInvalidMetadataField", err)
 	}
 
+	// cover_path holds a path internal/cover.Store produced, not text a
+	// person types — only ApplyEnrichedFields may write it.
+	if _, err := db.UpdateBookField(ctx, id, FieldCover, "covers/x.jpg", time.Now()); !errors.Is(err, ErrInvalidMetadataField) {
+		t.Errorf("UpdateBookField(cover) error = %v, want ErrInvalidMetadataField", err)
+	}
+
 	// An unknown book is absent, not an error — the caller turns that into
 	// a 404, the same contract the finders use.
 	for _, name := range []string{"field", "authors"} {

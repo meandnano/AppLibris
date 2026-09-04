@@ -743,6 +743,75 @@ func TestApplyEnrichedFieldsSkipsClearedManualAuthors(t *testing.T) {
 	}
 }
 
+// cover is the field's provenance round-trip: ApplyEnrichedFields writes
+// cover_path exactly like any other scalar column, through the same
+// fieldIsStillMissingTx re-check, and FieldSourcesForBook reports the
+// provider that answered it — none of which is specific to cover, but
+// nothing exercised the field CHECK constraint's new value until now.
+func TestApplyEnrichedFieldsWritesCoverPathWithCoverProvenance(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-cover", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+		FieldCover: "covers/ab/abcdef.jpg",
+	}, map[MetadataField]string{
+		FieldCover: "openlibrary",
+	}, time.Now())
+	if err != nil || !exists {
+		t.Fatalf("ApplyEnrichedFields = %v, %v", exists, err)
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.CoverPath != "covers/ab/abcdef.jpg" {
+		t.Errorf("CoverPath = %q, want the stored path", book.CoverPath)
+	}
+
+	sources, err := db.FieldSourcesForBook(ctx, id)
+	if err != nil {
+		t.Fatalf("FieldSourcesForBook: %v", err)
+	}
+	if sources[FieldCover] != "openlibrary" {
+		t.Errorf("sources[cover] = %q, want openlibrary", sources[FieldCover])
+	}
+}
+
+// A book that already has a cover is not reconsidered — the same
+// isMissing rule every other field follows, exercised here because a
+// non-empty cover_path is the scanner's own "looked, found nothing"
+// convention and must not be confused with "not yet looked at".
+func TestApplyEnrichedFieldsSkipsABookThatAlreadyHasACover(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-cover-2", Title: "Book", SortTitle: "book", CoverPath: "covers/existing.jpg"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exists, err := db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+		FieldCover: "covers/provider-fetched.jpg",
+	}, map[MetadataField]string{
+		FieldCover: "openlibrary",
+	}, time.Now())
+	if err != nil || !exists {
+		t.Fatalf("ApplyEnrichedFields = %v, %v", exists, err)
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.CoverPath != "covers/existing.jpg" {
+		t.Errorf("CoverPath = %q, want the existing path left alone", book.CoverPath)
+	}
+}
+
 func TestApplyEnrichedFieldsUnknownBook(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

@@ -20,6 +20,7 @@ const (
 	FieldLanguage      MetadataField = "language"
 	FieldISBN          MetadataField = "isbn"
 	FieldDescription   MetadataField = "description"
+	FieldCover         MetadataField = "cover"
 )
 
 var metadataFields = map[string]MetadataField{
@@ -30,6 +31,7 @@ var metadataFields = map[string]MetadataField{
 	string(FieldLanguage):      FieldLanguage,
 	string(FieldISBN):          FieldISBN,
 	string(FieldDescription):   FieldDescription,
+	string(FieldCover):         FieldCover,
 }
 
 func ParseMetadataField(value string) (MetadataField, bool) {
@@ -127,6 +129,8 @@ func updateBookColumnTx(ctx context.Context, tx *sql.Tx, bookID int64, field Met
 		_, err = tx.ExecContext(ctx, `UPDATE books SET isbn = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
 	case FieldDescription:
 		_, err = tx.ExecContext(ctx, `UPDATE books SET description = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
+	case FieldCover:
+		_, err = tx.ExecContext(ctx, `UPDATE books SET cover_path = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
 	default:
 		return ErrInvalidMetadataField
 	}
@@ -134,7 +138,10 @@ func updateBookColumnTx(ctx context.Context, tx *sql.Tx, bookID int64, field Met
 }
 
 func (db *DB) UpdateBookField(ctx context.Context, bookID int64, field MetadataField, value string, modifiedAt time.Time) (exists bool, err error) {
-	if field == FieldAuthors {
+	// authors has no column of its own (see UpdateBookAuthors); cover_path
+	// holds a path internal/cover.Store produced, not text a person types,
+	// so it is only ever written by ApplyEnrichedFields.
+	if field == FieldAuthors || field == FieldCover {
 		return false, ErrInvalidMetadataField
 	}
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {

@@ -184,21 +184,21 @@ keep the key out of logs.
 
 ### Task 1: Allow `cover` provenance in `field_sources`
 
-- [ ] add the four migrations `2026090304`–`2026090307` rebuilding
+- [x] add the four migrations `2026090304`–`2026090307` rebuilding
       `field_sources` with `cover` accepted by the `field` CHECK, one
       statement per file, following the `2026083010`–`2026083013`
       precedent
-- [ ] add the `cover` member to `internal/storage`'s `MetadataField` enum
+- [x] add the `cover` member to `internal/storage`'s `MetadataField` enum
       and its `metadataFields` parse map, keeping `UpdateBookField`'s
       existing rejection of fields it cannot write as a plain column
       correct
-- [ ] make `ApplyEnrichedFields` able to write `cover_path` with `cover`
+- [x] make `ApplyEnrichedFields` able to write `cover_path` with `cover`
       provenance, through the same `fieldIsStillMissingTx` re-check every
       other field goes through
-- [ ] write tests for the new field: the migration applies to a fresh
+- [x] write tests for the new field: the migration applies to a fresh
       database, existing provenance rows survive the rebuild, and a
       `cover` source round-trips through `FieldSourcesForBook`
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 2: `internal/openlibrary` provider client
 
