@@ -143,11 +143,17 @@ func (db *DB) MarkEnrichmentFailed(ctx context.Context, id int64, reason string,
 // every running row would leave that book with two queued rows, breaking
 // EnqueueEnrichment's dedup invariant and doubling the provider calls the
 // next drain makes for it. So a running row whose book already has a
-// queued sibling is retired as done instead of requeued: nothing about it
-// went wrong, its promise is simply superseded by the sibling's own future
-// run, which recomputes the missing set from scratch and covers whatever
-// the interrupted run would have. n counts only rows genuinely requeued,
-// not retired ones.
+// queued sibling is deleted outright rather than requeued: it never ran to
+// any conclusion, so marking it "done" would misrepresent a crash as a
+// successful run (MarkEnrichmentDone's contract) — and "failed" would
+// misrepresent an unknown outcome as a definite one, the same confusion
+// FailInterruptedSends exists to avoid on the send side. There is nothing
+// to lose by discarding it: the surviving sibling's own future run
+// recomputes the missing set from scratch and covers whatever the
+// interrupted run would have, so it is a duplicate promise being
+// withdrawn before it ever produced an outcome worth a history row — not
+// the terminal history EnqueueEnrichment's own doc comment says isn't
+// pruned. n counts only rows genuinely requeued, not deleted ones.
 func (db *DB) RequeueInterruptedEnrichment(ctx context.Context, now time.Time) (n int, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		rows, qErr := tx.QueryContext(ctx, `SELECT id, book_id FROM enrichment_jobs WHERE status = ?`, string(EnrichmentRunning))
@@ -179,9 +185,7 @@ func (db *DB) RequeueInterruptedEnrichment(ctx context.Context, now time.Time) (
 			}
 
 			if hasQueuedSibling {
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE enrichment_jobs SET status = ?, finished_at = ? WHERE id = ?`,
-					string(EnrichmentDone), formatTime(now), j.id); err != nil {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM enrichment_jobs WHERE id = ?`, j.id); err != nil {
 					return err
 				}
 				continue

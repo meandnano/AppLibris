@@ -218,12 +218,14 @@ full design.
   the recovery time) rather than failed — unless that book already has a
   fresh `queued` sibling (`EnqueueEnrichment`'s guard only blocks a second
   *queued* row, so one can coexist with a `running` one, per Decision 3),
-  in which case the interrupted row is retired `done` instead of requeued:
-  requeuing both would leave the book with two queued promises, breaking
-  that dedup invariant and doubling the provider calls the next drain
-  makes for it, when the surviving sibling's own run already recomputes
-  the missing set from scratch and covers whatever the interrupted one
-  would have. Two details are easy to get backwards for the same reason: `internal/enrich`'s worker checks
+  in which case the interrupted row is deleted outright instead of
+  requeued: requeuing both would leave the book with two queued promises,
+  breaking that dedup invariant and doubling the provider calls the next
+  drain makes for it, when the surviving sibling's own run already
+  recomputes the missing set from scratch and covers whatever the
+  interrupted one would have — and marking it `done` would misreport a
+  crash as a successful run, `MarkEnrichmentDone`'s actual contract. Two
+  details are easy to get backwards for the same reason: `internal/enrich`'s worker checks
   `ctx.Err()` after any failed step and, if the ambient context is
   already cancelled, leaves the row `running` rather than calling
   `MarkEnrichmentFailed` — a definite failure record would deny the row

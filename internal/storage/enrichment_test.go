@@ -247,8 +247,10 @@ func TestRequeueInterruptedEnrichmentLeavesTerminalRowsAlone(t *testing.T) {
 // then crashes, RequeueInterruptedEnrichment must not blindly requeue that
 // running row too — a book with two queued rows breaks EnqueueEnrichment's
 // own dedup invariant and would double the provider calls the next drain
-// makes for it. The interrupted row should be retired (done), not
-// requeued, leaving exactly the one queued sibling behind.
+// makes for it. The interrupted row should be deleted, not requeued and
+// not marked done: it never ran to completion, so "done" would misreport
+// a crash as a successful run — leaving exactly the one queued sibling
+// behind.
 func TestRequeueInterruptedEnrichmentRetiresARunningJobWithAQueuedSibling(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -285,27 +287,19 @@ func TestRequeueInterruptedEnrichmentRetiresARunningJobWithAQueuedSibling(t *tes
 		t.Fatalf("RequeueInterruptedEnrichment reported %d requeued, want 0 — the interrupted row has a queued sibling and should be retired, not requeued", n)
 	}
 
-	statuses := map[int64]string{}
-	rows, err := db.Read().Query(`SELECT id, status FROM enrichment_jobs WHERE book_id = ?`, id)
-	if err != nil {
+	var survivingCount int
+	if err := db.Read().QueryRow(`SELECT count(*) FROM enrichment_jobs WHERE id = ?`, running.ID).Scan(&survivingCount); err != nil {
 		t.Fatal(err)
 	}
-	for rows.Next() {
-		var jobID int64
-		var status string
-		if err := rows.Scan(&jobID, &status); err != nil {
-			rows.Close()
-			t.Fatal(err)
-		}
-		statuses[jobID] = status
+	if survivingCount != 0 {
+		t.Errorf("interrupted job rows = %d, want 0 — it should be deleted, not marked done for a run that never completed", survivingCount)
 	}
-	rows.Close()
-
-	if statuses[running.ID] != string(EnrichmentDone) {
-		t.Errorf("interrupted job status = %q, want done (retired)", statuses[running.ID])
+	var queuedStatus string
+	if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE id = ?`, queuedJobID).Scan(&queuedStatus); err != nil {
+		t.Fatal(err)
 	}
-	if statuses[queuedJobID] != string(EnrichmentQueued) {
-		t.Errorf("sibling queued job status = %q, want unchanged queued", statuses[queuedJobID])
+	if queuedStatus != string(EnrichmentQueued) {
+		t.Errorf("sibling queued job status = %q, want unchanged queued", queuedStatus)
 	}
 
 	var queuedCount int
@@ -449,20 +443,17 @@ func TestApplyEnrichedFieldsRollsBackOnFailureAcrossMixedProviders(t *testing.T)
 	}
 }
 
-// Deterministic complement to the mixed-provider test above: ApplyEnrichedFields
-// takes its fields as a Go map, whose iteration order is unspecified, so a
-// test built on its public signature can't force which field is visited
-// first — it's possible for the whole call to error out having never
-// attempted the valid field's write at all, which wouldn't actually prove
-// a rollback happened. This instead drives the exact sequence of
-// package-internal calls ApplyEnrichedFields's loop makes for each field
-// — write the column, then record its own provenance — directly, in a
-// known order inside one db.Write transaction: provider-a's field lands
-// first, then provider-b's fails outright. That proves the guarantee
-// ApplyEnrichedFields actually depends on — a write already applied
-// earlier in the same transaction is undone when a later one in it fails
-// — rather than merely that an all-or-nothing failure has no visible
-// effect.
+// Proves the underlying mechanism ApplyEnrichedFields's loop depends on —
+// a write already applied earlier in a db.Write transaction is undone
+// when a later statement in that same transaction fails — deterministically,
+// by driving the exact package-internal calls the loop makes (write the
+// column, then record its own provenance) directly, in a known order,
+// rather than through ApplyEnrichedFields's public map-based signature,
+// whose iteration order is unspecified. This alone doesn't call
+// ApplyEnrichedFields, though, so it can't by itself catch a regression to
+// separate transactions *inside* ApplyEnrichedFields —
+// TestApplyEnrichedFieldsRollsBackAllFieldsWhenFTSyncFails, below, is what
+// drives the real public function and would catch that.
 func TestApplyEnrichedFieldsTransactionRollsBackAnAlreadyAppliedFieldOnLaterFailure(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -502,6 +493,60 @@ func TestApplyEnrichedFieldsTransactionRollsBackAnAlreadyAppliedFieldOnLaterFail
 	}
 	if count != 0 {
 		t.Errorf("field_sources rows for publisher = %d after a rolled-back transaction, want 0", count)
+	}
+}
+
+// The test that actually regression-tests ApplyEnrichedFields's own
+// atomicity, calling the real public function rather than replicating its
+// internals: syncBookFTSTx runs exactly once, unconditionally, after every
+// field in the loop has been processed — a position fixed by
+// ApplyEnrichedFields's own body, not by map iteration order — so
+// dropping books_fts out from under it forces a failure there
+// deterministically, regardless of which field the (unordered) values map
+// happened to visit first. If ApplyEnrichedFields ever regressed to a
+// separate transaction per field (the shape the original review comment
+// on the worker's old per-provider grouping reported), a field applied in
+// an earlier transaction would already be committed and would survive
+// this failure; asserting neither field does is what proves the whole
+// call still runs as one transaction.
+func TestApplyEnrichedFieldsRollsBackAllFieldsWhenFTSyncFails(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-11f", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.write.ExecContext(ctx, `DROP TABLE books_fts`); err != nil {
+		t.Fatalf("drop books_fts: %v", err)
+	}
+
+	_, err = db.ApplyEnrichedFields(ctx, id, map[MetadataField]string{
+		FieldPublisher:   "Gollancz",
+		FieldDescription: "A story.",
+	}, map[MetadataField]string{
+		FieldPublisher:   "provider-a",
+		FieldDescription: "provider-b",
+	}, time.Now())
+	if err == nil {
+		t.Fatal("ApplyEnrichedFields with books_fts gone = nil error, want one")
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Publisher != "" || book.Description != "" {
+		t.Errorf("book after a rolled-back sync failure = %#v, want both fields empty", book)
+	}
+	for _, field := range []MetadataField{FieldPublisher, FieldDescription} {
+		var count int
+		if err := db.Read().QueryRow(`SELECT count(*) FROM field_sources WHERE book_id = ? AND field = ?`, id, field).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Errorf("field_sources rows for %s = %d, want 0 — a later sync failure must roll back every field the loop already applied, from both providers", field, count)
+		}
 	}
 }
 
