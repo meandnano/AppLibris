@@ -6,11 +6,13 @@ package web
 import (
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"library/internal/service"
+	"library/internal/storage"
 )
 
 // Routes builds the web UI's HTTP handler. coversDir is the directory the
@@ -152,7 +154,33 @@ type libraryPage struct {
 	Searching     bool
 	SearchSummary string
 	LibraryEmpty  bool
+
+	// MoreLabel is empty on the last page, which is how the template
+	// decides to render no trigger at all rather than a line claiming
+	// zero more books. MoreURL is the plain navigation the no-JS path
+	// follows; MoreAppendURL is the same cursor asking for just the next
+	// batch of cards.
+	MoreLabel     string
+	MoreURL       string
+	MoreAppendURL string
 }
+
+// pageSize is how many cards one page of the grid carries, and how many a
+// reveal appends. 48 is the handoff's own number ("Loading next 48 of
+// 1,284") — a figure in a mockup is a decision about how much scrolling
+// one reveal buys, and there is no measurement here to overrule it with.
+//
+// It lives in the transport rather than in storage because it is a
+// presentation decision; the storage method takes whatever limit it is
+// given.
+const pageSize = 48
+
+// appendParam marks the request the reveal trigger issues, as distinct
+// from the whole-grid fragment a keystroke issues at this same URL. Three
+// response shapes share this one route — the full page, the whole grid,
+// and a batch of cards to append — and the HX-Request split alone only
+// tells the first two apart, so the third says so in the query.
+const appendParam = "append"
 
 // libraryHandler serves both the full library page and, for a live search
 // request, just its book-grid fragment — the same resource, differing
@@ -176,15 +204,27 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
 
-		query := r.URL.Query().Get("q")
+		params := r.URL.Query()
+		query := params.Get("q")
 		fragment := isHTMXFragment(r)
+		appending := params.Get(appendParam) != ""
+
+		// A malformed after_id is treated as no cursor rather than a 400:
+		// it names no resource, and a mangled query string should still
+		// show the library — the same call ?edit= makes on the book page.
+		afterID, _ := strconv.ParseInt(params.Get("after_id"), 10, 64)
+		page := storage.BookPage{
+			AfterTitle: params.Get("after"),
+			AfterID:    afterID,
+			Limit:      pageSize,
+		}
 
 		// SearchBooks already treats a blank query as ListBooks, so this
 		// covers both cases without repeating that check here, and it
 		// reports whether what came back was a search — which is not the
 		// same as the query looking non-blank, since input that sanitizes
 		// to nothing (a lone control character, say) is no search either.
-		result, err := svc.SearchBooks(r.Context(), query)
+		result, err := svc.SearchBooks(r.Context(), query, page)
 		if err != nil {
 			slog.Error("list books failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -192,18 +232,17 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 		}
 		books := result.Books
 
-		// The library total is needed on both kinds of render, not just
+		// The library total is needed on every kind of render, not just
 		// the full page: the masthead shows it, and so does the results
-		// line the fragment carries ("4 of 1,284"). When nothing is
-		// filtering it out, the books already in hand are that total.
-		total := len(books)
-		if result.Searched {
-			total, err = svc.CountBooks(r.Context())
-			if err != nil {
-				slog.Error("count books failed", "error", err)
-				http.Error(w, "internal error", http.StatusInternalServerError)
-				return
-			}
+		// line the fragment carries ("4 of 1,284"). It is always a
+		// separate count now — before paging, an unfiltered grid held
+		// every book and could be counted in hand, which a bounded page
+		// no longer can.
+		total, err := svc.CountBooks(r.Context())
+		if err != nil {
+			slog.Error("count books failed", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
 		}
 
 		cards := make([]bookCard, len(books))
@@ -221,22 +260,37 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 			cards[i] = card
 		}
 
-		page := libraryPage{
-			Title:         "Library",
-			Nav:           navFor("library"),
-			HeaderNote:    headerBookCount(total),
-			Books:         cards,
-			Query:         query,
-			Searching:     result.Searched,
-			SearchSummary: searchSummary(len(cards), total, result.Fields),
+		view := libraryPage{
+			Title:      "Library",
+			Nav:        navFor("library"),
+			HeaderNote: headerBookCount(total),
+			Books:      cards,
+			Query:      query,
+			Searching:  result.Searched,
+			// The results line counts what *matched*, not what this page
+			// happens to hold, so it is only composed when the whole
+			// match set is in hand — a bounded page cannot say "4 of
+			// 1,284" about a search whose total it never asked for. See
+			// searchSummary.
+			SearchSummary: searchSummary(result.MatchCount, total, result.Fields),
 			LibraryEmpty:  total == 0,
 		}
+		// The count the reader is actually looking at: the library total
+		// on an unfiltered grid, the match count during a search.
+		remaining := total
+		if result.Searched {
+			remaining = result.MatchCount
+		}
+		applyMoreTrigger(&view, result.Next, query, remaining)
 
 		templateName := "library.html"
-		if fragment {
+		switch {
+		case appending:
+			templateName = "book-grid-cards"
+		case fragment:
 			templateName = "book-grid"
 		}
-		if err := render(w, templateName, page); err != nil {
+		if err := render(w, templateName, view); err != nil {
 			slog.Error("render template failed", "template", templateName, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
@@ -290,6 +344,41 @@ func formatCount(n int) string {
 		b.WriteString(s[i : i+3])
 	}
 	return b.String()
+}
+
+// applyMoreTrigger fills view's paging fields, or leaves them empty when
+// there is no next page — which is how the template renders no trigger at
+// all rather than a line offering zero more books.
+//
+// Two URLs, deliberately, and the same split the inline editors already
+// make between an href and an hx-get: the plain one navigates to a whole
+// page starting at the cursor, and the append one asks for just the next
+// batch of cards. Without JavaScript an unpaged grid was the only thing
+// that worked at all here, so a paging implementation that forgot the
+// fallback would make the no-JS experience strictly worse than before.
+//
+// The count in the label is the one the reader is actually looking at: the
+// library total on an unfiltered grid, and the match count during a
+// search, where "of 1,284" beside a filtered grid would name a number
+// nothing on screen refers to.
+func applyMoreTrigger(view *libraryPage, next service.NextPage, query string, remaining int) {
+	if !next.HasMore {
+		return
+	}
+
+	params := url.Values{}
+	if query != "" {
+		params.Set("q", query)
+	}
+	params.Set("after", next.AfterTitle)
+	params.Set("after_id", strconv.FormatInt(next.AfterID, 10))
+
+	view.MoreURL = "/?" + params.Encode()
+
+	params.Set(appendParam, "1")
+	view.MoreAppendURL = "/?" + params.Encode()
+
+	view.MoreLabel = "Loading next " + strconv.Itoa(pageSize) + " of " + formatCount(remaining)
 }
 
 // searchSummary composes the results line plate 02c specifies — "4 of

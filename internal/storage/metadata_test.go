@@ -77,11 +77,11 @@ func TestUpdateBookMetadataIsAtomicWithFTSAndProvenance(t *testing.T) {
 			t.Errorf("source for %s = %q, %v", field, source, err)
 		}
 	}
-	books, err := db.SearchBooks(ctx, `"Updated"*`)
+	books, err := db.SearchBooks(ctx, `"Updated"*`, BookPage{})
 	if err != nil || len(books) != 1 {
 		t.Errorf("search updated title = %v, %v", books, err)
 	}
-	books, err = db.SearchBooks(ctx, `"Old"*`)
+	books, err = db.SearchBooks(ctx, `"Old"*`, BookPage{})
 	if err != nil || len(books) != 0 {
 		t.Errorf("search old metadata = %v, %v", books, err)
 	}

@@ -118,9 +118,83 @@ func (db *DB) FindBookByID(ctx context.Context, id int64) (*Book, error) {
 	return scanBook(row)
 }
 
-// ListBooks returns every book, ordered by sort_title.
-func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
-	rows, err := db.read.QueryContext(ctx, `SELECT `+bookColumns+` FROM books ORDER BY sort_title`)
+// BookPage is a keyset cursor into the (sort_title, id) ordering both
+// ListBooks and SearchBooks return rows in. The zero value is the first
+// page.
+//
+// Keyset rather than LIMIT/OFFSET, for a reason specific to this
+// application: the library changes underneath the reader. The scanner runs
+// every fifteen minutes and on every filesystem event, and it inserts
+// wherever a book's sort_title falls. With OFFSET, a book inserted above
+// the reader's position shifts every later row down by one, so the next
+// page repeats a card — or, on a delete, silently skips one. A cursor
+// naming the last row seen has no such window.
+//
+// AfterID is part of the cursor because sort_title is emphatically **not**
+// unique: it is a normalised title with the leading article stripped and
+// the case folded, so two editions of one book collide by construction.
+// A cursor on a non-unique column either loops on the collision or skips
+// past it.
+//
+// AfterTitle is compared with the same NOCASE collation the column
+// carries. That is the single most likely bug here — a case-sensitive
+// comparison disagrees with the ORDER BY, and pages then overlap or drop
+// rows between them.
+//
+// A Limit of zero means unbounded, which is what keeps the scanner's and
+// the tests' whole-library calls working unchanged. The web transport
+// never passes zero; that path exists for callers that genuinely want
+// every row.
+type BookPage struct {
+	AfterTitle string
+	AfterID    int64
+	Limit      int
+}
+
+// cursorClause renders the WHERE fragment and arguments that resume from
+// p, using column as the qualified sort_title expression so the same rule
+// serves the plain list and the FTS join. It returns "" for a first page,
+// which has nothing to resume from.
+//
+// The COLLATE NOCASE is explicit rather than inherited from the column's
+// own declaration. It would in fact be inherited here, but the whole
+// correctness of paging rests on this comparison matching the ORDER BY,
+// and that is worth reading off the query rather than off the schema.
+func (p BookPage) cursorClause(titleColumn, idColumn string) (string, []any) {
+	if p.AfterTitle == "" && p.AfterID == 0 {
+		return "", nil
+	}
+	clause := "(" + titleColumn + " COLLATE NOCASE > ? OR (" +
+		titleColumn + " COLLATE NOCASE = ? AND " + idColumn + " > ?))"
+	return clause, []any{p.AfterTitle, p.AfterTitle, p.AfterID}
+}
+
+// limitClause renders the LIMIT for p, or "" when p is unbounded.
+func (p BookPage) limitClause() (string, []any) {
+	if p.Limit <= 0 {
+		return "", nil
+	}
+	return "LIMIT ?", []any{p.Limit}
+}
+
+// ListBooks returns one page of books, ordered by (sort_title, id). A zero
+// BookPage returns every book, which is what the scanner and the tests
+// want.
+func (db *DB) ListBooks(ctx context.Context, page BookPage) ([]Book, error) {
+	query := `SELECT ` + bookColumns + ` FROM books`
+	var args []any
+
+	if clause, clauseArgs := page.cursorClause("sort_title", "id"); clause != "" {
+		query += ` WHERE ` + clause
+		args = append(args, clauseArgs...)
+	}
+	query += ` ORDER BY sort_title, id`
+	if clause, clauseArgs := page.limitClause(); clause != "" {
+		query += ` ` + clause
+		args = append(args, clauseArgs...)
+	}
+
+	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -142,17 +216,52 @@ func (db *DB) CountBooks(ctx context.Context) (int, error) {
 // the user is actively scanning while they type would be jarring. query
 // must already be a valid FTS5 MATCH expression; SanitizeFTSQuery is what
 // produces one from raw user input.
-func (db *DB) SearchBooks(ctx context.Context, query string) ([]Book, error) {
-	rows, err := db.read.QueryContext(ctx, `
-		SELECT `+qualifiedBookColumns+`
+// It pages through the same BookPage cursor ListBooks uses, and can
+// because this ordering is sort_title rather than relevance: one cursor
+// serves both paths, and a search matching nine hundred books is not the
+// case that got forgotten.
+func (db *DB) SearchBooks(ctx context.Context, query string, page BookPage) ([]Book, error) {
+	sql := `
+		SELECT ` + qualifiedBookColumns + `
 		FROM books
 		JOIN books_fts ON books_fts.rowid = books.id
-		WHERE books_fts MATCH ?
-		ORDER BY books.sort_title`, query)
+		WHERE books_fts MATCH ?`
+	args := []any{query}
+
+	if clause, clauseArgs := page.cursorClause("books.sort_title", "books.id"); clause != "" {
+		sql += ` AND ` + clause
+		args = append(args, clauseArgs...)
+	}
+	sql += ` ORDER BY books.sort_title, books.id`
+	if clause, clauseArgs := page.limitClause(); clause != "" {
+		sql += ` ` + clause
+		args = append(args, clauseArgs...)
+	}
+
+	rows, err := db.read.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
 	return scanBooks(rows)
+}
+
+// CountSearchBooks returns how many books match query, independent of any
+// page — the "4" in the results line's "4 of 1,284".
+//
+// It exists because paging took that number away from the transport: an
+// unfiltered grid used to hold every match and could count them in hand,
+// and a bounded page cannot. The alternative was a results line reading
+// "48 of 1,284" for a search that matched nine hundred books, which is a
+// claim the page cannot support. query must already be a valid FTS5 MATCH
+// expression, as SearchBooks requires.
+func (db *DB) CountSearchBooks(ctx context.Context, query string) (int, error) {
+	var n int
+	err := db.read.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM books
+		JOIN books_fts ON books_fts.rowid = books.id
+		WHERE books_fts MATCH ?`, query).Scan(&n)
+	return n, err
 }
 
 // ftsColumns are the books_fts columns, in the order MatchedSearchFields

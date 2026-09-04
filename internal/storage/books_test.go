@@ -237,7 +237,7 @@ func TestListBooks(t *testing.T) {
 		t.Fatalf("CreateBook A: %v", err)
 	}
 
-	books, err := db.ListBooks(ctx)
+	books, err := db.ListBooks(ctx, BookPage{})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}
@@ -597,7 +597,7 @@ func TestCreateBookDedupesRepeatedAuthorName(t *testing.T) {
 		t.Fatalf("CreateBook with a repeated author name: %v", err)
 	}
 
-	books, err := db.ListBooks(ctx)
+	books, err := db.ListBooks(ctx, BookPage{})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}
@@ -633,7 +633,7 @@ func TestListBooksOrdersCaseInsensitively(t *testing.T) {
 		}
 	}
 
-	books, err := db.ListBooks(ctx)
+	books, err := db.ListBooks(ctx, BookPage{})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}

@@ -57,13 +57,64 @@ type BookSummary struct {
 	Locations int
 }
 
-// ListBooks returns every book, ordered by sort_title, with its authors attached.
-func (s *Service) ListBooks(ctx context.Context) ([]BookSummary, error) {
-	books, err := s.db.ListBooks(ctx)
+// NextPage locates the page after the one just returned. HasMore false
+// means there is none, and the other two fields are then meaningless.
+//
+// It carries the cursor rather than leaving the caller to derive it from
+// the returned summaries, because the cursor is a sort_title and
+// BookSummary deliberately has no such field — that is a storage ordering
+// detail, not something a card renders.
+type NextPage struct {
+	HasMore    bool
+	AfterTitle string
+	AfterID    int64
+}
+
+// ListBooks returns one page of books, ordered by sort_title, with authors
+// attached, and where the page after it starts.
+//
+// "Are there more?" is answered by asking storage for one row past the
+// limit and trimming it, rather than by a second count query: getting
+// Limit+1 rows back proves at least one more exists. SendHistory already
+// decides its own truncation that way, and reusing a technique this
+// codebase has beats introducing a second one.
+func (s *Service) ListBooks(ctx context.Context, page storage.BookPage) ([]BookSummary, NextPage, error) {
+	books, next, err := s.pageOf(ctx, page, func(p storage.BookPage) ([]storage.Book, error) {
+		return s.db.ListBooks(ctx, p)
+	})
 	if err != nil {
-		return nil, err
+		return nil, NextPage{}, err
 	}
-	return s.summarize(ctx, books)
+	summaries, err := s.summarize(ctx, books)
+	if err != nil {
+		return nil, NextPage{}, err
+	}
+	return summaries, next, nil
+}
+
+// pageOf runs list one row past page's limit, trims the extra, and reports
+// where the next page starts. Shared by both list paths so the +1 trick
+// and the cursor are derived once.
+func (s *Service) pageOf(ctx context.Context, page storage.BookPage, list func(storage.BookPage) ([]storage.Book, error)) ([]storage.Book, NextPage, error) {
+	probe := page
+	if probe.Limit > 0 {
+		probe.Limit++
+	}
+
+	books, err := list(probe)
+	if err != nil {
+		return nil, NextPage{}, err
+	}
+
+	// An unbounded call has no next page by definition: it already
+	// returned everything.
+	if page.Limit <= 0 || len(books) <= page.Limit {
+		return books, NextPage{}, nil
+	}
+
+	books = books[:page.Limit]
+	last := books[len(books)-1]
+	return books, NextPage{HasMore: true, AfterTitle: last.SortTitle, AfterID: last.ID}, nil
 }
 
 // SearchBooks returns every book matching query, with its authors attached,
@@ -92,16 +143,23 @@ type SearchResult struct {
 	Books    []BookSummary
 	Searched bool
 	Fields   []string
+	Next     NextPage
+	// MatchCount is how many books the search matched in total, which
+	// Books no longer tells you: it holds one bounded page. Zero when no
+	// search ran, where the results line is not rendered anyway.
+	MatchCount int
 }
 
-func (s *Service) SearchBooks(ctx context.Context, query string) (SearchResult, error) {
+func (s *Service) SearchBooks(ctx context.Context, query string, page storage.BookPage) (SearchResult, error) {
 	sanitized := storage.SanitizeFTSQuery(query)
 	if sanitized == "" {
-		books, err := s.ListBooks(ctx)
-		return SearchResult{Books: books}, err
+		books, next, err := s.ListBooks(ctx, page)
+		return SearchResult{Books: books, Next: next}, err
 	}
 
-	books, err := s.db.SearchBooks(ctx, sanitized)
+	books, next, err := s.pageOf(ctx, page, func(p storage.BookPage) ([]storage.Book, error) {
+		return s.db.SearchBooks(ctx, sanitized, p)
+	})
 	if err != nil {
 		return SearchResult{Searched: true}, err
 	}
@@ -110,7 +168,12 @@ func (s *Service) SearchBooks(ctx context.Context, query string) (SearchResult, 
 		return SearchResult{Searched: true}, err
 	}
 
-	result := SearchResult{Books: summaries, Searched: true}
+	matchCount, err := s.db.CountSearchBooks(ctx, sanitized)
+	if err != nil {
+		return SearchResult{Searched: true}, err
+	}
+
+	result := SearchResult{Books: summaries, Searched: true, Next: next, MatchCount: matchCount}
 	if len(summaries) > 0 {
 		// Only worth asking when something matched: with no results there
 		// are no fields to name, and the no-matches state says which
