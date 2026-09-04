@@ -83,6 +83,21 @@ full design.
   two callers now derive that column — the scanner on first sight of a
   file, and a title edit — and a second copy of the rule is a library that
   sorts differently depending on how a title arrived.
+  `field_sources.field`'s CHECK constraint was rebuilt to accept an
+  eighth value, `cover` (migrations `2026090304`–`2026090307`, the same
+  create-copy-drop-rename shape `2026083010`–`2026083013` used for
+  `book_files`, since SQLite cannot alter a CHECK constraint in place).
+  `MetadataField` gained `FieldCover` (`"cover"`); `UpdateBookField`
+  refuses it exactly as it already refuses `authors`, since nothing in the
+  UI lets a person type a cover — its source is always `embedded` (the
+  scanner) or a provider's name, never `manual`. `ApplyEnrichedFields` is
+  the only writer, storing a fetched cover's on-disk path (never a remote
+  URL) under the answering provider's name through the same
+  `updateBookColumnTx`/`fieldIsStillMissingTx` path every other field
+  uses — so a cover the scanner already found is never replaced by a
+  provider's guess, the same protection `isMissing` gives every text
+  field. See `internal/enrich` below for the fetch and storage side of
+  this.
 - `books_fts` is an FTS5 virtual table (`title`, `authors`, `description`,
   `isbn`, `tokenize='unicode61 remove_diacritics 2'`) — a plain table, not
   `content='books'`, since `authors` isn't a books column to begin with
@@ -418,7 +433,23 @@ full design.
   and `sourceName` already carries each field's own answerer, so there is
   no grouping to do here; keeping every resolved field in one call is also
   what lets `ApplyEnrichedFields` apply (or skip, per its own re-check)
-  the whole set as one transaction. The job itself failing (the book vanished between
+  the whole set as one transaction.
+  A cover is resolved the same way but kept out of that map: `Resolve`
+  returns it separately, as `coverData`/`coverSource`, since `values` is
+  string-valued and a fetched cover is still raw image bytes needing
+  `internal/cover.Store` — I/O `Resolve` deliberately never performs
+  itself, per its "no database, no clock" contract. It is otherwise
+  subject to the same rules as every other field — missing-set
+  membership, first-answer-wins, the early stop once nothing is left
+  missing — so a book whose `cover_path` is already set is never handed a
+  provider's cover answer at all. The worker converts it exactly like the
+  scanner converts an embedded one (`cover.Store`, resized, JPEG, named by
+  the book's content hash — never the remote URL) before folding the
+  resulting path into `values` under `storage.FieldCover`; a `Store`
+  failure only loses the cover — it is logged and the field is left out of
+  `values`, the same tolerance the scanner gives a cover that fails to
+  store, since it must not fail a job whose text fields already resolved.
+  The job itself failing (the book vanished between
   enqueue and claim, a write failed) is a `failed` job; a provider having
   nothing to say — the ordinary case for most books against most
   providers — is not, and a job that reached at least one provider still
@@ -429,6 +460,67 @@ full design.
   meaningless, so the ordinary path never even reaches the `bookGoneReason`
   the worker records for it — that exists for the narrow race where a
   claim and the book's deletion interleave.
+- `internal/openlibrary` and `internal/googlebooks` are the two
+  `enrich.Provider` implementations DESIGN.md names, shaped identically on
+  purpose so the registry below can treat them interchangeably: `New()`
+  (`googlebooks.New(apiKey)` takes an optional key) builds a `Client`
+  around its own `*http.Client` with an 8-second `Timeout` — the
+  `internal/resend` precedent of never relying on `http.DefaultClient`,
+  sized short because enrichment is a background nicety nobody is waiting
+  on. `ByISBN` normalises its argument exactly as `internal/epub`
+  normalises a stored ISBN (hyphens/spaces stripped, a trailing
+  check-digit `X` upper-cased — duplicated rather than imported, the same
+  choice `internal/storage`'s own copy makes) so a lookup key round-trips;
+  `Search` is the title/first-author fallback the resolver uses when a
+  book has no ISBN. Both implement the same four-case contract: a 200
+  with no results and a defensive 404 are both a zero `Metadata` with a
+  nil error — the ordinary case for an obscure or mistitled book, not an
+  error — while a 429, any 5xx, or a transport/timeout failure are errors
+  for the retry decorator and the resolver's skip-and-continue to see as
+  such. A matched result's cover — Open Library's separate
+  `covers.openlibrary.org` host by numeric `cover_i` id, Google's
+  `imageLinks.thumbnail` URL already in the same response — is fetched
+  through the shared `enrich.FetchCover` and folded into `Metadata.Cover`;
+  a cover fetch failing only loses the cover, logged and never turning a
+  good text answer into a search error. Google Books' optional `apiKey` is
+  scrubbed from every returned error's text (`redactKey`/`redactKeyBytes`)
+  since a transport error embeds the full request URL and the key must
+  never reach a log line through one. Both packages are tested against
+  `httptest.Server` with hand-written fixtures under `testdata` standing
+  in for a real capture — this sandboxed environment has no outbound
+  network access, so the fixtures match each API's stable, publicly
+  documented response shape instead, a divergence noted in a comment at
+  the top of each `_test.go` file.
+- `internal/enrich`'s three decorators (`decorator.go`) wrap a `Provider`
+  and satisfy `Provider` themselves, so they compose in any order and the
+  resolver cannot tell they are there: `WithRateLimit` gates `ByISBN`/
+  `Search` on a shared ticker-fed token, honouring `ctx` cancellation
+  while waiting rather than blocking a shutdown until the next slot opens
+  (`DefaultRateLimitInterval`, one call a second, a conservative default
+  since Open Library's own limit is a courtesy ask, not an enforced one).
+  `WithCache` serves a repeat lookup — same method, same arguments — out
+  of a bounded LRU (`DefaultCacheSize`) instead of calling the wrapped
+  provider again, caching a "no match" answer too, since without that a
+  shelf of obscure books would re-ask the same negative answer on every
+  sweep; an error is never cached, since the four-case contract treats it
+  as transient. `WithRetry` retries only the 429/5xx/transport case, up to
+  `DefaultRetryAttempts` total tries with a doubling backoff
+  (`retryBaseDelay`/`retryMaxDelay`) and a `ctx` check between attempts —
+  a "no match" is never retried, since it is an answer, not a failure.
+  `internal/providers` (`registry.go`) is the compile-time name →
+  constructor map, kept outside `internal/enrich` rather than inside it as
+  the plan first sketched: both provider packages import `internal/enrich`
+  for `Provider`/`Metadata`, so a registry living there and importing them
+  back would be a cycle. `Resolve(names, googleBooksAPIKey)` turns
+  `METADATA_PROVIDERS`'s parsed, ordered names (`ParseNames`) into the
+  decorated chain `enrich.New` expects, composing each provider once as
+  `WithRateLimit(WithRetry(WithCache(client)))` — cache innermost so a
+  cached hit spends neither a rate-limit token nor a retry attempt, rate
+  limit outermost so a retried attempt is paced too. An unknown name fails
+  outright, naming it and listing the valid ones sorted, rather than
+  silently running with fewer providers than configured; an empty name
+  list resolves to an empty, non-nil slice — `METADATA_PROVIDERS=` is the
+  documented way to disable enrichment outright, not an error.
 - `internal/scanner` — walks the library directory and syncs it into
   `internal/storage`. Cheap path+size+mtime check (against `book_files`)
   skips unchanged files; content hash (SHA-256) is a book's identity, so
@@ -1002,10 +1094,22 @@ full design.
   which one and passes `sendEnabled: false` into `web.Routes` — browsing
   must work on a dev machine with neither set, so a missing key never
   fails startup. The enrichment worker (`internal/enrich.New`) runs
-  unconditionally, unlike the sender: it takes no config to disable, since
-  an empty provider slice (no real `Provider` exists yet) already makes
-  every job a no-op, and running it regardless keeps the queue and worker
-  wiring exercised ahead of a real provider needing it.
+  unconditionally, unlike the sender: it takes no config to disable itself
+  the way `RESEND_API_KEY`/`RESEND_FROM` disable sending, since
+  `METADATA_PROVIDERS=` (empty) already resolves to zero providers, which
+  makes every job a no-op the same way an unset Resend key does for the
+  sender. `METADATA_PROVIDERS` (default `openlibrary,googlebooks`) is
+  parsed by `providers.ParseNames` and resolved in order through
+  `providers.Resolve`, which composes each name's client with the three
+  decorators (`internal/enrich`, above) and — unlike a missing Resend
+  key — fails startup outright, naming the bad value and listing the
+  valid ones, if a name doesn't resolve: an unset key means "not set up
+  yet", but a misspelled provider name means "asked for something
+  specific and didn't get it", the kind of silent shortfall nobody
+  notices for months. `GOOGLE_BOOKS_API_KEY` is optional and only `Warn`s
+  when absent (Google's own anonymous quota still works); its value never
+  reaches a log line, in `cmd/server` or inside `internal/googlebooks`
+  itself.
   `storage.RequeueInterruptedEnrichment` runs once before it starts
   claiming jobs, unconditionally too — the requeue-not-fail counterpart to
   `FailInterruptedSends` above, run every startup rather than only when
@@ -1035,11 +1139,12 @@ full design.
   used everywhere else via `slog`'s package-level functions against that
   default logger.
 
-Still missing from DESIGN.md: the metadata providers themselves (Open
-Library / Google Books) and any UI surfacing enrichment — the queue,
-worker, provider interface and resolver are built (`internal/enrich`) but
-nothing in production enqueues a job yet — near-duplicate detection,
-format conversion, and library grid paging.
+Still missing from DESIGN.md: any UI surfacing enrichment — the queue,
+worker, provider interface, resolver, both providers and the decorator/
+registry wiring are all built (`internal/enrich`, `internal/openlibrary`,
+`internal/googlebooks`, `internal/providers`) but nothing in production
+enqueues a job yet — near-duplicate detection, format conversion, and
+library grid paging.
 
 ## Planning
 

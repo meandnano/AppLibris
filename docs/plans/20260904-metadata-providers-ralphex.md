@@ -299,19 +299,19 @@ keep the key out of logs.
 
 ### Task 7: Documentation
 
-- [ ] add `internal/openlibrary` and `internal/googlebooks` bullets to
+- [x] add `internal/openlibrary` and `internal/googlebooks` bullets to
       CLAUDE.md in the house style — what each reads, the four-case error
       contract, and the fixture-based tests
-- [ ] extend CLAUDE.md's `internal/enrich` bullet with the decorators and
+- [x] extend CLAUDE.md's `internal/enrich` bullet with the decorators and
       the registry, stating the composition order with its reason
-- [ ] note the cover-provenance rebuild and the `cover` field in
+- [x] note the cover-provenance rebuild and the `cover` field in
       CLAUDE.md's `field_sources` coverage, including that a fetched cover
       is stored, never linked
-- [ ] document `METADATA_PROVIDERS` and `GOOGLE_BOOKS_API_KEY` in README
+- [x] document `METADATA_PROVIDERS` and `GOOGLE_BOOKS_API_KEY` in README
       beside the other environment variables, including that
       `METADATA_PROVIDERS=` is the documented way to make no outbound
       calls at all
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 8: Verify acceptance criteria
 

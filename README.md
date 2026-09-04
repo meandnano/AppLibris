@@ -52,3 +52,18 @@ whether events actually arrive, and says so if they don't. Set
 `WATCH_ENABLED=false` to turn the watch off and rely on the rescan alone,
 or `WATCH_SETTLE` (default `5s`) to change how long the directory must be
 quiet before a rescan runs.
+
+## Metadata enrichment
+
+The server can fill in missing book metadata and fetch a cover, from Open
+Library and Google Books, for whichever fields a book's own file didn't
+provide — never overwriting an embedded value or one edited by hand.
+There's no UI to trigger it yet, so this only configures what a future
+enrichment run is allowed to do.
+
+`METADATA_PROVIDERS` (default `openlibrary,googlebooks`) lists which
+providers to use and in what order. Set it to an empty value
+(`METADATA_PROVIDERS=`) to disable enrichment outright and make no
+outbound requests at all — the setting for a fully offline or LAN-only
+deployment. Google Books works anonymously at a low quota;
+`GOOGLE_BOOKS_API_KEY` is optional and raises that quota when set.
