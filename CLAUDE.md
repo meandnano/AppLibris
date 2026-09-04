@@ -215,8 +215,15 @@ full design.
   function (`internal/enrich.Resolve`) computed from data already in the
   database — running it again on the same inputs lands the same values,
   so a `running` row is put back to `queued` (with `queued_at` reset to
-  the recovery time) rather than failed. Two details are easy to get
-  backwards for the same reason: `internal/enrich`'s worker checks
+  the recovery time) rather than failed — unless that book already has a
+  fresh `queued` sibling (`EnqueueEnrichment`'s guard only blocks a second
+  *queued* row, so one can coexist with a `running` one, per Decision 3),
+  in which case the interrupted row is retired `done` instead of requeued:
+  requeuing both would leave the book with two queued promises, breaking
+  that dedup invariant and doubling the provider calls the next drain
+  makes for it, when the surviving sibling's own run already recomputes
+  the missing set from scratch and covers whatever the interrupted one
+  would have. Two details are easy to get backwards for the same reason: `internal/enrich`'s worker checks
   `ctx.Err()` after any failed step and, if the ambient context is
   already cancelled, leaves the row `running` rather than calling
   `MarkEnrichmentFailed` — a definite failure record would deny the row

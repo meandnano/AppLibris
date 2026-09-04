@@ -136,17 +136,65 @@ func (db *DB) MarkEnrichmentFailed(ctx context.Context, id int64, reason string,
 // was: the row's place in ClaimNextEnrichment's oldest-first order should
 // reflect that it is, once again, simply waiting, not that it has been
 // waiting since before the crash.
+//
+// EnqueueEnrichment's own guard only blocks a second *queued* row for a
+// book — a queued job is explicitly allowed to coexist with one already
+// running (Decision 3). If the process then crashes, blindly requeuing
+// every running row would leave that book with two queued rows, breaking
+// EnqueueEnrichment's dedup invariant and doubling the provider calls the
+// next drain makes for it. So a running row whose book already has a
+// queued sibling is retired as done instead of requeued: nothing about it
+// went wrong, its promise is simply superseded by the sibling's own future
+// run, which recomputes the missing set from scratch and covers whatever
+// the interrupted run would have. n counts only rows genuinely requeued,
+// not retired ones.
 func (db *DB) RequeueInterruptedEnrichment(ctx context.Context, now time.Time) (n int, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
-			UPDATE enrichment_jobs SET status = ?, queued_at = ?, started_at = NULL WHERE status = ?`,
-			string(EnrichmentQueued), formatTime(now), string(EnrichmentRunning))
-		if err != nil {
+		rows, qErr := tx.QueryContext(ctx, `SELECT id, book_id FROM enrichment_jobs WHERE status = ?`, string(EnrichmentRunning))
+		if qErr != nil {
+			return qErr
+		}
+		type runningJob struct{ id, bookID int64 }
+		var running []runningJob
+		for rows.Next() {
+			var j runningJob
+			if err := rows.Scan(&j.id, &j.bookID); err != nil {
+				rows.Close()
+				return err
+			}
+			running = append(running, j)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
 			return err
 		}
-		affected, err := res.RowsAffected()
-		n = int(affected)
-		return err
+		rows.Close()
+
+		for _, j := range running {
+			var hasQueuedSibling bool
+			if err := tx.QueryRowContext(ctx, `
+				SELECT EXISTS(SELECT 1 FROM enrichment_jobs WHERE book_id = ? AND status = ?)`,
+				j.bookID, string(EnrichmentQueued)).Scan(&hasQueuedSibling); err != nil {
+				return err
+			}
+
+			if hasQueuedSibling {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE enrichment_jobs SET status = ?, finished_at = ? WHERE id = ?`,
+					string(EnrichmentDone), formatTime(now), j.id); err != nil {
+					return err
+				}
+				continue
+			}
+
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE enrichment_jobs SET status = ?, queued_at = ?, started_at = NULL WHERE id = ?`,
+				string(EnrichmentQueued), formatTime(now), j.id); err != nil {
+				return err
+			}
+			n++
+		}
+		return nil
 	})
 	return n, err
 }

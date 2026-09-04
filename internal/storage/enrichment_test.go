@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -241,6 +242,81 @@ func TestRequeueInterruptedEnrichmentLeavesTerminalRowsAlone(t *testing.T) {
 	}
 }
 
+// EnqueueEnrichment allows a fresh queued job for a book that already has
+// one running (Decision 3's per-status guard, not a bug). If the process
+// then crashes, RequeueInterruptedEnrichment must not blindly requeue that
+// running row too — a book with two queued rows breaks EnqueueEnrichment's
+// own dedup invariant and would double the provider calls the next drain
+// makes for it. The interrupted row should be retired (done), not
+// requeued, leaving exactly the one queued sibling behind.
+func TestRequeueInterruptedEnrichmentRetiresARunningJobWithAQueuedSibling(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-6b", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+
+	if _, err := db.EnqueueEnrichment(ctx, id, now); err != nil {
+		t.Fatal(err)
+	}
+	running, err := db.ClaimNextEnrichment(ctx, now)
+	if err != nil || running == nil {
+		t.Fatalf("ClaimNextEnrichment: %+v, %v", running, err)
+	}
+
+	// A second job for the same book, queued while the first is still
+	// running — exactly what EnqueueEnrichment's guard permits.
+	queued, err := db.EnqueueEnrichment(ctx, id, now.Add(time.Minute))
+	if err != nil || !queued {
+		t.Fatalf("EnqueueEnrichment while a sibling is running = %v, %v; want queued", queued, err)
+	}
+	var queuedJobID int64
+	if err := db.Read().QueryRow(`SELECT id FROM enrichment_jobs WHERE book_id = ? AND status = ?`, id, string(EnrichmentQueued)).Scan(&queuedJobID); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := db.RequeueInterruptedEnrichment(ctx, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("RequeueInterruptedEnrichment: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("RequeueInterruptedEnrichment reported %d requeued, want 0 — the interrupted row has a queued sibling and should be retired, not requeued", n)
+	}
+
+	statuses := map[int64]string{}
+	rows, err := db.Read().Query(`SELECT id, status FROM enrichment_jobs WHERE book_id = ?`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var jobID int64
+		var status string
+		if err := rows.Scan(&jobID, &status); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		statuses[jobID] = status
+	}
+	rows.Close()
+
+	if statuses[running.ID] != string(EnrichmentDone) {
+		t.Errorf("interrupted job status = %q, want done (retired)", statuses[running.ID])
+	}
+	if statuses[queuedJobID] != string(EnrichmentQueued) {
+		t.Errorf("sibling queued job status = %q, want unchanged queued", statuses[queuedJobID])
+	}
+
+	var queuedCount int
+	if err := db.Read().QueryRow(`SELECT count(*) FROM enrichment_jobs WHERE book_id = ? AND status = ?`, id, string(EnrichmentQueued)).Scan(&queuedCount); err != nil {
+		t.Fatal(err)
+	}
+	if queuedCount != 1 {
+		t.Fatalf("queued jobs for book after recovery = %d, want 1 — the dedup invariant must hold after recovery", queuedCount)
+	}
+}
+
 // enrichment_jobs.book_id cascades on delete: an enrichment job is a
 // pending intention about a book, and once the book is gone the intention
 // is meaningless — unlike send_log, which must survive its book to keep
@@ -332,13 +408,12 @@ func TestApplyEnrichedFieldsWritesValueProvenanceAndFTSInOneTransaction(t *testi
 	}
 }
 
-// A partial failure must not leave a partially-enriched book: one field
-// applying and a sibling failing has to roll both back, or a book ends up
-// with some fields carrying provider provenance and others not reflecting
-// what was actually saved. This mixes two distinct sources in the same
-// call — the shape a real multi-provider job produces — so the rollback
-// has to undo the valid field's write together with the invalid one's,
-// not just the invalid one's own no-op.
+// An invalid field halts the whole call, whichever order the values map
+// happens to iterate in — map order is unspecified, so this only proves
+// nothing gets applied when one field errors, not that a write which
+// already landed earlier in the transaction gets rolled back.
+// TestApplyEnrichedFieldsTransactionRollsBackAnAlreadyAppliedFieldOnLaterFailure,
+// below, proves that half deterministically.
 func TestApplyEnrichedFieldsRollsBackOnFailureAcrossMixedProviders(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -371,6 +446,62 @@ func TestApplyEnrichedFieldsRollsBackOnFailureAcrossMixedProviders(t *testing.T)
 	}
 	if count != 0 {
 		t.Errorf("field_sources rows for publisher = %d after a rolled-back write, want 0 — provider-a's field must not survive provider-b's failure", count)
+	}
+}
+
+// Deterministic complement to the mixed-provider test above: ApplyEnrichedFields
+// takes its fields as a Go map, whose iteration order is unspecified, so a
+// test built on its public signature can't force which field is visited
+// first — it's possible for the whole call to error out having never
+// attempted the valid field's write at all, which wouldn't actually prove
+// a rollback happened. This instead drives the exact sequence of
+// package-internal calls ApplyEnrichedFields's loop makes for each field
+// — write the column, then record its own provenance — directly, in a
+// known order inside one db.Write transaction: provider-a's field lands
+// first, then provider-b's fails outright. That proves the guarantee
+// ApplyEnrichedFields actually depends on — a write already applied
+// earlier in the same transaction is undone when a later one in it fails
+// — rather than merely that an all-or-nothing failure has no visible
+// effect.
+func TestApplyEnrichedFieldsTransactionRollsBackAnAlreadyAppliedFieldOnLaterFailure(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	id, err := db.CreateBook(ctx, Book{ContentHash: "enrich-11b", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now()
+
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err := updateBookColumnTx(ctx, tx, id, FieldPublisher, "Gollancz", when); err != nil {
+			return err
+		}
+		if err := setFieldSourceTx(ctx, tx, id, FieldPublisher, "provider-a"); err != nil {
+			return err
+		}
+		// provider-b's field fails outright, after provider-a's has
+		// already been written (but not committed) above — the same
+		// failure shape as an unrecognised MetadataField reaching
+		// updateBookColumnTx from ApplyEnrichedFields's loop.
+		return updateBookColumnTx(ctx, tx, id, MetadataField("bogus"), "x", when)
+	})
+	if err == nil {
+		t.Fatal("transaction with a later failing field = nil error, want one")
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Publisher != "" {
+		t.Errorf("Publisher = %q after a rolled-back transaction, want empty — the earlier write must not survive the later failure", book.Publisher)
+	}
+	var count int
+	if err := db.Read().QueryRow(`SELECT count(*) FROM field_sources WHERE book_id = ? AND field = ?`, id, FieldPublisher).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("field_sources rows for publisher = %d after a rolled-back transaction, want 0", count)
 	}
 }
 
