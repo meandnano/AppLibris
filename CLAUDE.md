@@ -538,7 +538,45 @@ full design.
   check-digit `X` upper-cased — duplicated rather than imported, the same
   choice `internal/storage`'s own copy makes) so a lookup key round-trips;
   `Search` is the title/first-author fallback the resolver uses when a
-  book has no ISBN. Both implement the same four-case contract: a 200
+  book has no ISBN.
+  Open Library models a **work** (the book as written) separately from an
+  **edition** (one publication of it), and the two `internal/openlibrary`
+  paths hit different endpoints because of it — the distinction that
+  decides whether `books.language` and `books.published_date` are right.
+  `ByISBN` uses the **Read API**
+  (`/api/volumes/brief/isbn/{isbn}.json`): an ISBN names one edition, so
+  an edition-scoped answer exists and is the only correct one. It reads
+  *both* blocks of that response, neither redundant — `data` is the only
+  place author **names** appear (an edition record lists author
+  references, or for many editions none at all, since authorship belongs
+  to the work), while `details.details` is the raw edition record and the
+  only place the language and description appear. `Search` stays on
+  `/search.json`, which answers about works, and therefore reports
+  **neither language nor publication date**: that endpoint's `language` is
+  every language any edition was ever published in (31 of them, starting
+  `bul`, for an English printing of *The Hobbit*) and its date is the
+  work's first publication — 1937 for a 2012 edition. Leaving both empty
+  is what keeps them *missing*, so `Resolve` offers them to the next
+  provider and a person can still fill them by hand; a wrong value reads
+  as answered and is never reconsidered. It is the standard
+  `internal/epub` already holds itself to in never substituting a
+  `creation` date for a publication one, and `internal/fb2` in preferring
+  `publish-info/year` over `title-info/date`.
+  Two shapes on that path are easy to get wrong and both are covered by
+  live-captured fixtures: an ISBN the Read API knows nothing about is
+  answered with a bare **`[]`** — a JSON *array* where a match is an
+  object — so the body is checked before unmarshalling, since decoding it
+  into the response struct fails with a type error and reporting the
+  ordinary no-match as a parse failure would make an obscure book look
+  like a broken provider; and `description` is either a
+  `{"type", "value"}` object *or* a bare string in the same position
+  (`textValue` tries both), where a decode expecting only the object would
+  silently drop every string-shaped one. `ByISBN` also follows redirects
+  under `checkRedirect`, a bounded, every-hop-scheme-checked policy
+  mirroring `enrich.CheckCoverRedirect` — setting `CheckRedirect` at all
+  replaces net/http's own hop limit, so a policy that checked only the
+  scheme would follow a chain forever.
+  Both providers implement the same four-case contract: a 200
   with no results and a defensive 404 are both a zero `Metadata` with a
   nil error — the ordinary case for an obscure or mistitled book, not an
   error — while a 429, any 5xx, or a transport/timeout failure are errors
@@ -577,7 +615,8 @@ full design.
   escapes the detail page's, so a tag left in shows a reader a literal
   `<p>` and then offers them the same markup to hand-fix in the edit
   textarea. It lives here rather than in `internal/enrich`'s
-  `sanitizeValue` because Open Library's description is plain to begin
+  `sanitizeValue` because Open Library's description — the edition
+  record's, which is what `ByISBN` reads — is plain to begin
   with, and stripping tags from every provider's answer would mangle one
   that legitimately contains a `<`. Google Books'
   optional `apiKey` is scrubbed from every returned error's text
@@ -586,11 +625,20 @@ full design.
   redacting error keeps an `Unwrap`, so whether `errors.Is(err,
   context.Canceled)` works doesn't depend on whether a key happens to be
   configured. Both packages are tested against
-  `httptest.Server` with hand-written fixtures under `testdata` standing
-  in for a real capture — this sandboxed environment has no outbound
-  network access, so the fixtures match each API's stable, publicly
-  documented response shape instead, a divergence noted in a comment at
-  the top of each `_test.go` file.
+  `httptest.Server` with fixtures under `testdata`, and those fixtures
+  have two provenances worth telling apart when reading a failure.
+  `internal/openlibrary`'s two `edition_*.json` are **live captures** of
+  the Read API — they are what turned up the work-versus-edition defects
+  `ByISBN` moved endpoint to fix, and the bare-`[]` no-match, neither of
+  which a hand-written fixture would have shown. The rest are shaped after
+  each API's stable, publicly documented response format instead, from
+  when those packages were written with no outbound network access
+  available. Each `_test.go` names which of its own fixtures is which at
+  the top. Nothing here is hand-edited to fit a change: a fixture adjusted
+  until the code passes tests the parser against its author's
+  expectations rather than against the API — which is exactly how an ISBN
+  lookup went seventy-five years and one language wrong with every test
+  green.
 - `internal/enrich`'s three decorators (`decorator.go`) wrap a `Provider`
   and satisfy `Provider` themselves, so they compose in any order and the
   resolver cannot tell they are there: `WithRateLimit` gates `ByISBN`/
