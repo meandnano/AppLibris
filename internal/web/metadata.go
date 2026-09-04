@@ -39,7 +39,7 @@ const maxMetadataFormBody = 3*service.MaxMetadataValueBytes + 1024
 // the book. A rejected value comes back as the form with its message and a
 // 422 — never http.Error, which would swap the editor away and lose what
 // the user typed.
-func metadataHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
+func metadataHandler(svc *service.Service, sendEnabled, enrichEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
 		// An edit form carries the current value, and a stale one would
@@ -65,7 +65,7 @@ func metadataHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 			// so it comes back through the form like any other.
 			var toolarge *http.MaxBytesError
 			if errors.As(err, &toolarge) {
-				metadataError(w, r, svc, id, field, sendEnabled, "", "That is too long to save", fragment)
+				metadataError(w, r, svc, id, field, sendEnabled, enrichEnabled, "", "That is too long to save", fragment)
 				return
 			}
 			http.Error(w, "invalid form", http.StatusBadRequest)
@@ -80,7 +80,7 @@ func metadataHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			metadataError(w, r, svc, id, field, sendEnabled, submitted, service.MetadataValidationMessage(err), fragment)
+			metadataError(w, r, svc, id, field, sendEnabled, enrichEnabled, submitted, service.MetadataValidationMessage(err), fragment)
 			return
 		}
 		if detail == nil {
@@ -135,7 +135,7 @@ func metadataFragment(w http.ResponseWriter, r *http.Request, svc *service.Servi
 // value and the reason, at 422. The htmx caller gets just the field; the
 // no-JavaScript caller gets the whole page with that field open, since it
 // has no way to swap one in.
-func metadataError(w http.ResponseWriter, r *http.Request, svc *service.Service, id int64, field storage.MetadataField, sendEnabled bool, value, message string, fragment bool) {
+func metadataError(w http.ResponseWriter, r *http.Request, svc *service.Service, id int64, field storage.MetadataField, sendEnabled, enrichEnabled bool, value, message string, fragment bool) {
 	detail, err := svc.GetBook(r.Context(), id)
 	if err != nil {
 		slog.Error("get book failed", "id", id, "error", err)
@@ -162,7 +162,7 @@ func metadataError(w http.ResponseWriter, r *http.Request, svc *service.Service,
 		return
 	}
 
-	page, err := makeBookDetailPage(r, svc, detail, sendEnabled, string(field))
+	page, err := makeBookDetailPage(r, svc, detail, sendEnabled, enrichEnabled, string(field))
 	if err != nil {
 		slog.Error("build book detail page failed", "id", id, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

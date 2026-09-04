@@ -124,13 +124,26 @@ func run(ctx context.Context) error {
 	// enrichment: METADATA_PROVIDERS= (empty) already resolves to an empty
 	// provider list above, which makes every job a no-op, so the worker
 	// always runs and its queue/worker wiring is exercised either way.
+	//
+	// The UI is a different question, and takes the provider count rather
+	// than a config flag: a control that offers to fetch metadata from
+	// nowhere would be a button that cannot do what it says, so with no
+	// provider configured web.Routes gets the same disabled treatment the
+	// send control shows when Resend is unconfigured, and for the same
+	// reason.
 	enrichWorker := enrich.New(db, metadataProviders, coversDir)
+	enrichEnabled := len(metadataProviders) > 0
+	if enrichEnabled {
+		svc.NotifyEnrichment = enrichWorker.Notify
+	} else {
+		slog.Warn("enrichment disabled: METADATA_PROVIDERS is empty")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
-	mux.Handle("/", web.Routes(svc, coversDir, sendEnabled))
+	mux.Handle("/", web.Routes(svc, coversDir, sendEnabled, enrichEnabled))
 
 	srv := &http.Server{
 		Addr:    addr,

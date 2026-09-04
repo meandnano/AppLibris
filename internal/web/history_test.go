@@ -77,7 +77,7 @@ func TestRelativeTime(t *testing.T) {
 
 func TestHistoryEmptyState(t *testing.T) {
 	db := newHistoryTestDB(t)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	rec := httptest.NewRecorder()
@@ -139,7 +139,7 @@ func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
 		t.Fatalf("EnqueueSend sending: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -192,7 +192,7 @@ func TestHistoryRowForDeletedBookRendersWithoutALink(t *testing.T) {
 		t.Fatalf("PruneMissingFiles: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -225,7 +225,7 @@ func TestHistoryScopeLineNamesTheCapOnlyWhenTruncated(t *testing.T) {
 		}
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -250,7 +250,7 @@ func TestHistoryScopeLineIsPlainWhenNotTruncated(t *testing.T) {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -268,7 +268,7 @@ func TestHistoryScopeLineIsPlainWhenNotTruncated(t *testing.T) {
 // log, not an action.
 func TestHistoryRendersWithSendingDisabled(t *testing.T) {
 	db := newHistoryTestDB(t)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	rec := httptest.NewRecorder()
@@ -283,7 +283,7 @@ func TestHistoryRendersWithSendingDisabled(t *testing.T) {
 // that a second page exists) should be a real link back.
 func TestHistoryPageNavMarksHistoryCurrent(t *testing.T) {
 	db := newHistoryTestDB(t)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	rec := httptest.NewRecorder()

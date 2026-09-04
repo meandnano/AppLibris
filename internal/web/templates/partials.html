@@ -258,6 +258,46 @@
      the stored form (authors one per line), the read view shows the
      readable one ("A, B & C"). */}}
 
+{{define "enrich-control"}}
+<div class="enrich" id="enrich">
+  {{if not .EnrichEnabled}}
+  <p class="enrich__disabled">Metadata providers are not configured</p>
+  {{else}}
+  <form class="enrich__form" method="post" action="/books/{{.ID}}/enrich" hx-post="/books/{{.ID}}/enrich" hx-target="#enrich" hx-swap="outerHTML">
+    <button class="enrich__button" type="submit"{{if .EnrichPending}} disabled{{end}}>
+      {{if .EnrichPending}}<span class="enrich__spinner" aria-hidden="true"></span>{{end}}
+      {{.EnrichButtonLabel}}
+    </button>
+    {{if not .Enrichment}}
+    <span class="enrich__hint">Fills only fields that are empty</span>
+    {{end}}
+  </form>
+
+  {{if .Enrichment}}
+  {{if .EnrichPending}}
+  {{/* The only block carrying a poll trigger. A terminal state renders one
+       of the two below, neither of which has an hx-trigger, so polling
+       stops by construction rather than by counting attempts. */}}
+  <div class="enrich__status enrich__status--pending" hx-get="{{.EnrichPollURL}}" hx-trigger="load delay:2s" hx-swap="outerHTML" hx-target="#enrich">
+    <span class="enrich__status-label">Fetching metadata</span>
+    <span class="enrich__status-detail">queued {{.EnrichAt}}</span>
+  </div>
+  {{else if .EnrichResultOK}}
+  <div class="enrich__status enrich__status--ok">
+    <span class="enrich__status-label">{{.EnrichResult}}</span>
+    <span class="enrich__status-detail">{{.EnrichAt}}</span>
+  </div>
+  {{else}}
+  <div class="enrich__status enrich__status--err">
+    <span class="enrich__status-label">Failed</span>
+    <span class="enrich__status-detail">{{.EnrichResult}} &middot; {{.EnrichAt}}</span>
+  </div>
+  {{end}}
+  {{end}}
+  {{end}}
+</div>
+{{end}}
+
 {{define "edit-actions"}}
 <div class="editable__actions">
   <button class="button button--primary" type="submit">Save</button>
@@ -275,7 +315,7 @@
     {{template "edit-actions" .}}
   </form>
   {{else}}
-  <h1 class="detail__title"><a class="editable__read" aria-label="Edit title" href="{{.BookURL}}?edit=title" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{.Display}}</span><span class="editable__label">edit</span></a></h1>
+  <h1 class="detail__title"><a class="editable__read" aria-label="Edit title" href="{{.BookURL}}?edit=title" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{.Display}}</span><span class="editable__label">edit</span></a>{{if .SourceNote}}<span class="editable__source">{{.SourceNote}}</span>{{end}}</h1>
   {{end}}
 </div>
 {{end}}
@@ -288,7 +328,7 @@
     {{template "edit-actions" .}}
   </form>
   {{else}}
-  <p class="detail__author{{if not .Display}} detail__author--unknown{{end}}"><a class="editable__read" aria-label="Edit authors" href="{{.BookURL}}?edit=authors" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}Author unknown &mdash; add one{{end}}</span><span class="editable__label">edit</span></a></p>
+  <p class="detail__author{{if not .Display}} detail__author--unknown{{end}}"><a class="editable__read" aria-label="Edit authors" href="{{.BookURL}}?edit=authors" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}Author unknown &mdash; add one{{end}}</span><span class="editable__label">edit</span></a>{{if .SourceNote}}<span class="editable__source">{{.SourceNote}}</span>{{end}}</p>
   {{end}}
 </div>
 {{end}}
@@ -302,7 +342,7 @@
     {{template "edit-actions" .}}
   </form>
   {{else}}
-  <a class="editable__read detail__description{{if not .Display}} detail__description--empty{{end}}" aria-label="Edit description" href="{{.BookURL}}?edit=description" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}No description &mdash; add one{{end}}</span><span class="editable__label">edit</span></a>
+  <a class="editable__read detail__description{{if not .Display}} detail__description--empty{{end}}" aria-label="Edit description" href="{{.BookURL}}?edit=description" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}No description &mdash; add one{{end}}</span><span class="editable__label">edit</span></a>{{if .SourceNote}}<span class="editable__source">{{.SourceNote}}</span>{{end}}
   {{end}}
 </div>
 {{end}}
@@ -317,7 +357,7 @@
       {{template "edit-actions" .}}
     </form>
     {{else}}
-    <a class="editable__read" aria-label="Edit {{.Label}}" href="{{.BookURL}}?edit={{.Field}}" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</span><span class="editable__label">edit</span></a>
+    <a class="editable__read" aria-label="Edit {{.Label}}" href="{{.BookURL}}?edit={{.Field}}" hx-get="{{.EditURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML"><span>{{if .Display}}{{.Display}}{{else}}<span class="detail__meta-empty">&mdash;</span>{{end}}</span><span class="editable__label">edit</span></a>{{if .SourceNote}}<span class="editable__source">{{.SourceNote}}</span>{{end}}
     {{end}}
   </dd>
 </div>

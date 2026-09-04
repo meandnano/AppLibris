@@ -36,7 +36,7 @@ func TestLibraryHandlerRendersScannedBooks(t *testing.T) {
 	}
 
 	svc := service.New(db)
-	handler := Routes(svc, t.TempDir(), false)
+	handler := Routes(svc, t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -61,7 +61,7 @@ func TestLibraryHandlerRendersEmptyState(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -92,7 +92,7 @@ func newTestHandlerWithBook(t *testing.T, title string, authors []string) http.H
 		t.Fatalf("CreateBook: %v", err)
 	}
 
-	return Routes(service.New(db), t.TempDir(), false)
+	return Routes(service.New(db), t.TempDir(), false, false)
 }
 
 func TestSearchFullPageRendersFilteredGridWithEchoedQuery(t *testing.T) {
@@ -144,7 +144,7 @@ func TestSearchFullPageMastheadCountStaysLibraryTotal(t *testing.T) {
 		}
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/?q=Piranesi", nil)
 	rec := httptest.NewRecorder()
@@ -243,7 +243,7 @@ func newTestHandlerWithLocations(t *testing.T, title string, n int) http.Handler
 		}
 	}
 
-	return Routes(service.New(db), t.TempDir(), false)
+	return Routes(service.New(db), t.TempDir(), false, false)
 }
 
 // The mutation this guards against: dropping the PathsLabel assignment
@@ -503,7 +503,7 @@ func TestSearchResultsLineNamesTotalAndMatchedFields(t *testing.T) {
 			t.Fatalf("CreateBook %d: %v", i, err)
 		}
 	}
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	for _, tc := range []struct{ query, want string }{
 		{"le+guin", "2 of 3 · matched author"},
@@ -579,7 +579,7 @@ func TestEmptyLibraryDisablesTheSearchControl(t *testing.T) {
 		t.Fatalf("storage.Open: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -604,7 +604,7 @@ func TestUnknownPathReturns404(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	for _, path := range []string{"/nope", "/books/1"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -624,7 +624,7 @@ func TestLibraryHandlerSetsContentType(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -732,7 +732,7 @@ func TestLibraryHandlerRendersCleanServerErrorOnTemplateFailure(t *testing.T) {
 	t.Cleanup(func() { templates = original })
 	templates = template.Must(template.New("library.html").Parse(`{{.NoSuchField}}`))
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -752,7 +752,7 @@ func TestStaticFileServed(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/static/css/app.css", nil)
 	rec := httptest.NewRecorder()
@@ -784,7 +784,7 @@ func TestCoverServedFromCoversDir(t *testing.T) {
 		t.Fatalf("write cover: %v", err)
 	}
 
-	handler := Routes(service.New(db), coversDir, false)
+	handler := Routes(service.New(db), coversDir, false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/covers/hash-1.jpg", nil)
 	rec := httptest.NewRecorder()
@@ -810,7 +810,7 @@ func TestStaticAndCoversDoNotListDirectories(t *testing.T) {
 		t.Fatalf("write cover: %v", err)
 	}
 
-	handler := Routes(service.New(db), coversDir, false)
+	handler := Routes(service.New(db), coversDir, false, false)
 
 	for _, path := range []string{"/static/", "/static/css/", "/covers/"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -833,7 +833,7 @@ func TestStaticAssetETagIsContentDerived(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/static/css/app.css", nil)
 	rec := httptest.NewRecorder()
@@ -882,7 +882,7 @@ func TestCoverCacheControlIsBoundedNotImmutable(t *testing.T) {
 		t.Fatalf("write cover: %v", err)
 	}
 
-	handler := Routes(service.New(db), coversDir, false)
+	handler := Routes(service.New(db), coversDir, false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/covers/hash-1.jpg", nil)
 	rec := httptest.NewRecorder()

@@ -53,7 +53,7 @@ func postSendForm(handler http.Handler, id int64, form url.Values, hx bool) *htt
 func TestSendHandlerEnqueuesAndReturnsSendingFragment(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postSendForm(handler, id, url.Values{"recipient": {"reader@kindle.com"}}, true)
 	if rec.Code != http.StatusOK {
@@ -99,7 +99,7 @@ func TestSendStatusHandlerTerminalFragmentDoesNotRepoll(t *testing.T) {
 		t.Fatalf("MarkSendDelivered: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id)+"/sends/"+itoa(sendID), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -127,7 +127,7 @@ func TestSendStatusHandlerMismatchedBookReturns404(t *testing.T) {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(otherBookID)+"/sends/"+itoa(sendID), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -140,7 +140,7 @@ func TestSendStatusHandlerMismatchedBookReturns404(t *testing.T) {
 func TestSendHandlerNonHXRequestRedirects303(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postSendForm(handler, id, url.Values{"recipient": {"reader@kindle.com"}}, false)
 	if rec.Code != http.StatusSeeOther {
@@ -159,7 +159,7 @@ func TestSendHandlerNonHXRequestRedirects303(t *testing.T) {
 func TestSendControlWhenDisabled(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	getReq := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	getRec := httptest.NewRecorder()
@@ -205,7 +205,7 @@ func TestSendStatusHandlerEscapesFailureReason(t *testing.T) {
 		t.Fatalf("MarkSendFailed: %v", err)
 	}
 
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id)+"/sends/"+itoa(sendID), nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -222,7 +222,7 @@ func TestSendStatusHandlerEscapesFailureReason(t *testing.T) {
 func TestSendHandlerInvalidAddressRendersFieldError(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postSendForm(handler, id, url.Values{"recipient": {"not-an-address"}}, true)
 	if rec.Code != http.StatusOK {
@@ -243,7 +243,7 @@ func TestSendHandlerInvalidAddressRendersFieldError(t *testing.T) {
 
 func TestSendHandlerUnknownBookReturns404(t *testing.T) {
 	db := newSendTestDB(t)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postSendForm(handler, 99999, url.Values{"recipient": {"reader@kindle.com"}}, true)
 	if rec.Code != http.StatusNotFound {
@@ -266,7 +266,7 @@ func postSendFormFrom(handler http.Handler, id int64, form url.Values, fetchSite
 func TestSendHandlerRejectsCrossSitePost(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	// The shape of an auto-submitting form on an attacker's page: a
 	// form-encoded POST needs no preflight, and the library has no login
@@ -291,7 +291,7 @@ func TestSendHandlerAllowsSameOriginAndMetadataLessPosts(t *testing.T) {
 	for _, fetchSite := range []string{"same-origin", "none", ""} {
 		db := newSendTestDB(t)
 		id := createSendTestBook(t, db)
-		handler := Routes(service.New(db), t.TempDir(), true)
+		handler := Routes(service.New(db), t.TempDir(), true, false)
 
 		rec := postSendFormFrom(handler, id, url.Values{"recipient": {"reader@kindle.com"}}, fetchSite)
 		if rec.Code != http.StatusSeeOther {
@@ -326,7 +326,7 @@ func TestRemoveRecipientHandlerDeletesAndReturnsReRenderedControl(t *testing.T) 
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "Mine", time.Now()); err != nil {
 		t.Fatalf("CreateRecipient: %v", err)
 	}
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postRemoveRecipientForm(handler, id, "reader@kindle.com", true)
 	if rec.Code != http.StatusOK {
@@ -351,7 +351,7 @@ func TestRemoveRecipientHandlerDeletesAndReturnsReRenderedControl(t *testing.T) 
 func TestRemoveRecipientHandlerUnknownAddressIsNotAnError(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postRemoveRecipientForm(handler, id, "nobody@kindle.com", true)
 	if rec.Code != http.StatusOK {
@@ -369,7 +369,7 @@ func TestRemoveRecipientHandlerNonHXRequestRedirects303(t *testing.T) {
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
 		t.Fatalf("CreateRecipient: %v", err)
 	}
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postRemoveRecipientForm(handler, id, "reader@kindle.com", false)
 	if rec.Code != http.StatusSeeOther {
@@ -395,7 +395,7 @@ func TestRemoveRecipientHandlerRejectsCrossSitePost(t *testing.T) {
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
 		t.Fatalf("CreateRecipient: %v", err)
 	}
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	form := url.Values{"book": {itoa(id)}, "address": {"reader@kindle.com"}}
 	req := httptest.NewRequest(http.MethodPost, "/recipients/remove", strings.NewReader(form.Encode()))
@@ -428,7 +428,7 @@ func TestSendControlRemoveButtonMarkupContract(t *testing.T) {
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
 		t.Fatalf("CreateRecipient: %v", err)
 	}
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
@@ -449,7 +449,7 @@ func TestSendControlRemoveButtonMarkupContract(t *testing.T) {
 func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
-	handler := Routes(service.New(db), t.TempDir(), true)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
 	ctx := context.Background()
 
 	// A send that has already finished, so the control is showing a

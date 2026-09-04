@@ -26,15 +26,17 @@ import (
 // pattern below matches an exact path or a specific prefix, so a request
 // that matches none of them falls through to ServeMux's own 404 rather than
 // being narrowed on the outer mount.
-func Routes(svc *service.Service, coversDir string, sendEnabled bool) http.Handler {
+func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", libraryHandler(svc))
 	mux.HandleFunc("GET /history", historyHandler(svc))
-	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled))
-	mux.HandleFunc("GET /books/{id}/metadata/{field}", metadataHandler(svc, sendEnabled))
-	mux.HandleFunc("POST /books/{id}/metadata/{field}", sameSiteOnly(metadataHandler(svc, sendEnabled)))
+	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled, enrichEnabled))
+	mux.HandleFunc("GET /books/{id}/metadata/{field}", metadataHandler(svc, sendEnabled, enrichEnabled))
+	mux.HandleFunc("POST /books/{id}/metadata/{field}", sameSiteOnly(metadataHandler(svc, sendEnabled, enrichEnabled)))
 	mux.HandleFunc("POST /books/{id}/send", sameSiteOnly(sendHandler(svc, sendEnabled)))
 	mux.HandleFunc("GET /books/{id}/sends/{sendID}", sendStatusHandler(svc, sendEnabled))
+	mux.HandleFunc("POST /books/{id}/enrich", sameSiteOnly(enrichHandler(svc, enrichEnabled)))
+	mux.HandleFunc("GET /books/{id}/enrichment/{jobID}", enrichStatusHandler(svc, enrichEnabled))
 	mux.HandleFunc("POST /recipients/remove", sameSiteOnly(removeRecipientHandler(svc, sendEnabled)))
 	mux.Handle("GET /static/", staticHandler())
 	mux.Handle("GET /covers/", coversHandler(coversDir))

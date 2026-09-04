@@ -646,3 +646,170 @@ func TestRemoveRecipient(t *testing.T) {
 		t.Error("RemoveRecipient on an already-removed address = true, want false")
 	}
 }
+
+func TestEnrichBookQueuesAndNotifies(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	poked := 0
+	svc.NotifyEnrichment = func() { poked++ }
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "enr-1", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := svc.EnrichBook(ctx, id)
+	if err != nil {
+		t.Fatalf("EnrichBook: %v", err)
+	}
+	if state == nil {
+		t.Fatal("EnrichBook returned nil state for an existing book")
+	}
+	if state.Status != "queued" {
+		t.Errorf("Status = %q, want queued", state.Status)
+	}
+	if state.BookID != id {
+		t.Errorf("BookID = %d, want %d", state.BookID, id)
+	}
+	if len(state.UpdatedFields) != 0 {
+		t.Errorf("UpdatedFields = %v on a fresh job, want none", state.UpdatedFields)
+	}
+	if poked != 1 {
+		t.Errorf("NotifyEnrichment called %d times, want 1 — the job should start without waiting for a poll tick", poked)
+	}
+}
+
+// EnqueueEnrichment is idempotent while a job is queued, so a second press
+// makes no second promise — but the caller still wants the job the book
+// actually has back, not nil.
+func TestEnrichBookTwiceReturnsTheSameQueuedJob(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "enr-2", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := svc.EnrichBook(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.EnrichBook(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == nil {
+		t.Fatal("second EnrichBook returned nil")
+	}
+	if first.ID != second.ID {
+		t.Errorf("second press produced job %d, want the queued %d — one queued promise per book", second.ID, first.ID)
+	}
+}
+
+func TestEnrichBookUnknownBookIsNotAnError(t *testing.T) {
+	db := openTestDB(t)
+	svc := New(db)
+	svc.NotifyEnrichment = func() { t.Error("notified for a book that does not exist") }
+
+	state, err := svc.EnrichBook(context.Background(), 4242)
+	if err != nil {
+		t.Fatalf("EnrichBook: %v", err)
+	}
+	if state != nil {
+		t.Errorf("state = %+v, want nil for an unknown book", state)
+	}
+}
+
+func TestEnrichmentStateSplitsUpdatedFields(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "enr-3", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := db.ClaimNextEnrichment(ctx, time.Now())
+	finished := time.Now()
+	if err := db.MarkEnrichmentDone(ctx, job.ID, []storage.MetadataField{storage.FieldPublisher, storage.FieldLanguage}, finished); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := svc.EnrichmentState(ctx, job.ID)
+	if err != nil || state == nil {
+		t.Fatalf("EnrichmentState: %+v, %v", state, err)
+	}
+	if len(state.UpdatedFields) != 2 || state.UpdatedFields[0] != "publisher" || state.UpdatedFields[1] != "language" {
+		t.Errorf("UpdatedFields = %v, want [publisher language]", state.UpdatedFields)
+	}
+	// Terminal, so At is finished_at rather than queued_at — the same
+	// collapse sendAt makes.
+	if state.At.IsZero() || state.At.Before(job.QueuedAt) {
+		t.Errorf("At = %v, want the finish time", state.At)
+	}
+}
+
+func TestEnrichmentStateUnknownJobIsNotAnError(t *testing.T) {
+	db := openTestDB(t)
+	svc := New(db)
+	state, err := svc.EnrichmentState(context.Background(), 9999)
+	if err != nil {
+		t.Fatalf("EnrichmentState: %v", err)
+	}
+	if state != nil {
+		t.Errorf("state = %+v, want nil", state)
+	}
+}
+
+func TestLatestEnrichmentNoJob(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "enr-4", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := svc.LatestEnrichment(ctx, id)
+	if err != nil {
+		t.Fatalf("LatestEnrichment: %v", err)
+	}
+	if state != nil {
+		t.Errorf("state = %+v, want nil for a book never enriched", state)
+	}
+}
+
+// The detail page needs provenance to render Decision 1's markers.
+func TestGetBookCarriesFieldSources(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "enr-5", Title: "Book", SortTitle: "book"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.ApplyEnrichedFields(ctx, id, map[storage.MetadataField]string{
+		storage.FieldPublisher: "Gollancz",
+	}, map[storage.MetadataField]string{
+		storage.FieldPublisher: "openlibrary",
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := svc.GetBook(ctx, id)
+	if err != nil || detail == nil {
+		t.Fatalf("GetBook: %+v, %v", detail, err)
+	}
+	if got := detail.FieldSources["publisher"]; got != "openlibrary" {
+		t.Errorf("FieldSources[publisher] = %q, want openlibrary", got)
+	}
+	if got := detail.FieldSources["title"]; got != "embedded" {
+		t.Errorf("FieldSources[title] = %q, want embedded — the scanner set it at creation", got)
+	}
+}

@@ -612,3 +612,71 @@ func TestWorkerClearsCoverRetryWhenItStoresACover(t *testing.T) {
 		t.Error("CoverRetry is still set; the scanner will overwrite this cover on its next sweep")
 	}
 }
+
+// The job row has to carry what the run wrote, so the UI can name the
+// fields instead of just saying "done".
+func TestWorkerRecordsTheFieldsItWrote(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-fields", Title: "Book", SortTitle: "book", ISBN: "9780000000009"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Publisher: "Ace Books", Language: "en"}, nil
+	}}
+	newTestWorker(t, db, []Provider{p}).drain(ctx)
+
+	job, err := db.LatestEnrichmentForBook(ctx, id)
+	if err != nil || job == nil {
+		t.Fatalf("LatestEnrichmentForBook: %+v, %v", job, err)
+	}
+	if job.Status != storage.EnrichmentDone {
+		t.Fatalf("status = %q, want done", job.Status)
+	}
+	if job.UpdatedFields != "publisher,language" {
+		t.Errorf("UpdatedFields = %q, want %q", job.UpdatedFields, "publisher,language")
+	}
+}
+
+// A book with nothing missing is the common case, and it must record an
+// empty field list on a done job — "nothing to add", not a failure and not
+// a phantom field.
+func TestWorkerRecordsNoFieldsWhenNothingWasMissing(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "worker-complete", Title: "Book", SortTitle: "book",
+		Publisher: "Ace Books", PublishedDate: "1984", Language: "en",
+		ISBN: "9780000000010", Description: "Complete", CoverPath: "/covers/x.jpg",
+	}, []string{"An Author"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		t.Error("a provider was asked about a book with nothing missing")
+		return Metadata{}, nil
+	}}
+	newTestWorker(t, db, []Provider{p}).drain(ctx)
+
+	job, err := db.LatestEnrichmentForBook(ctx, id)
+	if err != nil || job == nil {
+		t.Fatalf("LatestEnrichmentForBook: %+v, %v", job, err)
+	}
+	if job.Status != storage.EnrichmentDone {
+		t.Errorf("status = %q, want done", job.Status)
+	}
+	if job.UpdatedFields != "" {
+		t.Errorf("UpdatedFields = %q, want empty", job.UpdatedFields)
+	}
+}

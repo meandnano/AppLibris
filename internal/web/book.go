@@ -73,12 +73,21 @@ type bookDetailPage struct {
 	SendError         string
 	SendNewAddress    string
 	SendNewLabel      string
+
+	EnrichEnabled     bool
+	Enrichment        *service.EnrichmentState
+	EnrichPending     bool
+	EnrichButtonLabel string
+	EnrichAt          string
+	EnrichPollURL     string
+	EnrichResult      string
+	EnrichResultOK    bool
 }
 
 // bookDetailHandler serves GET /books/{id}. A non-numeric id and an
 // unknown id both 404 identically (http.NotFound) — deliberately
 // indistinguishable, since neither is a client error worth its own page.
-func bookDetailHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
+func bookDetailHandler(svc *service.Service, sendEnabled, enrichEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 		if err != nil {
@@ -107,7 +116,7 @@ func bookDetailHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc 
 			return
 		}
 
-		page, err := makeBookDetailPage(r, svc, detail, sendEnabled, edit)
+		page, err := makeBookDetailPage(r, svc, detail, sendEnabled, enrichEnabled, edit)
 		if err != nil {
 			slog.Error("build book detail page failed", "id", id, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -127,7 +136,7 @@ func bookDetailHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc 
 // callers have already fetched it — the handler to decide between 404 and
 // 200, the metadata error path to render the rest of the page around a
 // rejected value.
-func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.BookDetail, sendEnabled bool, edit string) (*bookDetailPage, error) {
+func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.BookDetail, sendEnabled, enrichEnabled bool, edit string) (*bookDetailPage, error) {
 	count, err := svc.CountBooks(r.Context())
 	if err != nil {
 		return nil, err
@@ -155,7 +164,28 @@ func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.B
 	if err := populateSendControl(r.Context(), svc, sendEnabled, &page); err != nil {
 		return nil, err
 	}
+	if err := populateEnrichControl(r.Context(), svc, enrichEnabled, &page); err != nil {
+		return nil, err
+	}
 	return &page, nil
+}
+
+// populateEnrichControl fills page's enrichment-control fields from this
+// book's most recent job, if any. Shared by the full detail-page render
+// and the standalone fragment handlers in enrich.go, so all three routes
+// derive the control the same way — populateSendControl's arrangement.
+func populateEnrichControl(ctx context.Context, svc *service.Service, enrichEnabled bool, page *bookDetailPage) error {
+	page.EnrichEnabled = enrichEnabled
+	if !enrichEnabled {
+		return nil
+	}
+
+	job, err := svc.LatestEnrichment(ctx, page.ID)
+	if err != nil {
+		return err
+	}
+	applyEnrichmentState(page, job)
+	return nil
 }
 
 // editableFieldView is one field's state for the templates: Value is what
@@ -179,6 +209,34 @@ type editableFieldView struct {
 	Placeholder string
 	Multiline   bool
 	Mono        bool
+	// SourceNote annotates where a value came from, and is set only when
+	// that was a metadata provider — see sourceNote.
+	SourceNote string
+}
+
+// providerSourceNote turns a field's recorded provenance into the note the
+// read view shows, and is empty for everything but a provider's name.
+//
+// Every field has a source, but rendering all seven would double the
+// metadata block's visual weight to say "embedded" seven times, which is
+// the default and therefore not information. The marker exists as a
+// *caveat*: a value the scanner read out of the file is a fact about the
+// file, a value someone typed is theirs, and a value a third-party API
+// guessed at is the only one whose origin changes how much it should be
+// trusted — and the only one where "where did this come from?" gets asked.
+// Marking all three would treat them as equivalent.
+//
+// "manual" renders nothing deliberately, even though it is the source the
+// resolver cares most about: the person who typed it does not need
+// telling, and a label next to a field that already carries an edit
+// affordance is noise.
+func providerSourceNote(source string) string {
+	switch source {
+	case "", "embedded", "manual":
+		return ""
+	default:
+		return "via " + source
+	}
 }
 
 // applyFieldViews fills page's four editable slots from detail.
@@ -209,10 +267,18 @@ func makeFieldViews(detail *service.BookDetail, edit string) map[storage.Metadat
 		name := string(field)
 		views[field] = editableFieldView{
 			BookID: detail.ID, Field: name, Label: label, Value: value, Display: display,
-			Edit:    edit == name,
-			EditURL: fmt.Sprintf("/books/%d/metadata/%s?edit=1", detail.ID, name),
-			ReadURL: fmt.Sprintf("/books/%d/metadata/%s", detail.ID, name),
-			BookURL: fmt.Sprintf("/books/%d", detail.ID),
+			// Provenance is derived here, in the one place every field
+			// view is built, so a whole-page render and a single-field
+			// fragment cannot disagree about where a value came from.
+			// This is also what makes editing clear the marker for free:
+			// saving sets the source to "manual", and the POST handler
+			// reloads the book rather than echoing the submitted value,
+			// so the rebuilt view reads the new provenance.
+			SourceNote: providerSourceNote(detail.FieldSources[name]),
+			Edit:       edit == name,
+			EditURL:    fmt.Sprintf("/books/%d/metadata/%s?edit=1", detail.ID, name),
+			ReadURL:    fmt.Sprintf("/books/%d/metadata/%s", detail.ID, name),
+			BookURL:    fmt.Sprintf("/books/%d", detail.ID),
 			// The read view's plain href carries the same intent as the
 			// hx-get, so the no-JavaScript path opens the same editor.
 			Placeholder: placeholder, Multiline: multiline, Mono: mono,
@@ -282,6 +348,59 @@ func applySendState(page *bookDetailPage, send *service.SendState) {
 		page.SendButtonLabel = "Send"
 		page.SendButtonPrimary = true
 	}
+}
+
+// applyEnrichmentState fills page's enrichment-control fields from job,
+// the same way applySendState does for a send: everything the template
+// branches on is decided here, so it chooses which block to show and never
+// how to phrase it.
+//
+// The states are the send control's, minus a recipient and with different
+// terminal wording: pending polls, and a finished job reports either the
+// fields it wrote or "nothing to add". A terminal fragment gets no poll
+// URL at all, which is what stops the polling — by construction, not by a
+// counter.
+func applyEnrichmentState(page *bookDetailPage, job *service.EnrichmentState) {
+	page.Enrichment = job
+	if job == nil {
+		page.EnrichButtonLabel = "Fetch metadata"
+		return
+	}
+
+	page.EnrichAt = job.At.Format("2006-01-02 15:04")
+	switch job.Status {
+	case "queued", "running":
+		// One visual state for both: the UI has no separate treatment for
+		// the gap between enqueue and claim, which the worker's Notify
+		// poke keeps short anyway — the same collapse the send control
+		// and the history view already make.
+		page.EnrichPending = true
+		page.EnrichButtonLabel = "Fetching"
+		page.EnrichPollURL = fmt.Sprintf("/books/%d/enrichment/%d", page.ID, job.ID)
+	case "done":
+		page.EnrichButtonLabel = "Fetch again"
+		page.EnrichResultOK = true
+		page.EnrichResult = enrichmentResultLine(job.UpdatedFields)
+	case "failed":
+		page.EnrichButtonLabel = "Retry"
+		page.EnrichResult = job.FailureReason
+	default:
+		page.EnrichButtonLabel = "Fetch metadata"
+	}
+}
+
+// enrichmentResultLine names what a finished job wrote, so the person does
+// not have to hunt the page for what moved.
+//
+// No fields written is a *success*, not a failure: it is the ordinary
+// outcome for a book whose embedded metadata is already complete, and for
+// any book no provider had an answer for. Rendering it as a failure would
+// train people to distrust a feature that is working exactly as intended.
+func enrichmentResultLine(fields []string) string {
+	if len(fields) == 0 {
+		return "Nothing to add"
+	}
+	return "Added " + strings.Join(fields, ", ")
 }
 
 // humanSize formats n bytes as e.g. "12.3 MB", binary (1024-based) units.

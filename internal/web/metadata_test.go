@@ -51,7 +51,7 @@ var htmx = map[string]string{"HX-Request": "true"}
 func TestMetadataHTMXEditThenSave(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Old Title", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id)+"/metadata/title?edit=1", nil)
 	req.Header.Set("HX-Request", "true")
@@ -98,7 +98,7 @@ func TestMetadataHTMXEditThenSave(t *testing.T) {
 func TestMetadataRejectedValueComesBackAsAnEditor(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Keep Me", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	rec := postField(handler, id, "title", url.Values{"value": {"   "}}, htmx)
 	body := rec.Body.String()
@@ -121,7 +121,7 @@ func TestMetadataRejectedValueComesBackAsAnEditor(t *testing.T) {
 func TestMetadataAcceptsFullSizeNonASCIIDescription(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Книга", Format: "fb2"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	// Form-urlencoding turns each of these two-byte runes into six bytes,
 	// so a value comfortably inside the service's byte limit produces a
@@ -153,7 +153,7 @@ func TestMetadataAcceptsFullSizeNonASCIIDescription(t *testing.T) {
 func TestMetadataOverlongValueIsAFieldErrorNotABareStatus(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	// Past the body cap, so it never reaches the service's own check.
 	rec := postField(handler, id, "description",
@@ -170,7 +170,7 @@ func TestMetadataOverlongValueIsAFieldErrorNotABareStatus(t *testing.T) {
 func TestMetadataAuthorsRoundTripThroughTheTextarea(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, []string{"Old Author"})
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	rec := postField(handler, id, "authors", url.Values{"value": {" First \r\nSecond\n\nFirst "}}, htmx)
 	if rec.Code != http.StatusOK {
@@ -193,7 +193,7 @@ func TestMetadataAuthorsRoundTripThroughTheTextarea(t *testing.T) {
 func TestMetadataNoJavaScriptPathUsesWholePages(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	// The read view's href, followed without htmx: a fragment URL must
 	// land on a whole page with that editor open, not a bare fragment.
@@ -225,7 +225,7 @@ func TestMetadataNoJavaScriptPathUsesWholePages(t *testing.T) {
 func TestMetadataUnknownFieldAndBookAre404(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	if rec := postField(handler, id, "cover_path", url.Values{"value": {"x"}}, htmx); rec.Code != http.StatusNotFound {
 		t.Errorf("POST to a field that is not editable = %d, want 404", rec.Code)
@@ -254,7 +254,7 @@ func TestMetadataUnknownFieldAndBookAre404(t *testing.T) {
 func TestMetadataUnknownEditQueryStillRendersTheBook(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id)+"?edit=not-a-field", nil)
 	rec := httptest.NewRecorder()
@@ -270,7 +270,7 @@ func TestMetadataUnknownEditQueryStillRendersTheBook(t *testing.T) {
 func TestMetadataRejectsCrossSitePost(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Original", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	rec := postField(handler, id, "title", url.Values{"value": {"Vandalised"}},
 		map[string]string{"Sec-Fetch-Site": "cross-site"})
@@ -286,7 +286,7 @@ func TestMetadataRejectsCrossSitePost(t *testing.T) {
 func TestMetadataEditIsSearchableImmediately(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Piranesi", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	if rec := postField(handler, id, "title", url.Values{"value": {"Jonathan Strange"}}, htmx); rec.Code != http.StatusOK {
 		t.Fatalf("save = %d", rec.Code)
@@ -310,7 +310,7 @@ func TestMetadataEditIsSearchableImmediately(t *testing.T) {
 func TestMetadataFullPageErrorKeepsThe422(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Keep Me", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	// Nothing swallows a status on the navigation path, so the honest code
 	// survives there even though the fragment above has to answer 200.
@@ -326,7 +326,7 @@ func TestMetadataFullPageErrorKeepsThe422(t *testing.T) {
 
 func TestMetadataUnknownBookIs404OnBothPaths(t *testing.T) {
 	db := newEditTestDB(t)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	// The redirect must not be chosen before the book is known to exist,
 	// or an ordinary GET answers 303 for a book that isn't there while the
@@ -355,7 +355,7 @@ func TestMetadataUnknownBookIs404OnBothPaths(t *testing.T) {
 func TestMetadataAcceptsAFullSizeAuthorList(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Anthology", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	// The author list, not the description, is the largest value the
 	// service accepts. A body cap sized off the description limit rejects
@@ -387,7 +387,7 @@ func TestMetadataAcceptsAFullSizeAuthorList(t *testing.T) {
 func TestMetadataRejectsLineBreaksInSingleLineFields(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	// A browser text input cannot produce these; a scripted request can.
 	for _, field := range []string{"title", "publisher", "published", "language", "isbn"} {
@@ -415,7 +415,7 @@ func TestMetadataRejectsLineBreaksInSingleLineFields(t *testing.T) {
 func TestMetadataEmptyFieldsHaveDistinctAccessibleNames(t *testing.T) {
 	db := newEditTestDB(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Sparse", Format: "epub"}, nil)
-	handler := Routes(service.New(db), t.TempDir(), false)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
 	rec := httptest.NewRecorder()
