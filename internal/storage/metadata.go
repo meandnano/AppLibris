@@ -106,6 +106,33 @@ func setEmbeddedFieldSourcesTx(ctx context.Context, tx *sql.Tx, bookID int64, b 
 	return nil
 }
 
+// updateBookColumnTx writes value to the single books column field backs,
+// bumping modified_at. It does not touch field_sources or books_fts —
+// those are the caller's job, so a caller writing several fields in one
+// transaction (ApplyEnrichedFields) can sync the FTS row once at the end
+// rather than once per field. It must be called from inside a DB.Write
+// callback — see DB.Write's contract.
+func updateBookColumnTx(ctx context.Context, tx *sql.Tx, bookID int64, field MetadataField, value string, modifiedAt time.Time) error {
+	var err error
+	switch field {
+	case FieldTitle:
+		_, err = tx.ExecContext(ctx, `UPDATE books SET title = ?, sort_title = ?, modified_at = ? WHERE id = ?`, value, SortTitle(value), formatTime(modifiedAt), bookID)
+	case FieldPublisher:
+		_, err = tx.ExecContext(ctx, `UPDATE books SET publisher = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
+	case FieldPublishedDate:
+		_, err = tx.ExecContext(ctx, `UPDATE books SET published_date = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
+	case FieldLanguage:
+		_, err = tx.ExecContext(ctx, `UPDATE books SET language = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
+	case FieldISBN:
+		_, err = tx.ExecContext(ctx, `UPDATE books SET isbn = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
+	case FieldDescription:
+		_, err = tx.ExecContext(ctx, `UPDATE books SET description = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
+	default:
+		return ErrInvalidMetadataField
+	}
+	return err
+}
+
 func (db *DB) UpdateBookField(ctx context.Context, bookID int64, field MetadataField, value string, modifiedAt time.Time) (exists bool, err error) {
 	if field == FieldAuthors {
 		return false, ErrInvalidMetadataField
@@ -114,26 +141,8 @@ func (db *DB) UpdateBookField(ctx context.Context, bookID int64, field MetadataF
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM books WHERE id = ?)`, bookID).Scan(&exists); err != nil || !exists {
 			return err
 		}
-
-		var updateErr error
-		switch field {
-		case FieldTitle:
-			_, updateErr = tx.ExecContext(ctx, `UPDATE books SET title = ?, sort_title = ?, modified_at = ? WHERE id = ?`, value, SortTitle(value), formatTime(modifiedAt), bookID)
-		case FieldPublisher:
-			_, updateErr = tx.ExecContext(ctx, `UPDATE books SET publisher = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
-		case FieldPublishedDate:
-			_, updateErr = tx.ExecContext(ctx, `UPDATE books SET published_date = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
-		case FieldLanguage:
-			_, updateErr = tx.ExecContext(ctx, `UPDATE books SET language = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
-		case FieldISBN:
-			_, updateErr = tx.ExecContext(ctx, `UPDATE books SET isbn = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
-		case FieldDescription:
-			_, updateErr = tx.ExecContext(ctx, `UPDATE books SET description = ?, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
-		default:
-			return ErrInvalidMetadataField
-		}
-		if updateErr != nil {
-			return updateErr
+		if err := updateBookColumnTx(ctx, tx, bookID, field, value, modifiedAt); err != nil {
+			return err
 		}
 		if err := setFieldSourceTx(ctx, tx, bookID, field, "manual"); err != nil {
 			return err
@@ -143,43 +152,53 @@ func (db *DB) UpdateBookField(ctx context.Context, bookID int64, field MetadataF
 	return exists, err
 }
 
+// updateBookAuthorsTx replaces bookID's whole author list and records
+// source as the provenance for FieldAuthors — "manual" from
+// UpdateBookAuthors, a provider's name from ApplyEnrichedFields. It does
+// not sync books_fts; see updateBookColumnTx for why that's the caller's
+// job. It must be called from inside a DB.Write callback — see DB.Write's
+// contract.
+func updateBookAuthorsTx(ctx context.Context, tx *sql.Tx, bookID int64, names []string, source string, modifiedAt time.Time) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM book_authors WHERE book_id = ?`, bookID); err != nil {
+		return err
+	}
+	// Deduplicated here, not just by the caller: book_authors is keyed
+	// on (book_id, author_id), so a name credited twice would violate
+	// the primary key and roll the whole update back. createBookTx
+	// applies the same first-occurrence rule, and this is the operation
+	// that mirrors it — a caller must not be able to fail the write with
+	// input the creation path accepts. Positions stay contiguous, since
+	// they are the order the book lists its authors in, not the index of
+	// the submitted line.
+	seen := make(map[string]bool, len(names))
+	position := 0
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		authorID, err := findOrCreateAuthor(ctx, tx, name)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO book_authors (book_id, author_id, position) VALUES (?, ?, ?)`, bookID, authorID, position); err != nil {
+			return err
+		}
+		position++
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE books SET modified_at = ? WHERE id = ?`, formatTime(modifiedAt), bookID); err != nil {
+		return err
+	}
+	return setFieldSourceTx(ctx, tx, bookID, FieldAuthors, source)
+}
+
 func (db *DB) UpdateBookAuthors(ctx context.Context, bookID int64, names []string, modifiedAt time.Time) (exists bool, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM books WHERE id = ?)`, bookID).Scan(&exists); err != nil || !exists {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM book_authors WHERE book_id = ?`, bookID); err != nil {
-			return err
-		}
-		// Deduplicated here, not just by the caller: book_authors is keyed
-		// on (book_id, author_id), so a name credited twice would violate
-		// the primary key and roll the whole update back. createBookTx
-		// applies the same first-occurrence rule, and this is the public
-		// operation that mirrors it — a direct caller must not be able to
-		// fail the write with input the creation path accepts. Positions
-		// stay contiguous, since they are the order the book lists its
-		// authors in, not the index of the submitted line.
-		seen := make(map[string]bool, len(names))
-		position := 0
-		for _, name := range names {
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-
-			authorID, err := findOrCreateAuthor(ctx, tx, name)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO book_authors (book_id, author_id, position) VALUES (?, ?, ?)`, bookID, authorID, position); err != nil {
-				return err
-			}
-			position++
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE books SET modified_at = ? WHERE id = ?`, formatTime(modifiedAt), bookID); err != nil {
-			return err
-		}
-		if err := setFieldSourceTx(ctx, tx, bookID, FieldAuthors, "manual"); err != nil {
+		if err := updateBookAuthorsTx(ctx, tx, bookID, names, "manual", modifiedAt); err != nil {
 			return err
 		}
 		return syncBookFTSTx(ctx, tx, bookID)

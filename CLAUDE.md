@@ -49,12 +49,14 @@ full design.
   date functions and a plain `ORDER BY` both work on it.
 - `field_sources` (`internal/storage/metadata.go`) records where each of the
   seven editable fields' current value came from — `embedded` when the
-  scanner read it out of the file, `manual` once a person has edited it.
-  Nothing reads it yet, and that is the point: DESIGN.md forbids shipping
+  scanner read it out of the file, `manual` once a person has edited it,
+  or (since `internal/enrich`) a provider's name once it has answered one.
+  It was deliberately write-only until now: DESIGN.md forbade shipping
   manual editing before provenance, because the provider-enrichment step
-  that comes later would otherwise overwrite hand-fixed values with no way
-  to tell they were hand-fixed. Writing it now is what makes every book
-  edited in the meantime carry its marker when that consumer arrives.
+  that came later would otherwise overwrite hand-fixed values with no way
+  to tell they were hand-fixed. Writing it from the start is what made
+  every book edited in the meantime already carry its marker by the time
+  that consumer — `FieldSourcesForBook`, below — arrived.
   Provenance is set at creation (`setEmbeddedFieldSourcesTx`, called from
   `createBookTx` inside the same transaction as the book, its author links
   and its FTS row — an invariant, not a backfill-only repair) and on every
@@ -189,6 +191,79 @@ full design.
   `send_log`: `recipient_address` being a plain string rather than a
   foreign key is what makes that a schema guarantee rather than a rule
   this method has to remember to keep.
+- `enrichment_jobs` (`internal/storage/enrichment.go`) backs the provider-
+  enrichment queue, one row per job (a book can accumulate several over
+  time — terminal history isn't pruned, and a `running` job can coexist
+  with a fresh `queued` one; only `EnqueueEnrichment`'s own guard, below,
+  keeps two `queued` rows from coexisting): `status` is CHECK-constrained
+  to `queued`/`running`/`done`/`failed`, the same shape `send_log` uses.
+  `book_id` **cascades** on delete, unlike `send_log.book_id` — the
+  contrast is deliberate: a send log entry is the record that a thing
+  happened and must outlive its book, while an enrichment job is a
+  *pending intention* about a book, meaningless once the book is gone.
+  `EnqueueEnrichment` is idempotent while a job is `queued`
+  (`INSERT … WHERE NOT EXISTS`, one statement) but not against a `running`
+  one — a book already being processed doesn't block a fresh promise once
+  that job goes terminal. `ClaimNextEnrichment` mirrors `ClaimNextSend`
+  (oldest `queued` row, flip to `running` with `started_at` set, one
+  transaction), and `MarkEnrichmentDone`/`MarkEnrichmentFailed` mirror
+  `MarkSend*`'s `WHERE status = 'running'` terminal-state guard.
+  `RequeueInterruptedEnrichment` is startup recovery, but the *opposite*
+  of `FailInterruptedSends`: a send's side effect (a message leaving the
+  process) isn't repeatable, so an interrupted one is failed rather than
+  guessed at, but an enrichment job's only effect is writing fields a pure
+  function (`internal/enrich.Resolve`) computed from data already in the
+  database — running it again on the same inputs lands the same values,
+  so a `running` row is put back to `queued` (with `queued_at` reset to
+  the recovery time) rather than failed — unless that book already has a
+  fresh `queued` sibling (`EnqueueEnrichment`'s guard only blocks a second
+  *queued* row, so one can coexist with a `running` one, per Decision 3),
+  in which case the interrupted row is deleted outright instead of
+  requeued: requeuing both would leave the book with two queued promises,
+  breaking that dedup invariant and doubling the provider calls the next
+  drain makes for it, when the surviving sibling's own run already
+  recomputes the missing set from scratch and covers whatever the
+  interrupted one would have — and marking it `done` would misreport a
+  crash as a successful run, `MarkEnrichmentDone`'s actual contract. Two
+  details are easy to get backwards for the same reason: `internal/enrich`'s worker checks
+  `ctx.Err()` after any failed step and, if the ambient context is
+  already cancelled, leaves the row `running` rather than calling
+  `MarkEnrichmentFailed` — a definite failure record would deny the row
+  the automatic retry `RequeueInterruptedEnrichment` exists to give it,
+  the opposite of `internal/sender`'s "retry is a new row" rule. And a
+  vanished book *is* a `failed` job, not a `done` one with nothing to
+  enrich — `failed` is reserved for the job itself going wrong (the book
+  gone, a write failed), the same way it would be a bug for `internal/sender`
+  to call a send "delivered" because there was nothing left to send. The
+  cascade normally removes a claimed job's row along with its book before
+  this can be observed; it exists for the narrow claim-then-delete race.
+  `FieldSourcesForBook` is `field_sources`' first reader since it was
+  introduced with inline editing — a field absent from the returned map
+  (never embedded, never edited) reads back as an empty source, which the
+  resolver's missing-field rule already treats as not-`manual`.
+  `ApplyEnrichedFields` is `UpdateBookField`/`UpdateBookAuthors`
+  generalised rather than a parallel path: both now call shared
+  unexported helpers (`updateBookColumnTx`, `updateBookAuthorsTx`) that
+  take a `source` parameter, with the public methods passing `"manual"`
+  and `ApplyEnrichedFields` taking a `sourceName map[MetadataField]string`
+  instead of one shared `source` — `Resolve`'s own return value, passed
+  straight through, so a job that pulled fields from more than one
+  provider still records each field under whichever one actually answered
+  it, all in the one transaction `ApplyEnrichedFields` runs as. Before
+  writing each field, `fieldIsStillMissingTx` re-reads its current value
+  and provenance fresh, inside that same transaction, and skips it if it's
+  no longer missing: `Resolve`'s snapshot can be stale by the time a
+  provider has answered minutes later, and `DB.Write`'s single write
+  connection means a concurrent manual edit — filling the field, or
+  deliberately clearing it — has already committed by the time this
+  transaction's read runs, so a provider's now-stale answer can never
+  clobber it. That recheck is why provenance stays right across every
+  caller instead of drifting in one. Authors move through the same
+  join-table path `UpdateBookAuthors` uses, their value newline-joined in
+  the `map[MetadataField]string` both `Resolve` and `ApplyEnrichedFields`
+  share — the same convention the web layer's author textarea already
+  uses — so an author list looks the same shape whether a provider or a
+  person supplied it.
 - `internal/epub` — reads embedded EPUB metadata (title, authors, language,
   ISBN, description, publisher, publication date) from the OPF package
   inside the zip, and extracts the declared cover image (EPUB3
@@ -294,6 +369,66 @@ full design.
   the genuinely unknown case, a transport call abandoned mid-flight (its
   error arrives with `ctx` already cancelled), skips the write and leaves
   the row `sending` for startup recovery to surface.
+- `internal/enrich` is the metadata provider-enrichment queue: a single
+  `Worker` over `enrichment_jobs`, the `Provider` interface real providers
+  will implement (none do yet — that's a later step), and the `Resolve`
+  function that decides which fields a book still needs and merges what
+  providers answer. Modeled directly on `internal/sender` — same
+  claim/process/terminal-write shape, `Notify` poke plus `pollInterval`
+  ticker — with two deliberate divergences, both because an enrichment
+  job's only effect (writing fields a pure function computed from data
+  already in the database) is repeatable where a send's is not: startup
+  recovery **requeues** a `running` job instead of failing it
+  (`storage.RequeueInterruptedEnrichment`, the inverse of
+  `FailInterruptedSends`), and the worker treats a step failing while
+  `ctx` is already cancelled as an abandoned attempt — leaving the row
+  `running` for that recovery to retry — rather than a verdict worth
+  writing, which is what `internal/sender` does with the same situation
+  (there, `"failed"` is a definite, useful answer; here, a job has no
+  "retry is a new row" affordance a permanent `failed` could rely on, so
+  losing the row to an honest retry costs nothing and a wrong `failed`
+  costs a book silently never being reconsidered).
+  `Resolve(ctx, book, authors, sources, providers)` takes no database and
+  no clock — everything about the book's current state is passed in —
+  which is the whole point: DESIGN.md requires the merge logic testable
+  without a real provider, and every resolver test in
+  `resolver_test.go` runs against fakes. Its rule, in one function
+  (`isMissing`) with both halves in one place: a field is worth asking a
+  provider for only when it is **both** empty **and** not `manual` —
+  dropping the emptiness half means re-enrichment overwrites good
+  embedded metadata with a guess, dropping the `manual` half means a
+  field someone deliberately cleared gets silently refilled, exactly the
+  failure `field_sources` exists to prevent. Providers are asked in
+  order, each only for what's still missing at the time it's asked; once
+  the missing set is empty the loop stops without calling the rest — an
+  explicit test asserts the un-called provider really is never
+  called, not just that its answer goes unused. A provider erroring is
+  logged and skipped, indistinguishable (deliberately — see above) from
+  one abandoned by a cancelled `ctx`; either way the chain continues, and
+  neither is `Resolve`'s own failure to report. A book's authors are
+  resolved as a field like any other — missing when the book has none and
+  no source claims `manual` — with the answer carried through
+  `Resolve`'s `map[storage.MetadataField]string` newline-joined, the same
+  representation `ApplyEnrichedFields` (`internal/storage`) and the web
+  layer's author textarea already use, so the join-table write on the way
+  in is `storage.ApplyEnrichedFields`'s job, not this package's. The
+  worker passes `Resolve`'s `values` and `sourceName` straight through to
+  one `ApplyEnrichedFields` call — DESIGN.md's field-level merge means a
+  single job can legitimately resolve fields from more than one provider,
+  and `sourceName` already carries each field's own answerer, so there is
+  no grouping to do here; keeping every resolved field in one call is also
+  what lets `ApplyEnrichedFields` apply (or skip, per its own re-check)
+  the whole set as one transaction. The job itself failing (the book vanished between
+  enqueue and claim, a write failed) is a `failed` job; a provider having
+  nothing to say — the ordinary case for most books against most
+  providers — is not, and a job that reached at least one provider still
+  finishes `done`. `enrichment_jobs.book_id` cascades on delete (unlike
+  `send_log.book_id`, which must survive its book to keep the record a
+  send happened): a queued or running enrichment job is a pending
+  intention about a book, and once the book is gone the intention is
+  meaningless, so the ordinary path never even reaches the `bookGoneReason`
+  the worker records for it — that exists for the narrow race where a
+  claim and the book's deletion interleave.
 - `internal/scanner` — walks the library directory and syncs it into
   `internal/storage`. Cheap path+size+mtime check (against `book_files`)
   skips unchanged files; content hash (SHA-256) is a book's identity, so
@@ -866,15 +1001,24 @@ full design.
   worker starts claiming jobs; either missing only logs a `Warn` naming
   which one and passes `sendEnabled: false` into `web.Routes` — browsing
   must work on a dev machine with neither set, so a missing key never
-  fails startup. The scan loop and the (if enabled) worker both run on
+  fails startup. The enrichment worker (`internal/enrich.New`) runs
+  unconditionally, unlike the sender: it takes no config to disable, since
+  an empty provider slice (no real `Provider` exists yet) already makes
+  every job a no-op, and running it regardless keeps the queue and worker
+  wiring exercised ahead of a real provider needing it.
+  `storage.RequeueInterruptedEnrichment` runs once before it starts
+  claiming jobs, unconditionally too — the requeue-not-fail counterpart to
+  `FailInterruptedSends` above, run every startup rather than only when
+  sending happens to be configured. The scan loop and both workers run on
   the same `scanCtx`, a child of the signal-aware context but
   independently cancellable — a shared `waitForBackground` helper
-  (generalised from the scan-only `waitForScan` once the worker needed
-  the identical treatment) cancels it and waits out a bounded 10s window
-  before the database closes, on *both* the SIGINT/SIGTERM path (`run`
+  (generalised from the scan-only `waitForScan` once the sender worker
+  needed the identical treatment, then reused again for the enrichment
+  one) cancels it and waits out a bounded 10s window before the database
+  closes, on *both* the SIGINT/SIGTERM path (`run`
   shuts the HTTP server down first, then waits, then closes the database
-  — order matters, so no request or in-flight scan/send write is torn
-  down by the database closing under it) and a serving failure (e.g.
+  — order matters, so no request or in-flight scan/send/enrichment write is
+  torn down by the database closing under it) and a serving failure (e.g.
   `ADDR` already in use), which used to close the database immediately
   and race the still-running scan. `internal/scanner.Scan` itself checks
   `ctx.Err()` before the walk starts and on every entry it visits, so
@@ -891,10 +1035,11 @@ full design.
   used everywhere else via `slog`'s package-level functions against that
   default logger.
 
-Still missing from DESIGN.md: metadata provider enrichment (Open Library
-/ Google Books) — the consumer `field_sources` is waiting for — the send
-history view, recipient management beyond the inline add-address control,
-near-duplicate detection, and format conversion.
+Still missing from DESIGN.md: the metadata providers themselves (Open
+Library / Google Books) and any UI surfacing enrichment — the queue,
+worker, provider interface and resolver are built (`internal/enrich`) but
+nothing in production enqueues a job yet — near-duplicate detection,
+format conversion, and library grid paging.
 
 ## Planning
 
