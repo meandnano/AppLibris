@@ -79,7 +79,7 @@ type NextPage struct {
 // decides its own truncation that way, and reusing a technique this
 // codebase has beats introducing a second one.
 func (s *Service) ListBooks(ctx context.Context, page storage.BookPage) ([]BookSummary, NextPage, error) {
-	books, next, err := s.pageOf(ctx, page, func(p storage.BookPage) ([]storage.Book, error) {
+	books, next, err := pageOf(page, func(p storage.BookPage) ([]storage.Book, error) {
 		return s.db.ListBooks(ctx, p)
 	})
 	if err != nil {
@@ -95,7 +95,11 @@ func (s *Service) ListBooks(ctx context.Context, page storage.BookPage) ([]BookS
 // pageOf runs list one row past page's limit, trims the extra, and reports
 // where the next page starts. Shared by both list paths so the +1 trick
 // and the cursor are derived once.
-func (s *Service) pageOf(ctx context.Context, page storage.BookPage, list func(storage.BookPage) ([]storage.Book, error)) ([]storage.Book, NextPage, error) {
+//
+// A free function rather than a method: it touches no service state, and
+// the context it would otherwise take is already captured by the closure
+// each caller passes.
+func pageOf(page storage.BookPage, list func(storage.BookPage) ([]storage.Book, error)) ([]storage.Book, NextPage, error) {
 	probe := page
 	if probe.Limit > 0 {
 		probe.Limit++
@@ -157,7 +161,7 @@ func (s *Service) SearchBooks(ctx context.Context, query string, page storage.Bo
 		return SearchResult{Books: books, Next: next}, err
 	}
 
-	books, next, err := s.pageOf(ctx, page, func(p storage.BookPage) ([]storage.Book, error) {
+	books, next, err := pageOf(page, func(p storage.BookPage) ([]storage.Book, error) {
 		return s.db.SearchBooks(ctx, sanitized, p)
 	})
 	if err != nil {

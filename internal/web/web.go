@@ -163,6 +163,17 @@ type libraryPage struct {
 	MoreLabel     string
 	MoreURL       string
 	MoreAppendURL string
+
+	// AtCursor is a deep page of the *unfiltered* library — paged past
+	// the start with nothing filtering it. It exists only to give the
+	// no-JS path a way back: the masthead brand and the current-page nav
+	// item are both spans, and the search bar's clear link is CSS-hidden
+	// while the box shows its placeholder, which is exactly this state.
+	// So before paging there was no way to be deep in the library, and
+	// after it there would have been no way out. A searched deep page
+	// needs nothing: its box is non-empty, so the clear link is already
+	// showing and already means the right thing.
+	AtCursor bool
 }
 
 // pageSize is how many cards one page of the grid carries, and how many a
@@ -262,6 +273,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 
 		view := libraryPage{
 			Title:      "Library",
+			AtCursor:   (page.AfterTitle != "" || page.AfterID != 0) && !result.Searched,
 			Nav:        navFor("library"),
 			HeaderNote: headerBookCount(total),
 			Books:      cards,
@@ -275,8 +287,6 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 			SearchSummary: searchSummary(result.MatchCount, total, result.Fields),
 			LibraryEmpty:  total == 0,
 		}
-		// The count the reader is actually looking at: the library total
-		// on an unfiltered grid, the match count during a search.
 		remaining := total
 		if result.Searched {
 			remaining = result.MatchCount
@@ -357,10 +367,11 @@ func formatCount(n int) string {
 // that worked at all here, so a paging implementation that forgot the
 // fallback would make the no-JS experience strictly worse than before.
 //
-// The count in the label is the one the reader is actually looking at: the
-// library total on an unfiltered grid, and the match count during a
-// search, where "of 1,284" beside a filtered grid would name a number
-// nothing on screen refers to.
+// remaining is the count the reader is actually looking at — the library
+// total on an unfiltered grid, the match count during a search, since "of
+// 1,284" beside a filtered grid would name a number nothing on screen
+// refers to. The caller picks which, because only it knows whether a
+// search ran.
 func applyMoreTrigger(view *libraryPage, next service.NextPage, query string, remaining int) {
 	if !next.HasMore {
 		return

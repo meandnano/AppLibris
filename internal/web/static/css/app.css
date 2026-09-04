@@ -267,6 +267,13 @@ a.masthead__link:hover {
   display: none;
 }
 
+/* Same specificity as the rule above and later in the file, so it wins:
+   on a deep page of the unfiltered library the box is empty but the link
+   back is the only one there is. */
+.search__input:placeholder-shown ~ .search__clear--persistent {
+  display: inline;
+}
+
 .search__spinner {
   display: none;
   width: 12px;

@@ -139,7 +139,13 @@ func (db *DB) FindBookByID(ctx context.Context, id int64) (*Book, error) {
 // AfterTitle is compared with the same NOCASE collation the column
 // carries. That is the single most likely bug here — a case-sensitive
 // comparison disagrees with the ORDER BY, and pages then overlap or drop
-// rows between them.
+// rows between them — and it is inherited from the column's declaration
+// rather than spelled out in the query, which is not merely a style
+// choice: writing `(sort_title COLLATE NOCASE, id) > (?, ?)` turns the
+// plan from `SEARCH ... (sort_title>?)` back into a full `SCAN` of the
+// index, because an explicitly collated expression is no longer the
+// indexed one. So the collation is guaranteed by the schema plus
+// TestPagingRespectsNOCASECollation, not by being visible here.
 //
 // A Limit of zero means unbounded, which is what keeps the scanner's and
 // the tests' whole-library calls working unchanged. The web transport
@@ -151,48 +157,42 @@ type BookPage struct {
 	Limit      int
 }
 
-// cursorClause renders the WHERE fragment and arguments that resume from
-// p, using column as the qualified sort_title expression so the same rule
-// serves the plain list and the FTS join. It returns "" for a first page,
-// which has nothing to resume from.
+// paginate extends query with the cursor comparison, the ordering and the
+// limit for p, returning the extended query and the arguments to append.
+// joiner is the keyword the comparison needs — "WHERE" for a query that
+// has no clause yet, "AND" for one that does.
 //
-// The COLLATE NOCASE is explicit rather than inherited from the column's
-// own declaration. It would in fact be inherited here, but the whole
-// correctness of paging rests on this comparison matching the ORDER BY,
-// and that is worth reading off the query rather than off the schema.
-func (p BookPage) cursorClause(titleColumn, idColumn string) (string, []any) {
-	if p.AfterTitle == "" && p.AfterID == 0 {
-		return "", nil
+// All three are emitted here together rather than assembled separately by
+// each caller, because the comparison and the ORDER BY have to agree about
+// both columns and their collation, and a reader should be able to see
+// that they do without holding two call sites in their head.
+//
+// The comparison is SQLite's row-value form. It is not merely tidier than
+// the equivalent `a > ? OR (a = ? AND b > ?)`: the expanded form plans as
+// a full `SCAN` of books_sort_title_id, while this one plans as
+// `SEARCH ... (sort_title>?)` and actually seeks — which is the whole
+// reason that index exists. (On the FTS join the index cannot be used
+// either way: the MATCH drives the query and the ordering falls back to a
+// temp B-tree. Bounded by the match set, and not worth contorting.)
+func (p BookPage) paginate(query, joiner, titleColumn, idColumn string) (string, []any) {
+	var args []any
+	if p.AfterTitle != "" || p.AfterID != 0 {
+		query += " " + joiner + " (" + titleColumn + ", " + idColumn + ") > (?, ?)"
+		args = append(args, p.AfterTitle, p.AfterID)
 	}
-	clause := "(" + titleColumn + " COLLATE NOCASE > ? OR (" +
-		titleColumn + " COLLATE NOCASE = ? AND " + idColumn + " > ?))"
-	return clause, []any{p.AfterTitle, p.AfterTitle, p.AfterID}
-}
-
-// limitClause renders the LIMIT for p, or "" when p is unbounded.
-func (p BookPage) limitClause() (string, []any) {
-	if p.Limit <= 0 {
-		return "", nil
+	query += " ORDER BY " + titleColumn + ", " + idColumn
+	if p.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, p.Limit)
 	}
-	return "LIMIT ?", []any{p.Limit}
+	return query, args
 }
 
 // ListBooks returns one page of books, ordered by (sort_title, id). A zero
 // BookPage returns every book, which is what the scanner and the tests
 // want.
 func (db *DB) ListBooks(ctx context.Context, page BookPage) ([]Book, error) {
-	query := `SELECT ` + bookColumns + ` FROM books`
-	var args []any
-
-	if clause, clauseArgs := page.cursorClause("sort_title", "id"); clause != "" {
-		query += ` WHERE ` + clause
-		args = append(args, clauseArgs...)
-	}
-	query += ` ORDER BY sort_title, id`
-	if clause, clauseArgs := page.limitClause(); clause != "" {
-		query += ` ` + clause
-		args = append(args, clauseArgs...)
-	}
+	query, args := page.paginate(`SELECT `+bookColumns+` FROM books`, "WHERE", "sort_title", "id")
 
 	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -221,22 +221,12 @@ func (db *DB) CountBooks(ctx context.Context) (int, error) {
 // serves both paths, and a search matching nine hundred books is not the
 // case that got forgotten.
 func (db *DB) SearchBooks(ctx context.Context, query string, page BookPage) ([]Book, error) {
-	sql := `
-		SELECT ` + qualifiedBookColumns + `
+	sql, pageArgs := page.paginate(`
+		SELECT `+qualifiedBookColumns+`
 		FROM books
 		JOIN books_fts ON books_fts.rowid = books.id
-		WHERE books_fts MATCH ?`
-	args := []any{query}
-
-	if clause, clauseArgs := page.cursorClause("books.sort_title", "books.id"); clause != "" {
-		sql += ` AND ` + clause
-		args = append(args, clauseArgs...)
-	}
-	sql += ` ORDER BY books.sort_title, books.id`
-	if clause, clauseArgs := page.limitClause(); clause != "" {
-		sql += ` ` + clause
-		args = append(args, clauseArgs...)
-	}
+		WHERE books_fts MATCH ?`, "AND", "books.sort_title", "books.id")
+	args := append([]any{query}, pageArgs...)
 
 	rows, err := db.read.QueryContext(ctx, sql, args...)
 	if err != nil {

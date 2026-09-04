@@ -75,8 +75,14 @@
            navigating to the unfiltered library, which is what "/" already
            is. CSS hides it while the input is empty (:placeholder-shown),
            so it appears and disappears without the input being
-           re-rendered. */}}
-      <a class="search__clear" href="/">clear ×</a>
+           re-rendered.
+
+           One element serves two states because "/" is the answer to
+           both. On a deep page of the unfiltered library the box is empty
+           — so the CSS would hide the only link back — and "clear" would
+           name a search that isn't running, hence the modifier and the
+           different word. */}}
+      <a class="search__clear{{if .AtCursor}} search__clear--persistent{{end}}" href="/">{{if .AtCursor}}first page ×{{else}}clear ×{{end}}</a>
       <span class="search__spinner" aria-hidden="true"></span>
     </div>
     {{/* Hidden until search.js binds the shortcut — a hint for a key that
@@ -170,8 +176,8 @@
      starting at the same cursor. MoreLabel is empty on the last page, so
      the trigger is simply absent there rather than offering zero more. */}}
 {{if .MoreLabel}}
-<li class="grid__more">
-  <a class="grid__more-link" href="{{.MoreURL}}" hx-get="{{.MoreAppendURL}}" hx-trigger="revealed" hx-target="this" hx-swap="outerHTML">{{.MoreLabel}}</a>
+<li class="grid__more" hx-get="{{.MoreAppendURL}}" hx-trigger="revealed" hx-target="this" hx-swap="outerHTML">
+  <a class="grid__more-link" href="{{.MoreURL}}">{{.MoreLabel}}</a>
 </li>
 {{end}}
 {{end}}

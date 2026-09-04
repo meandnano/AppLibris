@@ -138,9 +138,12 @@ full design.
   this migration is synced by construction, but a database that predates
   it needs a one-time manual reset (delete the file, let the next sweep
   rescan) before that guarantee holds, since a pre-existing `books` row
-  never passes through `syncBookFTSTx` on its own. `SearchBooks(ctx, query)`
-  joins against it and orders by `sort_title`, not relevance — see
-  `internal/web` below for why. `MatchedSearchFields(ctx, query)` reports
+  never passes through `syncBookFTSTx` on its own.
+  `SearchBooks(ctx, query, page)` joins against it and orders by
+  `(sort_title, id)`, not relevance — see `internal/web` below for why the
+  ordering ignores relevance, and `BookPage` above for why the `id`
+  tie-break is load-bearing rather than cosmetic: the paging cursor
+  depends on the ordering being total. `MatchedSearchFields(ctx, query)` reports
   which of the four columns produced hits, for the results line that names
   them; it is one round trip of four `EXISTS`, each scoped with FTS5's
   `{col} : (expr)` filter — the parentheses are load-bearing, since
@@ -880,8 +883,10 @@ full design.
   represents, zero rows in `book_files` being the exceptional one orphan-
   pruning is meant to prevent. `SearchBooks` sanitizes via
   `storage.SanitizeFTSQuery` first and returns
-  a `SearchResult` — the books, whether a search actually ran, and which
-  indexed fields matched. A query that sanitizes to nothing is treated as
+  a `SearchResult` — one page of books, whether a search actually ran,
+  which indexed fields matched, how many books matched in total
+  (`MatchCount`, which `Books` no longer tells you now that it holds a
+  bounded page) and where the next page starts (`Next`). A query that sanitizes to nothing is treated as
   `ListBooks`, so the empty search box and a freshly-loaded page are the
   same state and callers don't special-case it; `Searched` reports which
   of the two happened, because "sanitizes to nothing" is wider than "looks
