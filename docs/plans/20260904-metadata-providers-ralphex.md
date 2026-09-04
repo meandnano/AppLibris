@@ -238,21 +238,21 @@ keep the key out of logs.
 
 ### Task 4: Rate-limit, cache and retry decorators
 
-- [ ] add `WithRateLimit(p Provider, every time.Duration) Provider` —
+- [x] add `WithRateLimit(p Provider, every time.Duration) Provider` —
       ticker-gated, honouring `ctx` cancellation while waiting, with a
       conservative default in a named constant noting Open Library's
       courtesy limits
-- [ ] add `WithCache(p Provider, size int) Provider` — keyed by the lookup
+- [x] add `WithCache(p Provider, size int) Provider` — keyed by the lookup
       arguments, bounded, in-memory, caching the "no match" answer too
-- [ ] add `WithRetry(p Provider, attempts int) Provider` — retrying only
+- [x] add `WithRetry(p Provider, attempts int) Provider` — retrying only
       the 429/5xx/transport cases, never a "no match", with a backoff and
       a `ctx` check between attempts
-- [ ] write tests against a fake `Provider`, no HTTP: rate limit paces
+- [x] write tests against a fake `Provider`, no HTTP: rate limit paces
       calls and returns promptly on a cancelled context; cache serves a
       repeat without a second call, including for "no match"; retry
       retries a 5xx, does not retry a "no match", and stops on
       cancellation
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 5: Registry, `METADATA_PROVIDERS` and `cmd/server` wiring
 
