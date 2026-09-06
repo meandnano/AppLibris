@@ -848,9 +848,12 @@ full design.
   both ways — and `thumbnail` is ~195px on the long edge, under
   `internal/cover`'s 400px target, which never upscales. `small` through
   `extraLarge` exist only on `GET /volumes/{id}`, so `enrichVolume` asks
-  it for any volume that matched and named an id — not only one that has a
-  cover, since skipping a coverless volume would be free on the cover half
-  and would silently drop the description half — and takes the detail
+  it for any volume that matched and named an id, and refuses a reply whose
+  own `id` is not that one — an absent `id` included, since letting `""`
+  pass would leave the check opt-out by the party being checked, and every
+  capture shows the real endpoint always sends one. Any volume, not only one
+  that has a cover: skipping a coverless one would be free on the cover
+  half and would silently drop the description half. It takes the detail
   response's description while it is there. That description is often
   different, fuller text rather than the same text differently punctuated;
   its paragraph breaks reach the column but **not the page**, since
@@ -955,6 +958,22 @@ full design.
   configured. Both packages are tested against
   `httptest.Server` with fixtures under `testdata`, and those fixtures
   have two provenances worth telling apart when reading a failure.
+  `internal/googlebooks` also refuses a redirect that **leaves the host the
+  lookup started against**, which `internal/openlibrary`'s otherwise
+  identical `checkRedirect` does not have. The reason is a credential, not
+  a hop count: this client carries its key in the query string, and
+  net/http sets `Referer` on every hop from the previous request's full
+  URL — suppressing it only on https→http, so an ordinary https→https
+  redirect hands `?key=…` to whichever host answered, in a header. That is
+  worse than the log-line leak `redactKey` exists to prevent, and moving
+  the key to a header would not substitute for it, since Go forwards
+  non-sensitive headers across hosts. The same check closes two more: a
+  redirect off Google would otherwise make this client adopt the answering
+  host's whole response, which on the list request `plausibleMatch` gates
+  only by title and author — both supplied by that host — and on the
+  detail request nothing gates at all. A refused redirect is still
+  classified retryable in both clients, which
+  `docs/backlog/2026090611-refused-redirect-is-retried.md` records.
   `internal/openlibrary`'s two `edition_*.json` are **live captures** of
   the Read API — they are what turned up the work-versus-edition defects
   `ByISBN` moved endpoint to fix, and the bare-`[]` no-match, neither of

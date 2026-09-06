@@ -30,8 +30,11 @@ import (
 //   - volumes_match.json — GET /volumes?q=isbn:9780547928227&maxResults=1
 //   - volumes_search_match.json — the intitle:/inauthor: fallback's shape
 //   - volumes_no_match.json — an ISBN the API knows nothing about
-//   - volumes_detail.json — GET /volumes/{id}, the *other* endpoint, kept
-//     as the evidence that the larger imageLinks sizes live only there
+//   - volumes_pair_list.json and volumes_detail.json — one volume
+//     (M1t9BgAAQBAJ) from both endpoints, which is what makes them a pair:
+//     the evidence that the larger imageLinks sizes and the HTML
+//     description live only on the single-volume one, and the only shape
+//     enrichVolume's id check will merge
 //   - volumes_regional_language.json — a pt-BR volume, the language tag
 //     Google really answers with
 //   - volumes_wrong_edition.json — a Portuguese-titled volume Google
@@ -662,7 +665,7 @@ func TestListResponseCoverURLIsTheUpgradedThumbnail(t *testing.T) {
 // enrich.MaxCoverBytes, where the cover is refused outright rather than
 // downsized. The http URLs Google answers with are upgraded to https,
 // since these bytes end up served from /covers/.
-func TestCoverURLPrefersTheSmallestLinkOverTheTargetAndUpgradesToHTTPS(t *testing.T) {
+func TestCoverURLPrefersMediumAndUpgradesToHTTPS(t *testing.T) {
 	cases := []struct {
 		name  string
 		links imageLinks
@@ -1219,7 +1222,14 @@ func TestDetailResponseWithoutImageLinksKeepsTheListCover(t *testing.T) {
 // empty value — so the field is simply lost, and with the default provider
 // order Google is last, so nothing recovers it.
 func TestWhitespaceOnlyDetailDescriptionKeepsTheListOne(t *testing.T) {
-	for _, blank := range []string{`"   "`, `"\n"`, `"\n\n  "`, `"<br>"`, `""`} {
+	blanks := []string{
+		`"   "`, `"\n"`, `"\n\n  "`, `"<br>"`, `""`,
+		`"\u00a0"`,     // a non-breaking space, which TrimSpace does handle
+		`"&#8203;"`,    // a zero-width space, which it does not
+		`"\ufeff"`,     // a byte-order mark arriving as content
+		`"&#8203; \n"`, // and mixed with ordinary whitespace
+	}
+	for _, blank := range blanks {
 		t.Run(blank, func(t *testing.T) {
 			client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(w, `{"id":%q,"volumeInfo":{"description":%s}}`, pairVolumeID, blank)
@@ -1398,6 +1408,13 @@ func TestCheckRedirect(t *testing.T) {
 	if err := checkRedirect(hop("file:///etc/passwd"), nil); err == nil {
 		t.Error("a file:// hop was allowed")
 	}
+	started := []*http.Request{hop("https://www.googleapis.com/books/v1/volumes?key=secret")}
+	if err := checkRedirect(hop("https://elsewhere.example/volumes"), started); err == nil {
+		t.Error("a cross-host hop was allowed; net/http would send it the key in Referer")
+	}
+	if err := checkRedirect(hop("https://www.googleapis.com/books/v1/volumes/abc"), started); err != nil {
+		t.Errorf("a same-host hop was refused: %v", err)
+	}
 	via := make([]*http.Request, maxRedirects)
 	if err := checkRedirect(hop("https://books.example/next"), via); err == nil {
 		t.Errorf("hop %d was allowed; without a bound the chain runs forever", maxRedirects+1)
@@ -1500,5 +1517,96 @@ func TestDetailRequestEscapesTheVolumeID(t *testing.T) {
 	}
 	if len(q) != 1 {
 		t.Errorf("query = %v, want only the key — the id added parameters of its own", q)
+	}
+}
+
+// net/http sets Referer on every redirect hop from the previous request's
+// full URL, and this client's URL carries "?key=…". It suppresses that only
+// on https→http, so an ordinary https→https redirect hands the credential
+// to whichever host answered — in a header, to a third party, which is
+// worse than the log-line leak redactKey exists to prevent. The host check
+// is what stops it, and this asserts the leak by watching for it rather
+// than by trusting the policy's own unit test.
+func TestARedirectOffTheAPIHostNeverCarriesTheKey(t *testing.T) {
+	const key = "SUPERSECRETKEY"
+
+	var foreignSaw []string
+	foreign := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignSaw = append(foreignSaw, r.Header.Get("Referer")+"|"+r.URL.RawQuery)
+		w.Write([]byte(`{"totalItems":1,"items":[{"id":"x","volumeInfo":{"title":"Foreign","description":"A different book entirely."}}]}`))
+	}))
+	t.Cleanup(foreign.Close)
+
+	home := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, foreign.URL+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(home.Close)
+
+	httpClient := foreign.Client()
+	httpClient.CheckRedirect = checkRedirect
+	client := &Client{baseURL: home.URL, apiKey: key, httpClient: httpClient}
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err == nil {
+		t.Fatal("ByISBN: want an error when the lookup is redirected off its host")
+	}
+	if strings.Contains(err.Error(), key) {
+		t.Errorf("the error text leaks the API key: %v", err)
+	}
+	for _, saw := range foreignSaw {
+		t.Errorf("the foreign host was reached at all, and saw %q", saw)
+	}
+	// And nothing the foreign host said was adopted.
+	if got.Title != "" || got.Description != "" {
+		t.Errorf("adopted the foreign host's answer: %+v", got)
+	}
+}
+
+// A detail body with no id at all must be refused like one naming the wrong
+// volume: treating "" as a pass lets the party being checked opt out of the
+// check. Every capture under testdata carries an id, so nothing legitimate
+// is turned away.
+func TestDetailBodyWithoutAnIDIsRefused(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"volumeInfo":{
+			"description":"<p>A different book entirely.</p>",
+			"imageLinks":{"large":"https://elsewhere.example/wrong.jpg"}}}`))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	assertListAnswerIntact(t, got)
+}
+
+// The 4 MiB cap is the only bound on how much a misbehaving or hijacked
+// upstream can make this process allocate on the detail path.
+func TestDetailResponseIsBounded(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		// Valid JSON far past the cap, so a missing LimitReader parses
+		// happily and only the bound can refuse it.
+		fmt.Fprintf(w, `{"id":%q,"volumeInfo":{"description":%q}}`,
+			pairVolumeID, strings.Repeat("x", maxResponseBytes+1024))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	assertListAnswerIntact(t, got)
+}
+
+// The same bound on the list path. Pinned alongside the detail one rather
+// than left to symmetry: an untested cap is one an edit can drop silently,
+// and this is the response a hijacked or misbehaving upstream controls.
+func TestListResponseIsBounded(t *testing.T) {
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"totalItems":1,"items":[{"id":"abc","volumeInfo":{"description":%q}}]}`,
+			strings.Repeat("x", maxResponseBytes+1024))
+	})
+
+	if _, err := client.ByISBN(context.Background(), "9780547928227"); err == nil {
+		t.Fatal("ByISBN: want an error for a response past maxResponseBytes")
 	}
 }

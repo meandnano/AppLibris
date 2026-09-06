@@ -29,10 +29,8 @@ import (
 // provider can occupy the queue for several multiples of this.
 //
 // Left as a per-request bound rather than tightened, because the worker is
-// single and the queue has nothing waiting behind it that a deadline would
-// rescue — but stated, since "bounds one lookup end to end" is what this
-// said while it was true of one request, and it is the kind of premise
-// that goes stale silently. Sized short for the same reason
+// single and the queue has nothing waiting behind it that a whole-lookup
+// deadline would rescue. Sized short for the same reason
 // internal/openlibrary's is: enrichment is a background nicety, not
 // something a person is waiting on.
 const Timeout = 8 * time.Second
@@ -63,23 +61,41 @@ const maxResponseBytes = 4 * 1024 * 1024
 // checked the scheme would follow a redirect chain forever.
 const maxRedirects = 5
 
-// checkRedirect mirrors internal/openlibrary's policy of the same name, and
-// through it enrich.CheckCoverRedirect: bounded hops, every hop's scheme
-// checked rather than only the first URL's, since each one after the first
-// is chosen by whatever host answered rather than by this package.
+// checkRedirect bounds a lookup's hops and refuses one that leaves the host
+// the lookup started against. It is internal/openlibrary's policy of the
+// same name plus the host check, which that one does not have.
 //
-// It matters most on the detail request. Its path segment is built from an
-// id that arrived in a remote response, and unlike the list request its
-// entire output — a cover URL and a description — is taken from whatever
-// answers, with no further validation: plausibleMatch checks the Title and
-// Authors of the *list* response, so a foreign body reached by a redirect
-// would bypass the gate entirely.
+// The host check is the load-bearing half, and the reason is a credential
+// rather than a hop count. This client carries its API key in the query
+// string, and net/http sets Referer on every hop from the previous
+// request's full URL — suppressing it only on https→http, so an ordinary
+// https→https redirect hands "?key=…" to whatever host answered, in a
+// header. That is worse than the log-line leak the whole redactKey
+// apparatus exists to prevent: a key in a log stays on the box.
+//
+// It closes two more holes at the same time. A redirect off Google makes
+// this client adopt the answering host's entire response — and on the list
+// request enrich.plausibleMatch would gate only its title and authors,
+// which that host supplies. On the detail request nothing gates it at all.
+//
+// Refusing outright costs nothing measurable: neither the Volumes API nor
+// Google's cover host was observed to redirect cross-host. Moving the key
+// to a header would not substitute for this, since Go forwards
+// non-sensitive headers across hosts.
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
 	}
 	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
 		return fmt.Errorf("redirect scheme %q is not http or https", req.URL.Scheme)
+	}
+	// Compared against via[0], the request this lookup made, rather than
+	// the previous hop. The two are equivalent — every hop is checked, so
+	// the host can never change and the previous hop's host is always the
+	// first's — but via[0] states the invariant the policy actually has:
+	// a lookup never leaves the host it started against.
+	if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+		return fmt.Errorf("redirect to %q leaves the host the lookup started against", req.URL.Host)
 	}
 	return nil
 }
@@ -362,18 +378,26 @@ func (c *Client) enrichVolume(ctx context.Context, id string, m *enrich.Metadata
 	// A body describing some other volume is not an answer about this
 	// book, and nothing downstream would catch it: plausibleMatch gates
 	// the Title and Authors of the *list* response, while the two fields
-	// taken here come from this one. The id was ours to begin with, so a
-	// mismatch means a redirect or a substitution rather than an ordinary
-	// miss — worth refusing rather than merging.
-	if detail.ID != "" && detail.ID != id {
+	// taken here come from this one.
+	//
+	// An absent id is refused along with a wrong one. Treating "" as a
+	// pass would let the party being checked opt out of the check by
+	// omitting the field, and the real endpoint always answers with one —
+	// every capture under testdata carries it — so requiring it costs a
+	// response shape Google does not send.
+	if detail.ID != id {
 		slog.Debug("googlebooks: volume detail names a different volume", "requested", id, "answered", detail.ID)
 		return
 	}
 
-	// Each field is replaced only by a better answer, never by an absent
-	// one: this endpoint returns "" for a description plenty of volumes
-	// have on the list one, and the cover comparison guards the same shape
-	// against a list endpoint that someday names a size this one lacks.
+	// Each field is replaced only by a present answer, never by an absent
+	// one — this endpoint returns "" for a description plenty of volumes
+	// have on the list one. Present, not better: neither check compares
+	// sizes or quality, so if the list endpoint ever named a size above
+	// thumbnail, a detail response naming only thumbnail would replace it
+	// with the smaller one. Unreachable today, and stated rather than
+	// guarded because guarding it would be code with no way to test it
+	// against the real API.
 	if cover := detail.VolumeInfo.ImageLinks.best(); cover != "" {
 		m.CoverURL = cover
 	}
@@ -562,7 +586,7 @@ func plainText(raw string) string {
 		// would otherwise read a description of "   " as an answer and
 		// overwrite a real one with whitespace that sanitizeValue then
 		// trims to nothing, losing the field outright.
-		return strings.TrimSpace(raw)
+		return trimBlank(raw)
 	}
 
 	var b strings.Builder
@@ -588,7 +612,22 @@ func plainText(raw string) string {
 	}
 
 	text := html.UnescapeString(b.String())
-	return strings.TrimSpace(collapseBlankLines(text))
+	return trimBlank(collapseBlankLines(text))
+}
+
+// zeroWidth are the characters that carry no ink and that unicode.IsSpace
+// does not call space, so strings.TrimSpace leaves them behind. A
+// description of nothing but one of them — "&#8203;" unescapes to exactly
+// that — would otherwise read as an answer to every "is this empty" test
+// between here and the column, and overwrite a real description with a
+// value that renders as nothing.
+const zeroWidth = "\u200b\u200c\u200d\ufeff"
+
+// trimBlank is strings.TrimSpace widened to the zero-width characters, so
+// "blank" here means "renders as nothing" rather than "is Unicode
+// whitespace".
+func trimBlank(s string) string {
+	return strings.Trim(s, " \t\n\v\f\r\u0085\u00a0"+zeroWidth)
 }
 
 // tagAt reports the index just past the tag starting at raw[i] (which the
