@@ -6,10 +6,12 @@ import (
 )
 
 const (
-	// maxISBNDigits is ISBN-13's length. A partial query carrying more
-	// digits than a whole ISBN has is not an ISBN being typed, whatever its
-	// punctuation.
-	maxISBNDigits = 13
+	// isbn10Length and isbn13Length are what a complete ISBN measures once
+	// hyphens and spaces are stripped, ISBN-10's trailing X counted as one
+	// of its ten characters.
+	isbn10Length = 10
+	isbn13Length = 13
+
 	// minPartialISBNHyphens is what keeps "1984-2001" a title query. A
 	// hyphenated ISBN has at least four groups — prefix, registration
 	// group, registrant, publication, check digit — so by the time one is
@@ -17,6 +19,13 @@ const (
 	// two separators, while a two-group numeric query is a date range, a
 	// year pair or a volume number far more often than an identifier.
 	minPartialISBNHyphens = 2
+
+	// minPartialISBNDigits keeps a short three-group number — "9-1-1",
+	// "1-2-3", both of which title books — a title query, which the hyphen
+	// count alone does not. It costs the ISBN path nothing: four digits is
+	// what "978-0-" already carries, and no shorter prefix filters a
+	// library down to anything worth looking at.
+	minPartialISBNDigits = 4
 )
 
 // SanitizeFTSQuery turns raw user input into a valid FTS5 MATCH expression.
@@ -36,7 +45,7 @@ const (
 //
 // A query about an ISBN is normalized to bare digits instead of taking that
 // per-word path — see normalizeIfISBNShaped for the two shapes that
-// qualify. internal/epub normalizes a stored ISBN to bare digits but
+// qualify. internal/epub normalizes a stored ISBN to bare digits, but
 // internal/fb2 does not, so the isbn column can hold either "9780857059985"
 // or "978-0-85705-998-5" depending on which parser found it. Matching a
 // query shaped either way against storage shaped either way needs both
@@ -77,19 +86,16 @@ func SanitizeFTSQuery(input string) string {
 }
 
 // normalizeIfISBNShaped reports whether input is a query about an ISBN, and
-// its bare-digit form if so. Two shapes qualify:
+// its bare-digit form if so: either a complete one however punctuated —
+// what a paste produces — or a hyphenated one partway through being typed.
+// Each shape is defined by the function that implements it.
 //
-//   - a complete ISBN however punctuated, which is what a paste produces:
-//     exactly 10 or 13 characters once hyphens and spaces are stripped, a
-//     trailing X permitted;
-//   - a hyphenated ISBN partway through being typed: digits and hyphens
-//     only, at least minPartialISBNHyphens of them, no more than
-//     maxISBNDigits digits in total.
-//
-// The complete shape is tried first, since it is the only one that accepts
-// the check character and the space-separated form.
+// Which is tried first is immaterial rather than load-bearing: an input
+// both accept is all digits and hyphens, so both return the same string.
+// What matters is that the complete shape is tried at all, since it alone
+// accepts a trailing X, a space-separated ISBN, and one written with fewer
+// hyphens than a partial needs ("978085705-9985").
 func normalizeIfISBNShaped(input string) (string, bool) {
-	input = strings.TrimSpace(input)
 	if isbn, ok := completeISBNShaped(input); ok {
 		return isbn, true
 	}
@@ -101,8 +107,8 @@ func normalizeIfISBNShaped(input string) (string, bool) {
 // are stripped — the same shape internal/epub's own bare-ISBN detection
 // accepts — returned stripped and upper-cased.
 func completeISBNShaped(input string) (string, bool) {
-	stripped := strings.NewReplacer("-", "", " ", "").Replace(input)
-	if len(stripped) != 10 && len(stripped) != 13 {
+	stripped := strings.NewReplacer("-", "", " ", "").Replace(strings.TrimSpace(input))
+	if len(stripped) != isbn10Length && len(stripped) != isbn13Length {
 		return "", false
 	}
 	for i, r := range stripped {
@@ -118,19 +124,27 @@ func completeISBNShaped(input string) (string, bool) {
 }
 
 // partialISBNShaped accepts a hyphenated ISBN still being typed, so that the
-// results don't go empty between the first character and the last.
+// results stop going empty from the second hyphen onward. Digits and
+// hyphens only, within the bounds the constants above set: no more digits
+// than a whole ISBN-13 has, and enough hyphens and digits that the query is
+// an identifier rather than a number a title happens to contain. A trailing
+// hyphen is accepted, being what is on screen halfway between two groups.
+//
+// The cost this shape does not avoid is a three-group number long enough to
+// clear the digit floor — an ISO-style date, "2026-09-06", is read as an
+// ISBN prefix and no longer finds a title carrying it. Telling that from an
+// identifier needs the number's meaning rather than its punctuation, and
+// the population this exists for types the hyphens printed on a book.
 //
 // A space is deliberately not accepted here, where the complete shape does
 // strip one: the space is the token separator for the entire rest of the
-// search box, so reading "1984 2001" as one seventeen-digit number would
-// break a legitimate two-term query to serve an input nobody produces — a
-// person typing an ISBN by hand types the hyphens printed on the book. A
-// trailing hyphen is accepted, being what the same person has on screen
-// halfway between two groups.
+// search box, so a pair of hyphenated groups typed either side of one
+// ("1984-85 2000-01") would collapse into a single twelve-digit query
+// instead of the two terms the person typed.
 func partialISBNShaped(input string) (string, bool) {
 	var digits strings.Builder
 	hyphens := 0
-	for _, r := range input {
+	for _, r := range strings.TrimSpace(input) {
 		switch {
 		case r >= '0' && r <= '9':
 			digits.WriteRune(r)
@@ -140,7 +154,14 @@ func partialISBNShaped(input string) (string, bool) {
 			return "", false
 		}
 	}
-	if hyphens < minPartialISBNHyphens || digits.Len() == 0 || digits.Len() > maxISBNDigits {
+	if hyphens < minPartialISBNHyphens {
+		return "", false
+	}
+	// The cap only ever refuses fourteen digits and up: a 13-digit query of
+	// digits and hyphens strips to a complete ISBN, so completeISBNShaped
+	// has already taken it and nothing reaching here carries more than
+	// twelve.
+	if digits.Len() < minPartialISBNDigits || digits.Len() > isbn13Length {
 		return "", false
 	}
 	return digits.String(), true
