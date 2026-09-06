@@ -494,7 +494,126 @@ full design.
   order, each only for what's still missing at the time it's asked; once
   the missing set is empty the loop stops without calling the rest — an
   explicit test asserts the un-called provider really is never
-  called, not just that its answer goes unused. A provider erroring is
+  called, not just that its answer goes unused.
+  Each provider is asked **by ISBN when the book has one, by title and
+  author otherwise** — and, since a clean ISBN no-match means that
+  catalogue simply lacks the edition, the same provider is then asked by
+  title in the same iteration. An ISBN *error* deliberately does **not**
+  fall back: a 5xx says nothing about whether the ISBN is right, and
+  searching on it would accept a fuzzy answer because a host was briefly
+  unreachable. A cover-only reply is an answer rather than a no-match
+  (`Metadata.IsEmpty` counts `CoverURL`), so nothing searches past one; a
+  book with no title never searches at all, since the gate below would
+  reject whatever came back.
+  A `Search`-sourced answer must clear `plausibleMatch` (`match.go`) before
+  any of it is merged, where a `ByISBN` answer never is — an ISBN names one
+  edition, so that answer is about this book by construction, and gating it
+  would reject correct data over a differing title string. The gate is
+  **title match required, author overlap a veto and never a pass**: both
+  providers bind the author into the query, so an author match only
+  confirms they honoured a constraint this package supplied and says
+  nothing about which of that author's books the ranking put first —
+  "titles match *or* authors match" accepts any Stephen King novel for any
+  Stephen King file. Overlap is only consulted when both sides have
+  authors, an authorless answer being silence rather than disagreement.
+  Titles are compared as **delimited segments**, not as substrings and not
+  as bare token runs. A title is split at `:;,()[]{}—–/|`, and at `-.?!`
+  only when the separator also carries whitespace — each of those has a
+  word-internal meaning a bare occurrence usually intends, so `" - "` is a
+  dash while `"Twenty-One"` is a compound, and `". "` ends a segment while
+  `"J.R.R."` does not. The period is there for the Russian
+  `"Series. Title"` convention, the population DESIGN.md names as the
+  reason this path exists; its cost is that an abbreviation splits a title
+  (`"No"` matches `"Dr. No"`), the same over-match this design accepts
+  elsewhere and which `maxSegments` still keeps away from a contents list.
+  Two titles match when their segments agree
+  pairwise, or when a one-segment title equals a segment of a title with at
+  most **`maxSegments` (2)** parts.
+  Three rules, each of which a cheaper version gets wrong:
+  whole words rather than substrings, so "It" does not match "Italy";
+  *delimited*, because that is the only thing separating a subtitle from a
+  sequel — "The Hobbit" stands behind a `:` in "The Hobbit: 75th
+  Anniversary Edition" and behind nothing but a space in "The Hobbit
+  Companion"; and *at most two segments*, because a delimited segment alone
+  would make "Hamlet" match "Shakespeare: Hamlet, Othello, Macbeth" — a
+  contents list is not a subtitle. The author veto rescues neither case: a
+  sequel and a collected edition both share their author, which is why the
+  title rule carries the whole weight, and why one-word and series titles —
+  common in exactly the sparse no-ISBN population this path serves — are
+  the shapes to test against. The matched segment may be any of the two, so
+  a series-prefixed answer ("The Lord of the Rings: The Fellowship of the
+  Ring") matches on its last; there is deliberately no separate
+  first-or-last test, since at two segments every segment already touches
+  an end and the branch would be untestable.
+  **A known limit, recorded rather than left to be discovered:** a
+  two-segment answer whose second part *describes* the book still matches,
+  so "The Hobbit" accepts "The Hobbit: A Study Guide" — a different book
+  with its own publisher and cover. Separating an edition note from a
+  companion volume needs the words' meaning, not their punctuation. The
+  three-segment form ("Tolkien: The Hobbit: A Reader's Guide") is refused
+  by `maxSegments`.
+  Text is case-*folded* (`cases.Fold`, not `strings.ToLower`, which maps
+  `Σ`→`σ` unconditionally and would never match natively-written Greek
+  ending in `ς`), then NFD with combining marks dropped — so decomposed
+  text, which is what macOS filenames and therefore `filenameTitle` produce
+  for these very books, equals composed text, and diacritics fold away to
+  match `books_fts`'s own `remove_diacritics 2`. Spacing marks (`Mc`/`Me`)
+  *continue* a word rather than splitting it, or Indic vowel signs shred a
+  title into one-letter fragments that collide across unrelated books. One
+  leading English article is optional **per segment**, not per title: an
+  article is redundant at a segment's edge, and a segment is not always at
+  its title's edge — "The Fellowship of the Ring" sits inside "The Lord of
+  the Rings: …" with its own article intact.
+  `maxTitleTokens` (64) refuses an absurd title outright rather than
+  comparing it: the matcher is quadratic and runs on a provider's *raw*
+  title, before `sanitizeValue` caps anything, while a provider client
+  bounds only the whole response at megabytes.
+  **Where the code and plan `2026090602` disagree, CLAUDE.md is right.**
+  That plan's Decision 2 specifies plain contiguous-run containment; what
+  shipped requires a *delimited* run and bounds the answer to
+  `maxSegments`, because review found plain containment matched a sequel
+  and then a collected edition — `Dune`/`Dune Messiah`,
+  `Hamlet`/`Shakespeare: Hamlet, Othello, Macbeth` — neither of which the
+  author veto can catch. A completed plan is immutable, so the supersession
+  is recorded here rather than there.
+  `internal/enrich/match.go` is the one file in the package that imports
+  outside the standard library — `golang.org/x/text` for `cases.Fold` and
+  NFD. Its plan (`2026090602`) said the file would import nothing beyond
+  `strings`, `unicode` and the package's own types, and that was written
+  before the folding defects were known; the deviation is recorded here
+  because a completed plan is immutable. It adds no module to the build:
+  `golang.org/x/text` was already present at the same version as an
+  indirect dependency of `golang.org/x/image`, which `internal/cover` uses
+  directly. Neither piece can be hand-rolled — composing or decomposing
+  needs the Unicode tables, and stripping marks alone leaves NFD text
+  unable to match NFC text, since a composed `é` is a single non-mark
+  rune.
+  A rejected answer is treated as a no-match, not a
+  failure — the chain continues with the missing set otherwise intact (only
+  `isbn` has left it, above), no provenance recorded and no cover taken, and `Failed` unchanged; the rejection is
+  logged at `Debug` with a `reason` (`title_mismatch` or `author_veto`),
+  since an author veto otherwise shows two titles that look like a fine
+  match and says nothing about why it was refused. The accepting line is
+  `Info` and is emitted **after** the merge, only when the answer actually
+  contributed — it exists to explain a field's value, and an accepted
+  answer that filled nothing explains none.
+  It rejects most filename-titled books on purpose: an empty
+  field is recoverable, while a plausible wrong answer is written,
+  provenanced and never reconsidered.
+  A `Search`-sourced answer additionally **never fills `isbn`**, even
+  having cleared the gate, because that field is the lookup key every later
+  run uses and an identifier has no partial credit. It is withheld by
+  dropping `isbn` from the missing set as soon as the search path is taken,
+  one line doing two jobs: it is also what lets the **early stop** fire for
+  a book with no ISBN, since a field that can never be filled would
+  otherwise keep the set non-empty and spend a call on every remaining
+  provider, on every run. Moving or removing that line re-opens the write,
+  not just the wasted request. The consequence is
+  worth stating because it reads as a bug otherwise: **enrichment can no
+  longer write `isbn` by any route at all.** The field is only ever missing
+  for a book that has none, such a book can only reach a provider through
+  `Search`, and there the value is withheld — while a book that has one
+  does not need it. Three tests pin it. A provider erroring is
   logged and skipped, indistinguishable (deliberately — see above) from
   one abandoned by a cancelled `ctx`; either way the chain continues, and
   neither is `Resolve`'s own failure to report. A book's authors are
@@ -614,7 +733,14 @@ full design.
   check-digit `X` upper-cased — duplicated rather than imported, the same
   choice `internal/storage`'s own copy makes) so a lookup key round-trips;
   `Search` is the title/first-author fallback the resolver uses when a
-  book has no ISBN.
+  book has no ISBN, and now also when an ISBN lookup comes back a clean
+  no-match. Both clients still return their **top hit unchecked**
+  (`parsed.Docs[0]`, `parsed.Items[0]`) — deliberately: judging whether a
+  ranking's first result is the book in hand is `internal/enrich`'s
+  `plausibleMatch`, which lives there because it is the one place that
+  knows *which path it chose*, a fact a provider cannot know about itself,
+  and because DESIGN.md wants the merge logic testable without any real
+  provider.
   Open Library models a **work** (the book as written) separately from an
   **edition** (one publication of it), and the two `internal/openlibrary`
   paths hit different endpoints because of it — the distinction that

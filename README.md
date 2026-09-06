@@ -76,6 +76,14 @@ for, on a book you chose. If no provider could answer, the run is
 reported as failed with a Retry button rather than as nothing found — a
 throttled API and an unknown book are not the same answer.
 
+A book with no ISBN is looked up by title and author instead, and an
+answer that doesn't plausibly match the book is discarded rather than
+written — so a file named `01 - Fellowship` reports "nothing to add"
+instead of acquiring some other book's publisher and cover. That is the
+common outcome for files whose titles came from their filenames, and it is
+the intended one: an empty field can still be filled by hand or by a later
+run, where a wrong one is recorded as though it were known.
+
 `METADATA_PROVIDERS` (default `openlibrary,googlebooks`) lists which
 providers to use and in what order. Set it to an empty value
 (`METADATA_PROVIDERS=`) to disable enrichment outright and make no

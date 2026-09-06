@@ -202,15 +202,34 @@ type Resolution struct {
 // testable without a real provider, per DESIGN.md.
 //
 // If nothing is missing, no provider is called at all. Otherwise providers
-// are asked in the given order; each is asked by ISBN when book has one,
-// by title and author otherwise. Only the fields still missing that a
-// provider actually answered are kept, each recorded under that provider's
-// Name() in sourceName — a provider cannot supply a value for a field that
-// isn't missing, or overwrite a field an earlier provider in the same run
-// already answered. Once nothing is left missing, the loop stops without
-// calling the remaining providers — DESIGN.md's "the chain stops early and
-// saves the API calls" — which is why a two-provider test where the first
-// answers everything must show the second is never called.
+// are asked in the given order. Each is asked by ISBN when book has one and
+// by title and author otherwise — and, when an ISBN lookup comes back a
+// clean no-match, by title as well, on the same provider before the chain
+// moves on: a catalogue that does not hold that edition may still hold the
+// book. An ISBN lookup that *errors* is not followed up, since a 5xx says
+// nothing about whether the ISBN is right.
+//
+// Only the fields still missing that a provider actually answered are kept,
+// each recorded under that provider's Name() in SourceName — a provider
+// cannot supply a value for a field that isn't missing, or overwrite a field
+// an earlier provider in the same run already answered. Two rules narrow
+// that further, and both apply to answers reached by title rather than by
+// ISBN, since those are whatever a remote ranking put first for a title that
+// is frequently the filename:
+//
+//   - the answer must clear plausibleMatch (see match.go) before any of it
+//     is merged, and one that does not is treated as a no-match — nothing
+//     kept, no provenance recorded, no cover taken, and the chain carries
+//     on to the next provider;
+//   - isbn is never filled from such an answer, which is enforced by
+//     dropping it from the missing set as soon as the title path is taken.
+//     That one line also lets the early stop fire for a book with no ISBN,
+//     so moving it re-opens the write as well as the wasted call.
+//
+// Once nothing is left missing, the loop stops without calling the
+// remaining providers — DESIGN.md's "the chain stops early and saves the
+// API calls" — which is why a two-provider test where the first answers
+// everything must show the second is never called.
 //
 // A provider returning an error is logged and skipped; the chain continues
 // to the next one. That is deliberately not this function's failure to
@@ -250,14 +269,54 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 		}
 
 		var (
-			answer Metadata
-			perr   error
+			answer    Metadata
+			perr      error
+			viaSearch bool
 		)
-		res.Asked++
+		// Asked counts providers this run actually called, so it is
+		// incremented inside each calling branch rather than above them: a
+		// book with neither an ISBN nor a title calls nobody, and counting
+		// it would report a run as broader than it was — the invariant the
+		// worker's Asked > 0 && Failed == Asked rule rests on.
 		if book.ISBN != "" {
+			res.Asked++
 			answer, perr = p.ByISBN(ctx, book.ISBN)
-		} else {
+			// A clean no-match means this catalogue does not hold that
+			// edition, and the title is still worth asking about — subject
+			// to the gate below. An *error* is not a no-match: it says
+			// nothing about the ISBN, and falling back on it would accept
+			// a fuzzy answer because a host was briefly unreachable.
+			if perr == nil && answer.IsEmpty() && book.Title != "" {
+				answer, perr = p.Search(ctx, book.Title, authors)
+				viaSearch = true
+			}
+		} else if book.Title != "" {
+			res.Asked++
 			answer, perr = p.Search(ctx, book.Title, authors)
+			viaSearch = true
+		}
+		if viaSearch {
+			// Dropping isbn from the missing set is what withholds it, and
+			// it does two jobs at once — so moving or removing this line
+			// re-opens the write, not just the early stop.
+			//
+			// A search answer must never supply an ISBN, even having passed
+			// the gate below. Every other field is a description that is
+			// roughly right or roughly wrong; an ISBN is an identifier that
+			// either names this book or names a different one, and it is the
+			// lookup key every later run would use — so a wrong one compounds
+			// instead of sitting still. And because the field can never be
+			// filled from here, leaving it in the set would mean the set
+			// never empties for a book without an ISBN: every such book would
+			// spend a call and a rate-limit token on every remaining provider,
+			// on every run, for a field none of them may answer.
+			//
+			// The consequence is worth stating because it reads as an
+			// oversight otherwise: enrichment cannot write isbn by any route.
+			// The field is only ever missing for a book that has none, such a
+			// book can only reach a provider through Search, and a book that
+			// has one does not need it.
+			delete(missing, storage.FieldISBN)
 		}
 		if perr != nil {
 			res.Failed++
@@ -265,6 +324,27 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			continue
 		}
 
+		// An ISBN names one edition, so a ByISBN answer is about this book
+		// by construction. A search answer is whatever the provider's
+		// ranking put first for a title that is often the filename, so it
+		// has to earn the merge. A rejected answer is treated as no match —
+		// the ordinary zero Metadata — so the chain continues to the next
+		// provider with the missing set otherwise intact — isbn has already
+		// left it above, which is why "intact" is not quite the word.
+		if viaSearch && !answer.IsEmpty() {
+			if ok, reason := plausibleMatch(book.Title, authors, answer); !ok {
+				// The reason matters: an author veto shows two titles that
+				// look like a fine match and says nothing about why it was
+				// refused, so without it the two rejection causes are
+				// indistinguishable in the record.
+				slog.Debug("enrichment search answer rejected", "provider", p.Name(),
+					"book_id", book.ID, "reason", reason, "query_title", book.Title,
+					"candidate_title", answer.Title, "candidate_authors", answer.Authors)
+				continue
+			}
+		}
+
+		before := len(res.Values)
 		for field, value := range metadataValues(answer) {
 			if !missing[field] || value == "" {
 				continue
@@ -274,10 +354,21 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			delete(missing, field)
 		}
 
+		tookCover := false
 		if missing[storage.FieldCover] && answer.CoverURL != "" {
 			res.CoverURL = answer.CoverURL
 			res.CoverSource = p.Name()
 			delete(missing, storage.FieldCover)
+			tookCover = true
+		}
+
+		// Logged after the merge rather than before it, and only when the
+		// answer actually contributed: Decision 5 justifies this line as
+		// "the line that explains a field's value", and an accepted answer
+		// that filled nothing explains none.
+		if viaSearch && (len(res.Values) > before || tookCover) {
+			slog.Info("enrichment matched by search", "provider", p.Name(),
+				"book_id", book.ID, "query_title", book.Title, "matched_title", answer.Title)
 		}
 	}
 	return res, nil
