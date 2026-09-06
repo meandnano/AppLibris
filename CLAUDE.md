@@ -298,7 +298,8 @@ full design.
   the opposite of `internal/sender`'s "retry is a new row" rule. And a
   vanished book *is* a `failed` job, not a `done` one with nothing to
   enrich — `failed` is reserved for the job itself going wrong (the book
-  gone, a write failed), the same way it would be a bug for `internal/sender`
+  gone, a write failed, or **every provider the run asked being
+  unreachable**), the same way it would be a bug for `internal/sender`
   to call a send "delivered" because there was nothing left to send. The
   cascade normally removes a claimed job's row along with its book before
   this can be observed; it exists for the narrow claim-then-delete race.
@@ -565,7 +566,24 @@ full design.
   enqueue and claim, a write failed) is a `failed` job; a provider having
   nothing to say — the ordinary case for most books against most
   providers — is not, and a job that reached at least one provider still
-  finishes `done`. `enrichment_jobs.book_id` cascades on delete (unlike
+  finishes `done`. A job that reached **none** of them is `failed` too,
+  with `allProvidersFailedReason`: `Resolve` returns a `Resolution`
+  carrying `Asked` (providers actually called — not configured, since the
+  early stop routinely skips some) and `Failed`, and the worker's rule is
+  `Asked > 0 && Failed == Asked`. `Failed == Asked` rather than
+  `Failed > 0` because one throttled provider beside one that answered
+  cleanly and had nothing is still a run that learned something, and
+  failing it would hide a real answer behind a flaky neighbour;
+  `Asked > 0` keeps the two honest zero-provider successes (nothing
+  missing, and `METADATA_PROVIDERS=`) out of it. Without this a run in
+  which every provider 429'd was stored byte-identically to an honest
+  no-match and rendered as "Nothing to add" in the *success* treatment —
+  a false statement to the one person who asked. The check's **position**
+  is load-bearing and is what the cancellation test pins: it must stay
+  *after* the post-`Resolve` `ctx.Err()` guard, because a shutdown makes
+  every provider "fail" for exactly the reason above, and classifying
+  first writes a permanent `failed` row for a job
+  `RequeueInterruptedEnrichment` should have retried. `enrichment_jobs.book_id` cascades on delete (unlike
   `send_log.book_id`, which must survive its book to keep the record a
   send happened): a queued or running enrichment job is a pending
   intention about a book, and once the book is gone the intention is

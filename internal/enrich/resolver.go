@@ -175,6 +175,37 @@ func metadataValues(m Metadata) map[storage.MetadataField]string {
 	return values
 }
 
+// Resolution is everything one Resolve call learned. Values, SourceName,
+// CoverURL and CoverSource are what it found; Asked and Failed are what it
+// cost, which is what lets the caller tell an empty result meaning "this
+// book is in neither catalogue" from one meaning "neither catalogue
+// answered". Without that distinction the two are byte-identical in
+// enrichment_jobs, and the UI renders both as "Nothing to add" in the
+// success treatment — telling a person there is nothing left to find on a
+// day nobody was reachable.
+type Resolution struct {
+	// Values holds each resolved field's value, and SourceName the name of
+	// whichever provider answered it — a job can legitimately pull fields
+	// from more than one, so the two are parallel maps rather than one
+	// shared source.
+	Values     map[storage.MetadataField]string
+	SourceName map[storage.MetadataField]string
+
+	// CoverURL and CoverSource are kept out of Values because a cover's
+	// stored path does not exist until the image has been downloaded — see
+	// Resolve's own comment on why that I/O is the caller's.
+	CoverURL    string
+	CoverSource string
+
+	// Asked counts providers actually called, not providers configured. A
+	// chain that stops early because nothing is left missing did not ask
+	// the rest, and counting them would report a run as broader than it
+	// was — which matters because the caller's rule is Failed == Asked.
+	Asked int
+	// Failed counts, of those Asked, how many returned an error.
+	Failed int
+}
+
 // Resolve decides which of book's metadata fields are missing, asks
 // providers for them in order, and merges the answers field by field. It
 // takes no database and no clock — everything it needs about the book's
@@ -198,27 +229,30 @@ func metadataValues(m Metadata) map[storage.MetadataField]string {
 // here can, today, since no database or network call happens inside it),
 // and a provider having nothing to say is the ordinary case, not an
 // error — the caller decides what job status a partial or empty result
-// earns.
+// earns, using Resolution's Asked and Failed to tell the two empty results
+// apart.
 //
-// A cover is handled apart from the other six fields: values only ever
+// A cover is handled apart from the other six fields: Values only ever
 // carries strings that go straight into a column, and a cover's does not
 // exist until the image has been downloaded and passed through
 // internal/cover.Store — I/O Resolve deliberately never performs itself,
 // per the "no database, no clock" contract above. So a provider's cover
-// comes back separately, as coverURL and coverSource, for the worker to
-// fetch, store and fold into values once it has a path. It is still
+// comes back separately, as CoverURL and CoverSource, for the worker to
+// fetch, store and fold into Values once it has a path. It is still
 // subject to the same missing-set membership, first-answer-wins and
 // early-stop rules as every other field: a book whose cover_path is
 // already set never has a cover URL returned for it, so nothing downloads
 // an image the book has no use for.
 func Resolve(ctx context.Context, book storage.Book, authors []string,
 	sources map[storage.MetadataField]string, providers []Provider,
-) (values map[storage.MetadataField]string, sourceName map[storage.MetadataField]string, coverURL string, coverSource string, err error) {
+) (Resolution, error) {
 	missing := missingFields(book, authors, sources)
-	values = map[storage.MetadataField]string{}
-	sourceName = map[storage.MetadataField]string{}
+	res := Resolution{
+		Values:     map[storage.MetadataField]string{},
+		SourceName: map[storage.MetadataField]string{},
+	}
 	if len(missing) == 0 {
-		return values, sourceName, "", "", nil
+		return res, nil
 	}
 
 	for _, p := range providers {
@@ -230,12 +264,14 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			answer Metadata
 			perr   error
 		)
+		res.Asked++
 		if book.ISBN != "" {
 			answer, perr = p.ByISBN(ctx, book.ISBN)
 		} else {
 			answer, perr = p.Search(ctx, book.Title, authors)
 		}
 		if perr != nil {
+			res.Failed++
 			slog.Warn("enrichment provider failed", "provider", p.Name(), "book_id", book.ID, "error", perr)
 			continue
 		}
@@ -244,16 +280,16 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			if !missing[field] || value == "" {
 				continue
 			}
-			values[field] = value
-			sourceName[field] = p.Name()
+			res.Values[field] = value
+			res.SourceName[field] = p.Name()
 			delete(missing, field)
 		}
 
 		if missing[storage.FieldCover] && answer.CoverURL != "" {
-			coverURL = answer.CoverURL
-			coverSource = p.Name()
+			res.CoverURL = answer.CoverURL
+			res.CoverSource = p.Name()
 			delete(missing, storage.FieldCover)
 		}
 	}
-	return values, sourceName, coverURL, coverSource, nil
+	return res, nil
 }

@@ -37,6 +37,20 @@ const lookupFailedReason = "could not read the library index — try again"
 // result back failed.
 const applyFailedReason = "could not save enriched metadata"
 
+// allProvidersFailedReason is recorded when every provider the run asked
+// returned an error — a throttle, a 5xx, a timeout. It is deliberately not
+// a done job with an empty result: that row is indistinguishable from an
+// honest "this book is in neither catalogue", and internal/web renders it
+// in the success treatment as "Nothing to add", telling a person there is
+// nothing left to find on a day nobody was reachable.
+//
+// failed rather than a fourth terminal state because it is the job going
+// wrong in the same sense the other three reasons are — the job's whole
+// purpose is to ask providers, and a run that reached none did not do it —
+// and because failed already renders with a Retry button, which is the one
+// thing a person can usefully do about it.
+const allProvidersFailedReason = "no metadata provider could be reached — try again"
+
 // coverFetchTimeout bounds one cover download. The worker owns this client
 // rather than borrowing a provider's, because the download is the worker's
 // step (see Metadata.CoverURL) and the URL may name a host — Open Library's
@@ -171,7 +185,7 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		return
 	}
 
-	values, sourceName, coverURL, coverSource, err := Resolve(ctx, *book, authors, sources, w.providers)
+	res, err := Resolve(ctx, *book, authors, sources, w.providers)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -189,6 +203,26 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		// running rather than recording that partial result as the
 		// answer; RequeueInterruptedEnrichment picks it up at next
 		// startup and Resolve runs again from scratch.
+		//
+		// This check has to stay ahead of the classification below: during
+		// a shutdown every provider "fails" for exactly the reason above,
+		// so classifying first would write a permanent failed row for a
+		// job that recovery should have retried.
+		return
+	}
+
+	// A run that reached nobody is not a run that found nothing, and the
+	// difference is the whole question the control exists to answer — see
+	// allProvidersFailedReason. Failed == Asked rather than Failed > 0: if
+	// one provider was throttled and another answered cleanly and had
+	// nothing, the run did learn something about the book, and failing it
+	// would hide a real answer behind a flaky neighbour and invite a retry
+	// that cannot improve on it. Asked > 0 keeps the two legitimate
+	// zero-provider cases — nothing missing, and METADATA_PROVIDERS= —
+	// honest successes. The Values check should be implied by the clause
+	// before it, and is written anyway for the day it stops being.
+	if res.Asked > 0 && res.Failed == res.Asked && len(res.Values) == 0 {
+		w.fail(ctx, job.ID, allProvidersFailedReason)
 		return
 	}
 
@@ -202,14 +236,14 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 	// the field left out of values, the same tolerance the scanner gives an
 	// embedded cover that fails to store, since it must not fail a job
 	// whose text fields already resolved.
-	if coverURL != "" {
-		if path, ok := w.storeCover(ctx, *book, coverURL); ok {
-			values[storage.FieldCover] = path
-			sourceName[storage.FieldCover] = coverSource
+	if res.CoverURL != "" {
+		if path, ok := w.storeCover(ctx, *book, res.CoverURL); ok {
+			res.Values[storage.FieldCover] = path
+			res.SourceName[storage.FieldCover] = res.CoverSource
 		}
 	}
 
-	// One call, one transaction, whatever Resolve found — sourceName
+	// One call, one transaction, whatever Resolve found — SourceName
 	// carries each field's own provider, so a job that pulled fields from
 	// more than one provider still records each under the one that
 	// actually answered it, and ApplyEnrichedFields's re-check of every
@@ -217,8 +251,8 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 	// saw) is what keeps this safe against an edit racing the provider
 	// calls above.
 	var written []storage.MetadataField
-	if len(values) > 0 {
-		fields, applied, err := w.db.ApplyEnrichedFields(ctx, job.BookID, values, sourceName, time.Now())
+	if len(res.Values) > 0 {
+		fields, applied, err := w.db.ApplyEnrichedFields(ctx, job.BookID, res.Values, res.SourceName, time.Now())
 		if err != nil {
 			if ctx.Err() != nil {
 				return
