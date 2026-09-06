@@ -257,12 +257,11 @@ func (db *DB) UpdateBookAuthors(ctx context.Context, bookID int64, names []strin
 // enrichment run offers to fetch one again. It reports false for an unknown
 // book — the finders' absent-isn't-an-error contract.
 //
-// cover_retry is cleared alongside because the marker means "a cover store
-// failed, retry the extraction next sweep" and there is no embedded original
-// to extract. Leaving it set would send the next sweep straight back into
-// readEmbeddedCover for a book that has nothing to read, reinstating the
-// warning loop this exists to end — the same pairing UpdateBookCoverPath
-// makes in the other direction.
+// cover_retry is cleared alongside the path — see updateBookColumnTx's
+// FieldCover branch, which owns that pairing and is what this composes.
+// Here it matters twice over: the marker makes the scanner skip its stat
+// check entirely, so a book left carrying it would reach the forget branch
+// again on the next sweep with no evidence its file had gone.
 //
 // Deleting the field_sources row is not incidental either: a row naming a
 // provider beside an empty cover_path is a claim about a value that no
@@ -278,9 +277,11 @@ func (db *DB) ClearProviderCover(ctx context.Context, bookID int64, at time.Time
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM books WHERE id = ?)`, bookID).Scan(&exists); err != nil || !exists {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE books SET cover_path = '', cover_retry = 0, modified_at = ? WHERE id = ?`,
-			formatTime(at), bookID); err != nil {
+		// Through the shared helper rather than a second copy of its
+		// statement: its FieldCover branch is this write with a value
+		// bound, and it already carries the cover_retry pairing that would
+		// otherwise be stated in two places and drift.
+		if err := updateBookColumnTx(ctx, tx, bookID, FieldCover, "", at); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx,

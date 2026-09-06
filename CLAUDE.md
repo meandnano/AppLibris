@@ -109,7 +109,9 @@ full design.
   render an empty field fragment pointing at `/books/0/metadata/`, where
   a name nobody may edit should simply 404. `UpdateBookField` still
   refuses `FieldCover` outright alongside `authors` as a second guard, and
-  `ApplyEnrichedFields` is the only writer, storing a fetched cover's
+  `ApplyEnrichedFields` is the only writer that *creates* one
+  (`ClearProviderCover`, below, is the only one that removes it), storing
+  a fetched cover's
   on-disk path (never a remote URL) under the answering provider's name
   through the same `updateBookColumnTx`/`fieldIsStillMissingTx` path every
   other field uses — so a cover the scanner already found is never
@@ -117,10 +119,13 @@ full design.
   every text field. Writing `cover_path` also clears `cover_retry`, the
   same pairing `UpdateBookCoverPath` makes: the marker means "a cover
   store failed, try again next sweep", and the scanner skips its stat
-  check entirely while it is set, so leaving it would have the next sweep
-  re-extract the embedded cover over the provider's one while
-  `field_sources` went on naming the provider. See `internal/enrich` below
-  for the fetch and storage side of this.
+  check entirely while it is set, so leaving it would send the next sweep
+  past that check into the branch that *forgets* a provider cover — throwing
+  away one that is sitting there intact. The rule is more necessary than it
+  was, not less: `internal/scanner` keeps its own guard against that state
+  (`coverFileUsable`) precisely because the invariant lives here, one
+  package away, where nothing over there would notice it breaking. See
+  `internal/enrich` below for the fetch and storage side of this.
 - `books_fts` is an FTS5 virtual table (`title`, `authors`, `description`,
   `isbn`, `tokenize='unicode61 remove_diacritics 2'`) — a plain table, not
   `content='books'`, since `authors` isn't a books column to begin with
@@ -298,8 +303,9 @@ full design.
   the opposite of `internal/sender`'s "retry is a new row" rule. And a
   vanished book *is* a `failed` job, not a `done` one with nothing to
   enrich — `failed` is reserved for the job itself going wrong (the book
-  gone, a write failed, or **no provider the run asked being able to
-  answer**), the same way it would be a bug for `internal/sender`
+  gone, a write failed, **no provider the run asked being able to answer**,
+  or **a run whose only result was a cover it could not save**), the same
+  way it would be a bug for `internal/sender`
   to call a send "delivered" because there was nothing left to send. The
   cascade normally removes a claimed job's row along with its book before
   this can be observed; it exists for the narrow claim-then-delete race.

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -233,23 +234,33 @@ func TestClearProviderCover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBook: %v", err)
 	}
-	if err := db.UpdateBookCoverPath(ctx, id, "covers/abc.jpg"); err != nil {
-		t.Fatalf("UpdateBookCoverPath: %v", err)
-	}
 	// The state a provider-fetched cover leaves: a path, and a field_sources
-	// row naming the provider — the only writer of a cover row.
-	if _, _, err := db.ApplyEnrichedFields(ctx, id,
+	// row naming the provider. ApplyEnrichedFields writes both — and it has
+	// to run while cover_path is still empty, since its own re-check skips a
+	// field that is no longer missing and would then leave this test
+	// asserting the absence of a row that was never created.
+	written, _, err := db.ApplyEnrichedFields(ctx, id,
 		map[MetadataField]string{FieldCover: "covers/abc.jpg"},
-		map[MetadataField]string{FieldCover: "openlibrary"}, time.Now()); err != nil {
+		map[MetadataField]string{FieldCover: "openlibrary"}, time.Now())
+	if err != nil {
 		t.Fatalf("ApplyEnrichedFields: %v", err)
 	}
-	if _, err := db.Read().Exec(`UPDATE books SET cover_retry = 1 WHERE id = ?`, id); err != nil {
+	if len(written) != 1 || written[0] != FieldCover {
+		t.Fatalf("ApplyEnrichedFields wrote %v, want the cover", written)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE books SET cover_retry = 1 WHERE id = ?`, id)
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	before, err := db.FindBookByID(ctx, id)
 	if err != nil || before == nil {
 		t.Fatalf("FindBookByID: %+v, %v", before, err)
+	}
+	if before.CoverPath == "" {
+		t.Fatal("cover_path was not set by the setup")
 	}
 
 	at := time.Now().Add(time.Hour).Truncate(time.Second)
@@ -271,8 +282,12 @@ func TestClearProviderCover(t *testing.T) {
 	if after.CoverRetry {
 		t.Error("CoverRetry still set")
 	}
-	if !after.ModifiedAt.After(before.ModifiedAt) {
-		t.Errorf("modified_at = %v, want later than %v", after.ModifiedAt, before.ModifiedAt)
+	// Equal to at, not merely later than before: the point of taking a clock
+	// as a parameter is that the write is testable without a timing
+	// assumption, and "later" also passes for a time.Now() the method
+	// reached for itself.
+	if !after.ModifiedAt.Equal(at) {
+		t.Errorf("modified_at = %v, want exactly the at argument %v", after.ModifiedAt, at)
 	}
 
 	sources, err := db.FieldSourcesForBook(ctx, id)

@@ -346,6 +346,71 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 	return nil
 }
 
+// coverFileUsable reports whether the stored thumbnail is present and
+// non-empty. maybeRegenerateCover's own stat is skipped when cover_retry is
+// set, so a clear reached by that route would otherwise have no evidence the
+// file is gone at all.
+func coverFileUsable(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Size() > 0
+}
+
+// forgetUnregenerableCover handles a book whose stored cover is unusable and
+// whose source file has no embedded cover to rebuild it from. When a
+// provider supplied that cover there is nothing to regenerate and nothing to
+// warn about on every sweep forever, so the field is forgotten instead:
+// cover_path and its provenance go, which puts the cover back in
+// enrichment's missing set so the Fetch button repairs it, and leaves the
+// grid showing its honest "no cover" box rather than an <img> pointing at a
+// file that is gone.
+//
+// The provider test is that a field_sources row *exists*, not that it names
+// a provider rather than "embedded": setEmbeddedFieldSourcesTx never writes
+// a cover row, so a cover the scanner extracted has no provenance at all,
+// and comparing against "embedded" would match nothing while reading as
+// correct.
+//
+// readErr is whatever readEmbeddedCover reported, so the ordinary
+// warning still distinguishes a parse failure from a book that simply has
+// no cover in it.
+func forgetUnregenerableCover(ctx context.Context, db *storage.DB, book *storage.Book, sourcePath string, readErr error) {
+	sources, err := db.FieldSourcesForBook(ctx, book.ID)
+	if err != nil {
+		// A storage error says nothing about where the cover came from, and
+		// guessing either way is how a scanner-extracted cover gets silently
+		// discarded. Leave it for the next sweep — the same posture
+		// missing-file reconciliation takes toward an ambiguous Lstat.
+		slog.Warn("read cover provenance failed", "book_id", book.ID, "error", err)
+		return
+	}
+	_, fromProvider := sources[storage.FieldCover]
+
+	// Confirmed unusable before clearing, not assumed. The stat above is
+	// skipped entirely when cover_retry is set, so without this a book
+	// carrying that marker beside a provider row would have a present,
+	// perfectly good cover thrown away. That pairing should not occur —
+	// updateBookColumnTx clears the marker whenever it writes a path — but
+	// the invariant lives in another package and nothing here would notice
+	// it breaking.
+	if fromProvider && !coverFileUsable(book.CoverPath) {
+		if _, err := db.ClearProviderCover(ctx, book.ID, time.Now()); err != nil {
+			slog.Warn("clear provider cover failed", "book_id", book.ID, "error", err)
+			return
+		}
+		slog.Info("provider cover forgotten", "book_id", book.ID, "cover_path", book.CoverPath)
+		return
+	}
+
+	if readErr != nil {
+		slog.Warn("regenerate cover failed", "path", sourcePath, "error", readErr)
+		return
+	}
+	slog.Warn("regenerate cover failed", "path", sourcePath, "error", "embedded cover is missing")
+}
+
 func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Book, sourcePath, coversDir string, result *Result) {
 	if book == nil || (book.CoverPath == "" && !book.CoverRetry) {
 		return
@@ -363,46 +428,17 @@ func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Boo
 		}
 	}
 
-	// A cover a provider supplied has no embedded original behind it, so
-	// there is nothing here to re-extract and every sweep would warn about
-	// it forever while cover_path went on naming a file that is not there —
-	// which the grid renders as a broken image, since it branches on the
-	// path being set rather than on the file existing.
-	//
-	// The test is that a field_sources row *exists*, not that it names a
-	// provider rather than "embedded": setEmbeddedFieldSourcesTx never
-	// writes a cover row, so a cover the scanner extracted has no
-	// provenance at all, and comparing against "embedded" would match
-	// nothing and read as correct. ApplyEnrichedFields is the only writer
-	// of that row.
-	sources, err := db.FieldSourcesForBook(ctx, book.ID)
-	if err != nil {
-		// A storage error says nothing about where the cover came from, and
-		// guessing either way is how a scanner-extracted cover gets silently
-		// discarded. Leave it for the next sweep — the same posture
-		// missing-file reconciliation takes toward an ambiguous Lstat.
-		slog.Warn("read cover provenance failed", "book_id", book.ID, "error", err)
-		return
-	}
-	if _, fromProvider := sources[storage.FieldCover]; fromProvider {
-		// Clearing rather than warning puts the cover back in enrichment's
-		// missing set, so the Fetch button repairs it — no new affordance —
-		// and the grid shows its honest "no cover" box meanwhile.
-		if _, err := db.ClearProviderCover(ctx, book.ID, time.Now()); err != nil {
-			slog.Warn("clear provider cover failed", "book_id", book.ID, "error", err)
-			return
-		}
-		slog.Info("provider cover forgotten", "book_id", book.ID, "cover_path", book.CoverPath)
-		return
-	}
-
 	coverBytes, err := readEmbeddedCover(sourcePath, matchedSuffix(sourcePath))
-	if err != nil {
-		slog.Warn("regenerate cover failed", "path", sourcePath, "error", err)
-		return
-	}
-	if len(coverBytes) == 0 {
-		slog.Warn("regenerate cover failed", "path", sourcePath, "error", "embedded cover is missing")
+	if err != nil || len(coverBytes) == 0 {
+		// Nothing to re-extract. That is established here rather than
+		// inferred from provenance, because the inference does not hold: a
+		// book can carry an embedded cover *and* a provider row, if
+		// cover.Store failed when the book was first seen (leaving
+		// cover_retry set and no cover row, since setEmbeddedFieldSourcesTx
+		// never writes one) and enrichment then supplied a cover of its
+		// own. Clearing such a book on the strength of the row alone would
+		// discard a cover that really was regenerable.
+		forgetUnregenerableCover(ctx, db, book, sourcePath, err)
 		return
 	}
 

@@ -59,7 +59,15 @@ const allProvidersFailedReason = "no metadata provider could answer — try agai
 // not download or store. It names the cover rather than reusing
 // allProvidersFailedReason, which would be false — a provider did answer,
 // and the failure is entirely on this side of the call.
-const coverLostReason = "found a cover but could not save it — try again"
+//
+// It deliberately does not say "try again", unlike the reasons above. Most
+// of what reaches here is deterministic — a refused scheme, bytes that are
+// not a decodable image, an image past maxPixels, a body past
+// MaxCoverBytes — and pressing Fetch again reproduces each exactly. In a
+// step whose whole subject is the control not overstating what happened,
+// promising a retry that cannot work is the same fault one level down. The
+// button is still there for the cases that are transient.
+const coverLostReason = "found a cover but could not save it"
 
 // coverFetchTimeout bounds one cover download. The worker owns this client
 // rather than borrowing a provider's, because the download is the worker's
@@ -285,10 +293,6 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 	// TestWorkerCoverFailureStillFinishesTheJob pins. And a run where the
 	// provider offered no cover at all is still an honest "Nothing to add";
 	// coverLost is false there, which is what keeps it out.
-	//
-	// Evaluated after the store, not before: a *successful* store has just
-	// put FieldCover into Values, so checking earlier would see an empty map
-	// for a run that is about to succeed.
 	if coverLost && len(res.Values) == 0 {
 		if ctx.Err() != nil {
 			return
@@ -335,8 +339,10 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 
 // storeCover downloads coverURL and stores it as book's cover thumbnail,
 // reporting the stored path. It reports false — logging why — for every
-// failure, since a cover is the one field whose absence costs nothing but
-// a dashed box in the grid.
+// failure, since a cover is normally the one field whose absence costs
+// nothing but a dashed box in the grid. Normally: the caller decides
+// whether this run had anything else to show for itself, and for one whose
+// only missing field was the cover a failure here is the whole job.
 func (w *Worker) storeCover(ctx context.Context, book storage.Book, coverURL string) (string, bool) {
 	data, err := FetchCover(ctx, w.coverClient, coverURL)
 	if err != nil {
@@ -344,6 +350,10 @@ func (w *Worker) storeCover(ctx context.Context, book storage.Book, coverURL str
 		return "", false
 	}
 	if len(data) == 0 {
+		// Logged like the other two exits: this one can now end a job, and
+		// a failure on the page with nothing in the log is the operator's
+		// worst version of it.
+		slog.Warn("fetch enriched cover returned nothing", "book_id", book.ID, "url", coverURL)
 		return "", false
 	}
 	path, err := cover.Store(w.coversDir, book.ContentHash, data)

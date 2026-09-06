@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -648,11 +649,10 @@ func TestWorkerRefusesANonHTTPCoverURL(t *testing.T) {
 	}}
 	New(db, []Provider{p}, coversDir).drain(ctx)
 
-	// The subject of this test is the scheme refusal: nothing is fetched and
-	// no path is stored. The job's own outcome is failed rather than done
-	// because the cover was this run's only result — see the cover-only
-	// tests below — which is a change from when a lost cover was always
-	// tolerated.
+	// The scheme check itself is pinned by cover_test.go's
+	// TestFetchCoverRefusesANonHTTPScheme; what this holds is that the
+	// refusal reaches the job — no path stored, and a failed outcome,
+	// because the cover was this run's only result.
 	if got := jobStatus(t, db, id); got != "failed" {
 		t.Errorf("job status = %q, want failed", got)
 	}
@@ -879,7 +879,7 @@ func TestWorkerCoverOnlyRunThatLosesItsCoverFails(t *testing.T) {
 			p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 				return Metadata{CoverURL: coverURL}, nil
 			}}
-			New(db, []Provider{p}, t.TempDir()).drain(ctx)
+			newTestWorker(t, db, []Provider{p}).drain(ctx)
 
 			var status, reason, fields string
 			if err := db.Read().QueryRow(`SELECT status, failure_reason, updated_fields FROM enrichment_jobs WHERE book_id = ?`, id).
@@ -921,7 +921,7 @@ func TestWorkerCoverOnlyRunWithNoCoverOfferedIsDone(t *testing.T) {
 	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 		return Metadata{}, nil
 	}}
-	New(db, []Provider{p}, t.TempDir()).drain(ctx)
+	newTestWorker(t, db, []Provider{p}).drain(ctx)
 
 	var status, reason string
 	if err := db.Read().QueryRow(`SELECT status, failure_reason FROM enrichment_jobs WHERE book_id = ?`, id).
@@ -963,7 +963,7 @@ func TestWorkerCoverOnlyRunFailsForTheCoverNotTheProvider(t *testing.T) {
 	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 		return Metadata{CoverURL: coverURL}, nil
 	}}
-	New(db, []Provider{a, b}, t.TempDir()).drain(ctx)
+	newTestWorker(t, db, []Provider{a, b}).drain(ctx)
 
 	var status, reason string
 	if err := db.Read().QueryRow(`SELECT status, failure_reason FROM enrichment_jobs WHERE book_id = ?`, id).
@@ -975,5 +975,68 @@ func TestWorkerCoverOnlyRunFailsForTheCoverNotTheProvider(t *testing.T) {
 	}
 	if reason != coverLostReason {
 		t.Errorf("failure_reason = %q, want %q — a provider did answer, so it is the cover that failed", reason, coverLostReason)
+	}
+}
+
+// The cover-only failure branch guards itself, like every other terminal
+// write in process. Without that guard a shutdown landing during the cover
+// fetch writes a permanent failed row, denying the job the
+// RequeueInterruptedEnrichment retry it should get — and the earlier
+// post-Resolve check cannot stand in for it, because a run that got this
+// far had a live ctx when it passed there.
+//
+// The provider answers with a cover and nothing else, so this is the
+// cover-only shape; the cover server then blocks until the run is
+// cancelled, which is what puts the cancellation inside the fetch.
+func TestWorkerCoverOnlyCancellationLeavesJobRunning(t *testing.T) {
+	db := openTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	id, err := db.CreateBook(context.Background(), storage.Book{
+		ContentHash: "worker-cover-cancel", Title: "Book", SortTitle: "book",
+		Publisher: "Press", PublishedDate: "2020", Language: "en",
+		ISBN: "9780000000001", Description: "Text",
+	}, []string{"An Author"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	entered := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-r.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{CoverURL: server.URL + "/cover.jpg"}, nil
+	}}
+	worker := newTestWorker(t, db, []Provider{p})
+
+	done := make(chan struct{})
+	go func() {
+		worker.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the cover fetch was never reached")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancellation")
+	}
+
+	if got := jobStatus(t, db, id); got != string(storage.EnrichmentRunning) {
+		t.Errorf("status = %q, want running — an abandoned fetch is not a verdict", got)
 	}
 }
