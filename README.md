@@ -42,9 +42,8 @@ position, so it can be bookmarked or shared like any other.
 
 A book dropped into the library directory normally appears within a few
 seconds: the server watches the directory and rescans shortly after things
-go quiet. A periodic rescan (`SCAN_INTERVAL`, default 15 minutes) runs
-regardless, so nothing depends on the watch working — at worst a new book
-takes that long to show up.
+go quiet. It also scans once at startup, and those two together are the
+default arrangement — there is no periodic rescan unless you ask for one.
 
 That distinction matters on a NAS. On an Unraid **user share**
 (`/mnt/user/...`), an NFS export or an SMB mount, the filesystem is a view
@@ -52,16 +51,24 @@ over storage that other things can write to directly, and only changes
 made *through* the share generate events. Copying a book to the share over
 SMB is seen; Unraid's mover shuffling files between the cache pool and the
 array is not, because it works on `/mnt/cache` and `/mnt/diskN` behind the
-share's back. Those changes still appear at the next rescan.
+share's back. Those changes go unnoticed until something else
+provokes a scan.
+
+That is what `SCAN_INTERVAL` is for: set it to a duration (`15m`, `1h`) and
+the server also sweeps on that timer, so a library the watch cannot see
+still catches up on its own. It defaults to `0`, meaning no timer — a
+rescan re-walks and re-stats every file to usually find nothing, which on a
+NAS keeps disks spun up for no result.
 
 For instant updates either way, bind-mount the underlying disk path
 (`/mnt/cache/books`, `/mnt/diskN/books`) rather than the user share. The
 server logs which filesystem it found at startup and warns when it is one
 of the types above; it then creates a short-lived probe file to check
 whether events actually arrive, and says so if they don't. Set
-`WATCH_ENABLED=false` to turn the watch off and rely on the rescan alone,
-or `WATCH_SETTLE` (default `5s`) to change how long the directory must be
-quiet before a rescan runs.
+`WATCH_ENABLED=false` to turn the watch off and rely on `SCAN_INTERVAL`
+alone — set one if you do, or nothing after the startup scan will ever
+notice a change — or `WATCH_SETTLE` (default `5s`) to change how long the
+directory must be quiet before a rescan runs.
 
 ## Metadata enrichment
 

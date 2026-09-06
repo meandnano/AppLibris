@@ -7,6 +7,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -143,12 +144,17 @@ func TestRunWithTheWatcherDisabled(t *testing.T) {
 
 // A negative settle window would poke on an event that hasn't happened yet;
 // like MISSING_GRACE, it is rejected at startup rather than quietly
-// producing nonsense. A misspelled METADATA_PROVIDERS entry gets the same
-// treatment for a different reason: silently running with fewer providers
-// than configured is the kind of thing nobody notices for months.
+// producing nonsense. A negative SCAN_INTERVAL is rejected for a sharper
+// reason: zero is meaningful there (no periodic rescan, the default), so
+// anything below it has to be a mistake rather than a synonym for it. A
+// misspelled METADATA_PROVIDERS entry gets the same treatment for a
+// different reason again: silently running with fewer providers than
+// configured is the kind of thing nobody notices for months.
 func TestRunRejectsBadWatchConfiguration(t *testing.T) {
 	for _, tc := range []struct{ name, key, value string }{
 		{"negative settle", "WATCH_SETTLE", "-5s"},
+		{"negative scan interval", "SCAN_INTERVAL", "-1m"},
+		{"unparseable scan interval", "SCAN_INTERVAL", "often"},
 		{"unparseable settle", "WATCH_SETTLE", "soon"},
 		{"unparseable enabled", "WATCH_ENABLED", "sometimes"},
 		{"unknown metadata provider", "METADATA_PROVIDERS", "bogus"},
@@ -172,8 +178,9 @@ func TestRunRejectsBadWatchConfiguration(t *testing.T) {
 // through to the sweep on the trigger branch runs Scan against a dead
 // context, which fails and logs at ERROR: a clean shutdown that looks like
 // a fault, roughly half the time. Before the watcher this was near
-// impossible, since only the 15-minute ticker could be ready.
-func TestPeriodicScanDoesNotSweepOnACancelledContext(t *testing.T) {
+// impossible, since only the ticker could be ready — and with SCAN_INTERVAL
+// now defaulting to 0, the trigger is ordinarily the only wake-up there is.
+func TestScanLoopDoesNotSweepOnACancelledContext(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
 	if err != nil {
 		t.Fatalf("storage.Open: %v", err)
@@ -196,12 +203,80 @@ func TestPeriodicScanDoesNotSweepOnACancelledContext(t *testing.T) {
 		trigger := make(chan struct{}, 1)
 		trigger <- struct{}{} // a poke still pending, exactly as at shutdown
 
-		periodicScan(ctx, db, libraryDir, coversDir, time.Hour, time.Hour, trigger, nil)
+		scanLoop(ctx, db, libraryDir, coversDir, time.Hour, time.Hour, trigger, nil)
 	}
 
 	if got := logs.String(); strings.Contains(got, "level=ERROR") {
 		t.Errorf("a cancelled shutdown swept anyway and logged an error:\n%s", got)
 	}
+}
+
+// SCAN_INTERVAL=0 is the default and means "no periodic rescan", not "no
+// scan loop": the loop is also what serves the watcher's pokes, and it is
+// the only caller of scanner.Scan, which is what keeps two sweeps from
+// overlapping. Dropping the loop entirely — or handing time.NewTicker a
+// zero interval, which panics — would leave the default deployment unable
+// to notice a book arriving.
+func TestScanLoopWithoutATickerStillSweepsOnAPoke(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	libraryDir, coversDir := t.TempDir(), t.TempDir()
+
+	var logs safeBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	trigger := make(chan struct{}, 1)
+	trigger <- struct{}{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scanLoop(ctx, db, libraryDir, coversDir, 0, time.Hour, trigger, nil)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(logs.String(), "scan complete") {
+		select {
+		case <-deadline:
+			t.Fatalf("no sweep ran within 5s on a poke with no ticker:\n%s", logs.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scanLoop did not return within 5s of cancellation")
+	}
+}
+
+// The loop writes its log lines from its own goroutine while the test reads
+// them from this one, which bytes.Buffer does not allow.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // METADATA_PROVIDERS= (set, empty) is the documented way to run with no

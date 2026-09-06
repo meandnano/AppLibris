@@ -2,11 +2,10 @@
 
 ## Position in the sequence
 
-Independent, and worth building **before**
-`docs/plans/2026090605-empty-library-scan-action.md` if the two are done
-close together: that step adds a primary button to the empty-library state
-and would otherwise have to pick one of three systems arbitrarily, which is
-the exact failure this step exists to stop.
+Independent. Nothing else in `docs/plans/` touches the same CSS, and no
+step depends on this one landing first — but every new control added
+before it does has to pick one of three systems arbitrarily, which is the
+failure this step exists to stop.
 
 ## Context
 
@@ -46,7 +45,7 @@ background. Those are the same thing in light and opposite in dark:
 
 | | `--accent` | `--bg-raised` | `#fff` on accent | `--bg-raised` on accent |
 |---|---|---|---|---|
-| light | `#8a5a3c` | `#ffffff` | ~7.0:1 ✓ | ~7.0:1 ✓ |
+| light | `#8a5a3c` | `#ffffff` | ~5.8:1 ✓ | ~5.8:1 ✓ |
 | dark | `#c98a5f` | `#1a1817` | **~2.9:1 ✗** | ~6.1:1 ✓ |
 
 In dark theme `--accent` is a light tan and `#fff` is white on it. The

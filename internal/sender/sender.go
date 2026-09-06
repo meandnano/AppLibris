@@ -21,10 +21,12 @@ import (
 
 // pollInterval is the safety-net tick that catches anything a Notify poke
 // missed — a row left queued by a crash between insert and notify, most
-// obviously. Deliberately the same shape as the scanner's watcher-versus-
-// periodic-rescan relationship: the poke is an optimisation, the tick is
-// the mechanism. No env var, unlike the scanner's SCAN_INTERVAL: there is
-// no deployment whose queue latency wants tuning.
+// obviously. The tick is the mechanism here and the poke an optimisation,
+// which is the opposite way round from the scanner, whose SCAN_INTERVAL
+// defaults to no tick at all: a missed filesystem event costs a book some
+// latency, while a queued row nothing wakes for is a send that never
+// happens. No env var either, unlike SCAN_INTERVAL: there is no deployment
+// whose queue latency wants tuning.
 const pollInterval = 1 * time.Minute
 
 // maxFailureReason bounds how much of a transport error's text is

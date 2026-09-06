@@ -37,12 +37,17 @@ const (
 
 // Watcher turns filesystem activity under the library directory into pokes
 // on a trigger channel. It is emphatically not a second way to index a
-// book: it never reads, hashes or parses the file an event names. DESIGN.md
-// makes the periodic rescan the mechanism and the watcher an optimisation,
-// so the only thing a watcher failure can cost is latency — a book waits
-// for the next sweep instead of appearing within seconds.
+// book: it never reads, hashes or parses the file an event names — every
+// sweep is the same sweep on the same goroutine, whichever wake-up asked
+// for it, so what a watcher failure costs is a sweep that doesn't happen,
+// never one that happens differently.
 //
-// That framing is what makes the debounce safe. An event says something
+// With SCAN_INTERVAL defaulting to 0 the pokes are ordinarily the only
+// wake-up there is, so that cost is latency only where a periodic rescan
+// is also configured — which is what a deployment on a mount that
+// swallows events sets one for.
+//
+// The trigger framing is what makes the debounce safe. An event says something
 // changed, not that it finished changing: a copy in progress fires CREATE
 // long before its last byte lands. Scanning on the event itself would hash
 // a partial file. Scanning after a quiet window usually avoids that, and

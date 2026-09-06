@@ -45,9 +45,19 @@ func run(ctx context.Context) error {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
-	scanInterval, err := time.ParseDuration(envOrDefault("SCAN_INTERVAL", "15m"))
+	// Zero — the default — means no periodic rescan: the startup sweep plus
+	// the watcher's pokes are the whole mechanism. A timer that re-walks and
+	// re-stats an entire library every few minutes to find nothing is the
+	// expensive half of the pair, and on a NAS it is the half that keeps
+	// disks spun up; a deployment whose filesystem doesn't deliver events
+	// (the user-share case the watcher warns about) sets an interval and
+	// gets the old behaviour back.
+	scanInterval, err := time.ParseDuration(envOrDefault("SCAN_INTERVAL", "0"))
 	if err != nil {
 		return fmt.Errorf("parse SCAN_INTERVAL: %w", err)
+	}
+	if scanInterval < 0 {
+		return fmt.Errorf("parse SCAN_INTERVAL: must not be negative: %s", scanInterval)
 	}
 	missingGrace, err := time.ParseDuration(envOrDefault("MISSING_GRACE", "24h"))
 	if err != nil {
@@ -202,6 +212,14 @@ func run(ctx context.Context) error {
 			watcher = nil
 		}
 	}
+	if scanInterval == 0 && watcher == nil {
+		// The two wake-ups are each other's fallback, and this deployment
+		// has neither: nothing after the startup sweep will ever notice a
+		// book arriving, or prune one whose file went missing. Worth saying
+		// out loud, since the symptom is a library that simply stops
+		// changing.
+		slog.Warn("no rescan after startup: SCAN_INTERVAL is 0 and the filesystem watcher is not running")
+	}
 
 	scanDone := make(chan struct{})
 	go func() {
@@ -210,7 +228,7 @@ func run(ctx context.Context) error {
 		if watcher != nil {
 			watcher.Refresh()
 		}
-		periodicScan(scanCtx, db, libraryDir, coversDir, scanInterval, missingGrace, scanTrigger, watcher)
+		scanLoop(scanCtx, db, libraryDir, coversDir, scanInterval, missingGrace, scanTrigger, watcher)
 	}()
 
 	var watcherDone chan struct{}
@@ -324,17 +342,25 @@ func waitForBackground(cancel context.CancelFunc, done <-chan struct{}, deadline
 	}
 }
 
-// periodicScan sweeps on a timer and whenever the watcher pokes trigger.
-// Both wake-ups run the same sweep on the same goroutine, so the watcher
-// changes when a sweep happens and never what one does — DESIGN.md's "two
-// entry points sharing one code path", with the ticker as the safety net
-// that runs whether or not any event ever arrives.
-func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration, trigger <-chan struct{}, watcher *scanner.Watcher) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+// scanLoop sweeps whenever the watcher pokes trigger, and — when interval
+// is positive — on a timer as well. Both wake-ups run the same sweep on the
+// same goroutine, so the watcher changes when a sweep happens and never
+// what one does — DESIGN.md's "two entry points sharing one code path".
+//
+// An interval of zero drops the timer and leaves the loop, since the loop
+// is also what serves the watcher: this goroutine is the only caller of
+// scanner.Scan, which is what makes two sweeps unable to overlap. A nil
+// channel blocks forever, so the timer case simply never becomes ready.
+func scanLoop(ctx context.Context, db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration, trigger <-chan struct{}, watcher *scanner.Watcher) {
+	var tick <-chan time.Time
+	if interval > 0 {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
 	for {
 		select {
-		case <-ticker.C:
+		case <-tick:
 		case <-trigger:
 		case <-ctx.Done():
 			return

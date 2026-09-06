@@ -452,10 +452,13 @@ full design.
   deliberately has no `Sender` interface of its own). `Run` wakes on
   either a `Notify` poke (non-blocking, capacity-1 channel — a burst of
   enqueues coalesces into one wake-up) or a once-a-minute `pollInterval`
-  tick, the same poke-plus-tick shape as the scanner's watcher-versus-
-  periodic-rescan split: the poke is the optimisation, the tick is the
-  mechanism that catches anything a poke missed (a row left `queued` by a
-  crash between insert and notify, most obviously). A book's file is
+  tick, the same poke-plus-tick shape the scanner's watcher and
+  `SCAN_INTERVAL` make available: here the poke is the optimisation and
+  the tick is the mechanism that catches anything a poke missed (a row
+  left `queued` by a crash between insert and notify, most obviously) —
+  unlike the scanner, where the tick is off by default, because a queue
+  row is this process's own promise and losing one to a missed poke is a
+  book that never sends. A book's file is
   resolved at *send* time, not enqueue time — `ListBookFiles`, first
   location whose `missing_since` is `NULL` — since a queue is a promise to
   act later and the library moves underneath it; no such location (the
@@ -1026,9 +1029,12 @@ full design.
   event names, it only pokes a capacity-1 channel that `cmd/server`'s one
   scan goroutine selects on beside its ticker. So a sweep is a sweep
   however it was woken, two can never overlap, and nothing about the
-  index's correctness depends on an event arriving — DESIGN.md makes the
-  rescan the mechanism and the watcher an optimisation, and a watcher
-  that never fires costs only latency. Events are debounced (`WATCH_SETTLE`,
+  no wake-up can index a book differently from any other. What has changed
+  since DESIGN.md wrote the rescan as the mechanism and the watcher as an
+  optimisation is which one is *configured*: `SCAN_INTERVAL` now defaults
+  to `0`, so the pokes are ordinarily the only wake-up after startup, and a
+  watcher that never fires costs only latency just in a deployment that
+  also set an interval. Events are debounced (`WATCH_SETTLE`,
   default `5s`) because an event says something changed, not that it
   finished changing: a copy fires `CREATE` long before its last byte
   lands. One timer covers both bounds — the settle window handles a burst
@@ -1334,9 +1340,12 @@ full design.
   results count, so it has to share the count's container and margins or
   the grid jumps on every keystroke. Plate 02e's empty-library state dims
   and disables the whole control — with nothing indexed there is nothing to
-  search. Its "Scan library" button and library path are the one part of
-  that plate not built, tracked in
-  `docs/backlog/2026090203-empty-library-scan-action.md`. With JavaScript
+  search. Its "Scan library" button is deliberately not
+  built: the sweep already runs at startup and on every filesystem event,
+  so a button offering to do what the process does on its own would be a
+  control that never changes an outcome — and a manual trigger would have
+  to poke the one scan goroutine anyway, since two sweeps must never
+  overlap. With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
   drift out of sync. A `q` that sanitizes to nothing is "not
@@ -1643,16 +1652,32 @@ full design.
   passed to the enrichment worker as well as the scanner — a
   provider-fetched cover goes through the same `internal/cover.Store` path,
   so the directory has one shape regardless of which side produced a
-  thumbnail) runs in the background alongside the `SCAN_INTERVAL`-timed (default
-  `15m`) periodic rescan, with missing-file grace period `MISSING_GRACE`
-  (default `24h`). `WATCH_ENABLED` (default `true`) and `WATCH_SETTLE`
-  (default `5s`, rejected as negative like `MISSING_GRACE`) configure the
-  watcher; disabling it leaves exactly the pre-watcher behaviour, which is
-  what a mount whose delivery probe reports silence wants. `periodicScan`
-  sweeps on its ticker *or* a watcher poke and calls `Refresh` after each
-  sweep, so a directory the sweep just discovered is watched before the
-  next change lands in it. A watcher that fails to start is a Warn, not a
-  failed startup — the rescan still runs. Sending is configured by `RESEND_API_KEY` and
+  thumbnail) runs in the background alongside `scanLoop`, with missing-file
+  grace period `MISSING_GRACE` (default `24h`). **`SCAN_INTERVAL` defaults
+  to `0`, which means no periodic rescan at all** — the startup sweep plus
+  the watcher's pokes are the intended arrangement, since a timer that
+  re-walks and re-stats the whole library to find nothing is the expensive
+  half of the pair and, on a NAS, the half that keeps disks spun up. A
+  positive value adds the ticker back, which is what a mount whose events
+  don't arrive (the Unraid user-share case) wants. Negative is rejected at
+  startup like `MISSING_GRACE`, and for a sharper reason: zero already
+  means something specific here, so anything below it is a mistake rather
+  than a synonym for it. `WATCH_ENABLED` (default `true`) and
+  `WATCH_SETTLE` (default `5s`, rejected as negative too) configure the
+  watcher. `scanLoop` sweeps on a watcher poke *or*, when the interval is
+  positive, its ticker, and calls `Refresh` after each sweep, so a
+  directory the sweep just discovered is watched before the next change
+  lands in it. **Interval zero drops the ticker, never the loop**: the loop
+  is what serves the trigger channel, and it is the only caller of
+  `scanner.Scan`, which is what makes two sweeps unable to overlap — so a
+  nil ticker channel (blocking forever) is the mechanism rather than a
+  conditional goroutine. A watcher that fails to start is a Warn, not a
+  failed startup, but *with* a zero interval it means nothing after the
+  startup sweep will ever notice a change, so that combination logs its own
+  Warn naming both halves. The consequence to know about: with no timer, a
+  file whose row was marked missing is only pruned once some later event
+  provokes a sweep — `MISSING_GRACE` bounds the wait from the mark, not
+  from the deletion. Sending is configured by `RESEND_API_KEY` and
   `RESEND_FROM`: both set builds an `internal/resend.Client` and an
   `internal/sender.Worker`, wires `Service.Notify` to the worker's
   `Notify`, and runs `storage.FailInterruptedSends` once before the
