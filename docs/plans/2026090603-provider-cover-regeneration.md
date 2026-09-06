@@ -3,10 +3,13 @@
 ## Position in the sequence
 
 **Third of the enrichment trio**, and independent of the other two — it
-touches `internal/scanner` and `internal/storage`, not the resolver. It is
-placed last of the three because it is the least visible: reaching it takes
-a provider-supplied cover *and* a lost `COVERS_DIR`, where steps 01 and 02
-are wrong on the first press of the button.
+touches `internal/scanner`, `internal/storage` and, for Decision 3 alone,
+`internal/enrich`'s worker. It never touches the resolver. It is placed
+last of the three because its main subject is the least visible: reaching
+the dangling cover takes a provider-supplied cover *and* a lost
+`COVERS_DIR`, where steps 01 and 02 are wrong on the first press of the
+button. Decision 3, added later, is visible on the first press — but it
+belongs to this step's subject rather than to either of theirs.
 
 ## Context
 
@@ -54,7 +57,8 @@ supporting.
 
 In scope: `maybeRegenerateCover` recognising a provider-sourced cover and
 clearing it instead of failing to re-extract it, plus the storage method
-that does the clearing.
+that does the clearing — and, per Decision 3 below, the worker reporting a
+cover-only run honestly when the fetch or store fails.
 
 Out of scope, with reasons:
 
@@ -135,6 +139,64 @@ a provider beside an empty `cover_path` is a claim about a value that no
 longer exists, and it is the row `isMissing` would consult if `cover` ever
 became a source a person could set. Leaving it would be storing a fact that
 is false.
+
+## Decision 3: a cover-only run that loses its cover is not "Nothing to add"
+
+Added after step 01's review round, which turned this up while checking
+that step's own honesty fix. It belongs here rather than in a plan of its
+own because it is the same subject — a provider-fetched cover behaving
+honestly — and because **nothing else was going to catch it**: step 01's
+plan said step 03 "changes what a failed cover leaves behind", and the
+scope above shows that was wrong. This step was entirely scanner-side. The
+case would have fallen between the two.
+
+The hole, verified against the code as it stands after step 01:
+
+For a book whose **only** missing field is `cover`, a provider that answers
+with a cover URL whose fetch or `cover.Store` then fails leaves
+`res.Values` empty. `ApplyEnrichedFields` is skipped (`len(res.Values) > 0`
+is false), and the run ends at `w.done(ctx, job.ID, nil)` — rendered as
+**"Nothing to add"** in the success treatment, for a run that found a cover
+and dropped it. Step 01's classification correctly declines to catch it:
+`Failed == 0`, because the provider answered fine. The failure is entirely
+on this side of the call.
+
+`storeCover`'s tolerance is right and stays: "a fetch or store failure only
+loses the cover … since it must not fail a job whose text fields already
+resolved." Note what that justification rests on — *text fields already
+resolved*. In the cover-only case there are none, so the reason for the
+tolerance is absent while the tolerance still applies.
+
+So the rule, which is narrower than "a failed cover fails the job":
+
+> A run is `failed` when it wrote **nothing at all** and the only thing it
+> had to write was a cover it found and could not store.
+
+A run that resolved text fields *and* lost its cover stays `done`, naming
+the fields it did write — today's behaviour, and correct: that run really
+did add something, and `TestWorkerCoverFailureStillFinishesTheJob` pins it.
+The reason string should name the cause rather than reuse
+`allProvidersFailedReason`, which would be false — a provider did answer.
+
+The mechanics: `storeCover` already reports failure to its caller, so the
+worker knows both that a cover was offered and that it was lost. The
+condition is that flag plus `len(res.Values) == 0`.
+
+Worth stating because it is the trap this plan exists to avoid twice over:
+a run where a provider offered **no** cover and nothing else was missing is
+still an honest "Nothing to add", and must not be swept into this.
+
+Two hand-offs for whoever implements it, both implied above and easy to get
+wrong:
+
+- **The condition is evaluated after the `storeCover` block, not before.**
+  A *successful* store adds `FieldCover` to `Values`, so checking earlier
+  would see an empty map for a run that is about to succeed.
+- **The mixed shape is caught too, and should be.** One provider fails,
+  another answers with nothing but a cover, and the store then fails: the
+  run wrote nothing and lost a cover it found, so it is `failed` for this
+  reason rather than step 01's — a provider did answer. Stating it so the
+  overlap reads as intended rather than as an accident.
 
 ## Storage
 
@@ -221,6 +283,21 @@ other caller), so this needs no new query.
 - A book with `cover_retry` set and a provenance row: cleared, and the next
   sweep does not re-enter extraction.
 
+`internal/enrich`, for Decision 3:
+
+- A book missing **only** its cover, whose provider answers a cover URL
+  that fails to fetch: the job is `failed` with a reason naming the cover,
+  not `done` with an empty result. This is the case that reads as "Nothing
+  to add" today.
+- The same, but the store fails rather than the fetch — same outcome, since
+  the two are indistinguishable to the person looking at the page.
+- A book missing a text field **and** its cover, where the cover fails:
+  still `done`, `updated_fields` naming the text field. This is
+  `TestWorkerCoverFailureStillFinishesTheJob`, which must keep passing —
+  it is the boundary Decision 3 narrows against.
+- A book missing only its cover whose provider offers **no** cover: still
+  `done`, "Nothing to add". The honest case that must not be swept in.
+
 ## CLAUDE.md
 
 `internal/scanner`'s paragraph currently says a sweep "re-extracts a
@@ -231,6 +308,15 @@ row-existence predicate, since the "a row exists, not a row naming a
 provider" rule is exactly what a later reader would try to tidy into a
 string comparison. `internal/storage`'s `field_sources` paragraph gains
 `ClearProviderCover` as a second reader-and-writer of the `cover` row.
+
+`internal/enrich`'s paragraph needs Decision 3, and specifically needs one
+existing sentence corrected rather than extended: it currently says a cover
+fetch or `Store` failure "is logged and the field is left out of `Values`,
+the same tolerance the scanner gives a cover that fails to store, since it
+must not fail a job whose text fields already resolved." After Decision 3
+that holds only when text fields *did* resolve — which is the whole
+distinction, and leaving the sentence unqualified would document the
+behaviour the step removes.
 
 ## DESIGN.md (on `init`)
 

@@ -97,7 +97,9 @@ func TestWorkerAppliesResolvedFieldsAndMarksDone(t *testing.T) {
 
 // With no providers configured, every job still resolves cleanly to done
 // having called nothing and changed nothing — the wiring stays exercised
-// which is what METADATA_PROVIDERS= configures.
+// which is what METADATA_PROVIDERS= configures. It also pins the Asked > 0
+// half of the worker's failure rule: at zero, Failed == Asked holds
+// vacuously.
 func TestWorkerWithNoProvidersResolvesDoneAndTouchesNothing(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -184,7 +186,11 @@ func TestWorkerBookGoneFails(t *testing.T) {
 	// assert on the (nonexistent) row beyond it not panicking or hanging.
 }
 
-func TestWorkerProviderErrorStillMarksJobDone(t *testing.T) {
+// A provider having nothing to say is the ordinary case for an obscure
+// book and finishes done with an empty result — DESIGN.md's "200 with no
+// match is not a failure", and the half of this the test below must not
+// break.
+func TestWorkerCleanNoMatchMarksJobDone(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -197,7 +203,7 @@ func TestWorkerProviderErrorStillMarksJobDone(t *testing.T) {
 	}
 
 	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		return Metadata{}, errors.New("network unreachable")
+		return Metadata{}, nil
 	}}
 	w := newTestWorker(t, db, []Provider{p})
 	w.drain(ctx)
@@ -211,6 +217,81 @@ func TestWorkerProviderErrorStillMarksJobDone(t *testing.T) {
 	}
 	if reason != "" {
 		t.Errorf("failure_reason = %q, want empty", reason)
+	}
+}
+
+// A run in which every provider errored learned nothing about the book,
+// only about the network. Recording it as done with an empty result makes
+// it byte-identical to the test above, which internal/web renders as
+// "Nothing to add" in the success treatment — a false statement, and the
+// one this whole step exists to stop.
+func TestWorkerAllProvidersFailedMarksJobFailed(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-4b", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, errors.New("network unreachable")
+	}}
+	w := newTestWorker(t, db, []Provider{p})
+	w.drain(ctx)
+
+	var status, reason, fields string
+	if err := db.Read().QueryRow(`SELECT status, failure_reason, updated_fields FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status, &reason, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(storage.EnrichmentFailed) {
+		t.Errorf("status = %q, want failed — no provider answered, so nothing was learned about the book", status)
+	}
+	if reason != allProvidersFailedReason {
+		t.Errorf("failure_reason = %q, want %q", reason, allProvidersFailedReason)
+	}
+	if fields != "" {
+		t.Errorf("updated_fields = %q, want empty", fields)
+	}
+}
+
+// Pins Failed == Asked rather than Failed > 0; see process's comment for why.
+func TestWorkerOneProviderFailedOneAnsweredNothingMarksJobDone(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-4c", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	a := &fakeProvider{name: "provider-a", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, errors.New("429 too many requests")
+	}}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, nil
+	}}
+	w := newTestWorker(t, db, []Provider{a, b})
+	w.drain(ctx)
+
+	var status, reason, fields string
+	if err := db.Read().QueryRow(`SELECT status, failure_reason, updated_fields FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status, &reason, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(storage.EnrichmentDone) {
+		t.Errorf("status = %q, want done — provider-b answered, so this run has a real result", status)
+	}
+	if reason != "" {
+		t.Errorf("failure_reason = %q, want empty", reason)
+	}
+	if fields != "" {
+		t.Errorf("updated_fields = %q, want empty", fields)
 	}
 }
 
@@ -264,6 +345,11 @@ func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
 // A job in flight when ctx is cancelled is left running, not failed — the
 // opposite of internal/sender, because Resolve is deterministic and safe
 // to re-run: see storage.RequeueInterruptedEnrichment's doc comment.
+//
+// The fake below returns ctx.Err(), which Resolve counts as an ordinary
+// provider failure, so this run also reaches process's failure
+// classification with Failed == Asked and nothing found — the one path
+// that could turn a shutdown into a permanent failed row.
 func TestWorkerCancellationLeavesJobRunningForRecovery(t *testing.T) {
 	db := openTestDB(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -678,5 +764,74 @@ func TestWorkerRecordsNoFieldsWhenNothingWasMissing(t *testing.T) {
 	}
 	if job.UpdatedFields != "" {
 		t.Errorf("UpdatedFields = %q, want empty", job.UpdatedFields)
+	}
+}
+
+// The outer ctx.Err() guard's own claim, which no other test makes: a run
+// abandoned by a shutdown must not have its snapshot recorded as the
+// verdict.
+//
+// The shape matters and is not the obvious one. Provider A answers
+// cleanly with nothing and provider B is still blocked when the shutdown
+// lands, so the run ends with an empty Values, Failed == 1 and Asked == 2:
+// the classification branch declines it (not every provider failed), and
+// with nothing to write there is no ApplyEnrichedFields call to fail on
+// the cancelled context either. Only this guard stands between that and
+// w.done — whose write deliberately outlives cancellation — marking an
+// abandoned run "done" with an empty result, which the page then renders
+// as "Nothing to add".
+//
+// A variant where A answers a real field looks like the sharper test and
+// is not: a non-empty Values reaches ApplyEnrichedFields, which fails on
+// the cancelled context and returns before any verdict is written, so it
+// passes with this guard deleted.
+func TestWorkerCancellationIsNotRecordedAsAVerdict(t *testing.T) {
+	db := openTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-7", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	entered := make(chan struct{})
+	a := &fakeProvider{name: "provider-a", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, nil
+	}}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		close(entered)
+		<-ctx.Done()
+		return Metadata{}, ctx.Err()
+	}}
+	w := newTestWorker(t, db, []Provider{a, b})
+
+	done := make(chan struct{})
+	go func() {
+		w.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider-b was never called")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of cancellation")
+	}
+
+	var status string
+	if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(storage.EnrichmentRunning) {
+		t.Fatalf("status = %q, want running — an abandoned run is not a verdict", status)
 	}
 }

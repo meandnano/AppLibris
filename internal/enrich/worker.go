@@ -37,6 +37,24 @@ const lookupFailedReason = "could not read the library index — try again"
 // result back failed.
 const applyFailedReason = "could not save enriched metadata"
 
+// allProvidersFailedReason is recorded when every provider the run asked
+// returned an error — a throttle, a 5xx, a timeout. "Could answer" rather
+// than "could be reached": a 429 and a 5xx are the provider being reached
+// and refusing, and this is the one sentence the whole step exists to make
+// true. It is deliberately not
+// a done job with an empty result: that row is indistinguishable from an
+// honest "this book is in neither catalogue", and internal/web renders it
+// in the success treatment as "Nothing to add", telling a person there is
+// nothing left to find on a day nobody would answer.
+//
+// failed rather than a fourth terminal state because it is the job going
+// wrong in the same sense the other three reasons are — the job's whole
+// purpose is to get an answer out of a provider, and a run that got none
+// did not do it —
+// and because failed already renders with a Retry button, which is the one
+// thing a person can usefully do about it.
+const allProvidersFailedReason = "no metadata provider could answer — try again"
+
 // coverFetchTimeout bounds one cover download. The worker owns this client
 // rather than borrowing a provider's, because the download is the worker's
 // step (see Metadata.CoverURL) and the URL may name a host — Open Library's
@@ -171,7 +189,7 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		return
 	}
 
-	values, sourceName, coverURL, coverSource, err := Resolve(ctx, *book, authors, sources, w.providers)
+	res, err := Resolve(ctx, *book, authors, sources, w.providers)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -192,6 +210,40 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		return
 	}
 
+	// A run nobody answered is not a run that found nothing, and the
+	// difference is the whole question the control exists to answer — see
+	// allProvidersFailedReason. Failed == Asked rather than Failed > 0: if
+	// one provider was throttled and another answered cleanly and had
+	// nothing, the run did learn something about the book, and failing it
+	// would hide a real answer behind a flaky neighbour and invite a retry
+	// that cannot improve on it. Asked > 0 keeps the two legitimate
+	// zero-provider cases — nothing missing, and METADATA_PROVIDERS= —
+	// honest successes.
+	//
+	// The last two clauses say "and produced nothing at all", which is
+	// implied by Failed == Asked today: a provider that errored is skipped
+	// before its answer is read, so it contributes neither a value nor a
+	// cover URL. They are written for the day that stops holding, and the
+	// cover half is the one easy to leave out — a cover-only answer has an
+	// empty Values and lives entirely in CoverURL, so a check that
+	// inspected Values alone would discard exactly the partial result this
+	// is meant to protect.
+	if res.Asked > 0 && res.Failed == res.Asked && len(res.Values) == 0 && res.CoverURL == "" {
+		// Guarded here rather than relying on the ctx.Err() check above
+		// staying immediately above: every other terminal write in process
+		// pairs its own guard with the write, and a verdict this one
+		// reaches from a snapshot must not be recorded once ctx is
+		// already cancelled — during a shutdown every provider "fails",
+		// which is indistinguishable here from every provider being
+		// unable to answer, and a permanent failed row would deny the job the
+		// retry RequeueInterruptedEnrichment exists to give it.
+		if ctx.Err() != nil {
+			return
+		}
+		w.fail(ctx, job.ID, allProvidersFailedReason)
+		return
+	}
+
 	// Resolve hands back a cover URL rather than a path — see its doc
 	// comment — because both the download and turning it into a path are
 	// this worker's I/O to do. Resolve only ever returns one for a book
@@ -202,14 +254,14 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 	// the field left out of values, the same tolerance the scanner gives an
 	// embedded cover that fails to store, since it must not fail a job
 	// whose text fields already resolved.
-	if coverURL != "" {
-		if path, ok := w.storeCover(ctx, *book, coverURL); ok {
-			values[storage.FieldCover] = path
-			sourceName[storage.FieldCover] = coverSource
+	if res.CoverURL != "" {
+		if path, ok := w.storeCover(ctx, *book, res.CoverURL); ok {
+			res.Values[storage.FieldCover] = path
+			res.SourceName[storage.FieldCover] = res.CoverSource
 		}
 	}
 
-	// One call, one transaction, whatever Resolve found — sourceName
+	// One call, one transaction, whatever Resolve found — SourceName
 	// carries each field's own provider, so a job that pulled fields from
 	// more than one provider still records each under the one that
 	// actually answered it, and ApplyEnrichedFields's re-check of every
@@ -217,8 +269,8 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 	// saw) is what keeps this safe against an edit racing the provider
 	// calls above.
 	var written []storage.MetadataField
-	if len(values) > 0 {
-		fields, applied, err := w.db.ApplyEnrichedFields(ctx, job.BookID, values, sourceName, time.Now())
+	if len(res.Values) > 0 {
+		fields, applied, err := w.db.ApplyEnrichedFields(ctx, job.BookID, res.Values, res.SourceName, time.Now())
 		if err != nil {
 			if ctx.Err() != nil {
 				return
