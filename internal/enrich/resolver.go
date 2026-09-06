@@ -250,14 +250,25 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 		}
 
 		var (
-			answer Metadata
-			perr   error
+			answer    Metadata
+			perr      error
+			viaSearch bool
 		)
 		res.Asked++
 		if book.ISBN != "" {
 			answer, perr = p.ByISBN(ctx, book.ISBN)
-		} else {
+			// A clean no-match means this catalogue does not hold that
+			// edition, and the title is still worth asking about — subject
+			// to the gate below. An *error* is not a no-match: it says
+			// nothing about the ISBN, and falling back on it would accept
+			// a fuzzy answer because a host was briefly unreachable.
+			if perr == nil && answer.IsEmpty() && book.Title != "" {
+				answer, perr = p.Search(ctx, book.Title, authors)
+				viaSearch = true
+			}
+		} else if book.Title != "" {
 			answer, perr = p.Search(ctx, book.Title, authors)
+			viaSearch = true
 		}
 		if perr != nil {
 			res.Failed++
@@ -265,8 +276,33 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			continue
 		}
 
+		// An ISBN names one edition, so a ByISBN answer is about this book
+		// by construction. A search answer is whatever the provider's
+		// ranking put first for a title that is often the filename, so it
+		// has to earn the merge. A rejected answer is treated as no match —
+		// the ordinary zero Metadata — so the chain continues to the next
+		// provider with the missing set intact.
+		if viaSearch && !answer.IsEmpty() {
+			if !plausibleMatch(book.Title, authors, answer) {
+				slog.Debug("enrichment search answer rejected", "provider", p.Name(),
+					"book_id", book.ID, "query_title", book.Title, "candidate_title", answer.Title)
+				continue
+			}
+			slog.Info("enrichment matched by search", "provider", p.Name(),
+				"book_id", book.ID, "query_title", book.Title, "matched_title", answer.Title)
+		}
+
 		for field, value := range metadataValues(answer) {
 			if !missing[field] || value == "" {
+				continue
+			}
+			// A search answer never supplies an ISBN, even having passed
+			// the gate. Every other field is a description that is roughly
+			// right or roughly wrong; an ISBN is an identifier that either
+			// names this book or names a different one, and it is the
+			// lookup key every later run would use — so a wrong one
+			// compounds instead of sitting still.
+			if viaSearch && field == storage.FieldISBN {
 				continue
 			}
 			res.Values[field] = value

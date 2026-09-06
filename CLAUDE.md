@@ -494,7 +494,43 @@ full design.
   order, each only for what's still missing at the time it's asked; once
   the missing set is empty the loop stops without calling the rest — an
   explicit test asserts the un-called provider really is never
-  called, not just that its answer goes unused. A provider erroring is
+  called, not just that its answer goes unused.
+  Each provider is asked **by ISBN when the book has one, by title and
+  author otherwise** — and, since a clean ISBN no-match means that
+  catalogue simply lacks the edition, the same provider is then asked by
+  title in the same iteration. An ISBN *error* deliberately does **not**
+  fall back: a 5xx says nothing about whether the ISBN is right, and
+  searching on it would accept a fuzzy answer because a host was briefly
+  unreachable. A cover-only reply is an answer rather than a no-match
+  (`Metadata.IsEmpty` counts `CoverURL`), so nothing searches past one; a
+  book with no title never searches at all, since the gate below would
+  reject whatever came back.
+  A `Search`-sourced answer must clear `plausibleMatch` (`match.go`) before
+  any of it is merged, where a `ByISBN` answer never is — an ISBN names one
+  edition, so that answer is about this book by construction, and gating it
+  would reject correct data over a differing title string. The gate is
+  **title match required, author overlap a veto and never a pass**: both
+  providers bind the author into the query, so an author match only
+  confirms they honoured a constraint this package supplied and says
+  nothing about which of that author's books the ranking put first —
+  "titles match *or* authors match" accepts any Stephen King novel for any
+  Stephen King file. Overlap is only consulted when both sides have
+  authors, an authorless answer being silence rather than disagreement.
+  Titles match on **contiguous whole-token runs**, not substrings, so
+  "The Hobbit" matches "The Hobbit: 75th Anniversary Edition" while "It"
+  does not match "Italy". A rejected answer is treated as a no-match, not a
+  failure — the chain continues with the missing set intact and `Failed`
+  unchanged. It rejects most filename-titled books on purpose: an empty
+  field is recoverable, while a plausible wrong answer is written,
+  provenanced and never reconsidered.
+  A `Search`-sourced answer additionally **never fills `isbn`**, even
+  having cleared the gate, because that field is the lookup key every later
+  run uses and an identifier has no partial credit. The consequence is
+  worth stating because it reads as a bug otherwise: **enrichment can no
+  longer write `isbn` by any route at all.** The field is only ever missing
+  for a book that has none, such a book can only reach a provider through
+  `Search`, and there the value is withheld — while a book that has one
+  does not need it. A test pins that. A provider erroring is
   logged and skipped, indistinguishable (deliberately — see above) from
   one abandoned by a cancelled `ctx`; either way the chain continues, and
   neither is `Resolve`'s own failure to report. A book's authors are
@@ -614,7 +650,14 @@ full design.
   check-digit `X` upper-cased — duplicated rather than imported, the same
   choice `internal/storage`'s own copy makes) so a lookup key round-trips;
   `Search` is the title/first-author fallback the resolver uses when a
-  book has no ISBN.
+  book has no ISBN, and now also when an ISBN lookup comes back a clean
+  no-match. Both clients still return their **top hit unchecked**
+  (`parsed.Docs[0]`, `parsed.Items[0]`) — deliberately: judging whether a
+  ranking's first result is the book in hand is `internal/enrich`'s
+  `plausibleMatch`, which lives there because it is the one place that
+  knows *which path it chose*, a fact a provider cannot know about itself,
+  and because DESIGN.md wants the merge logic testable without any real
+  provider.
   Open Library models a **work** (the book as written) separately from an
   **edition** (one publication of it), and the two `internal/openlibrary`
   paths hit different endpoints because of it — the distinction that
