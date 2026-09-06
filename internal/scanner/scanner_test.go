@@ -12,6 +12,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1784,5 +1785,222 @@ func TestScanFallsBackToFilenameTitleOnUnparseableFB2(t *testing.T) {
 	book := bookByPath(t, ctx, db, "broken.fb2")
 	if book.Title != "broken" {
 		t.Errorf("Title = %q, want %q (the filename fallback)", book.Title, "broken")
+	}
+}
+
+// giveProviderCover puts the book into the state a provider-fetched cover
+// leaves: a cover_path, and the field_sources row that is the only way to
+// tell a provider's cover from one the scanner extracted.
+//
+// Through ApplyEnrichedFields, which is what the enrichment worker calls and
+// the only writer of a cover row — and it must run while cover_path is still
+// empty, since its own re-check skips a field that is no longer missing and
+// would then write the path without the provenance.
+func giveProviderCover(t *testing.T, ctx context.Context, db *storage.DB, bookID int64, path string) {
+	t.Helper()
+	written, _, err := db.ApplyEnrichedFields(ctx, bookID,
+		map[storage.MetadataField]string{storage.FieldCover: path},
+		map[storage.MetadataField]string{storage.FieldCover: "openlibrary"}, time.Now())
+	if err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("ApplyEnrichedFields wrote %v, want the cover — the book must have no cover_path yet", written)
+	}
+	sources, err := db.FieldSourcesForBook(ctx, bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sources[storage.FieldCover] != "openlibrary" {
+		t.Fatalf("cover source = %q, want openlibrary", sources[storage.FieldCover])
+	}
+}
+
+// A provider-supplied cover has no embedded original, so a sweep that finds
+// its file gone must forget it rather than try to re-extract it forever.
+// The second sweep is what actually pins this: the first would also pass if
+// the fix were merely to quieten the log line, leaving cover_path dangling
+// and the grid rendering a broken image.
+func TestScanForgetsAProviderCoverWhoseFileIsGone(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// No embedded cover: this book's only cover ever came from a provider.
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+
+	coverPath := filepath.Join(coversDir, "provider.jpg")
+	if err := os.WriteFile(coverPath, testCoverImage(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	giveProviderCover(t, ctx, db, book.ID, coverPath)
+	if err := os.Remove(coverPath); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.CoversRegenerated != 0 || second.Errors != 0 {
+		t.Errorf("second scan = %+v, want CoversRegenerated=0 Errors=0", second)
+	}
+
+	after, err := db.FindBookByID(ctx, book.ID)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty — a path naming a file that is gone renders a broken image", after.CoverPath)
+	}
+	if after.CoverRetry {
+		t.Error("CoverRetry set; there is no embedded original to retry")
+	}
+	sources, err := db.FieldSourcesForBook(ctx, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src, ok := sources[storage.FieldCover]; ok {
+		t.Errorf("cover source = %q, want the row gone with the value", src)
+	}
+
+	// The assertion that distinguishes forgetting from quietening: with the
+	// path cleared, the third sweep short-circuits before any cover work at
+	// all, so the book has stopped costing anything on every sweep forever.
+	third, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("third Scan: %v", err)
+	}
+	if third.CoversRegenerated != 0 || third.Errors != 0 {
+		t.Errorf("third scan = %+v, want CoversRegenerated=0 Errors=0", third)
+	}
+	stillAfter, err := db.FindBookByID(ctx, book.ID)
+	if err != nil || stillAfter == nil {
+		t.Fatalf("FindBookByID: %+v, %v", stillAfter, err)
+	}
+	if stillAfter.CoverPath != "" {
+		t.Errorf("CoverPath = %q after a third sweep, want empty", stillAfter.CoverPath)
+	}
+}
+
+// A zero-byte file takes the same path as a missing one — both mean the
+// stored thumbnail is unusable, and neither can be re-extracted for a
+// provider's cover.
+func TestScanForgetsAZeroByteProviderCover(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+
+	coverPath := filepath.Join(coversDir, "provider.jpg")
+	if err := os.WriteFile(coverPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	giveProviderCover(t, ctx, db, book.ID, coverPath)
+
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	after, err := db.FindBookByID(ctx, book.ID)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", after.CoverPath)
+	}
+}
+
+// cover_retry makes the scanner skip its stat check entirely, so a
+// provider's cover carrying that marker must still be forgotten rather than
+// sent into an extraction that has nothing to read.
+func TestScanForgetsAProviderCoverMarkedForRetry(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+
+	giveProviderCover(t, ctx, db, book.ID, filepath.Join(coversDir, "gone.jpg"))
+	if _, err := db.Read().Exec(`UPDATE books SET cover_retry = 1 WHERE id = ?`, book.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	after, err := db.FindBookByID(ctx, book.ID)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath != "" || after.CoverRetry {
+		t.Errorf("CoverPath = %q, CoverRetry = %v, want empty and false", after.CoverPath, after.CoverRetry)
+	}
+}
+
+// A storage error says nothing about where the cover came from. Guessing
+// "provider" would silently discard a scanner-extracted cover; guessing
+// "embedded" would re-enter the extraction loop this exists to end. So an
+// unreadable provenance leaves the book exactly as it is and lets the next
+// sweep try again — the same posture missing-file reconciliation takes
+// toward an ambiguous Lstat.
+func TestScanLeavesTheCoverAloneWhenProvenanceIsUnreadable(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", testCoverImage(t))
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	if book.CoverPath == "" {
+		t.Fatal("no cover extracted; the fixture must carry one")
+	}
+	if err := os.Remove(book.CoverPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Read().Exec(`DROP TABLE field_sources`); err != nil {
+		t.Fatalf("drop field_sources: %v", err)
+	}
+
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+
+	after, err := db.FindBookByID(ctx, book.ID)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath != book.CoverPath {
+		t.Errorf("CoverPath = %q, want it left at %q — provenance was unreadable, so nothing is known", after.CoverPath, book.CoverPath)
+	}
+	// The observable half, and the one that pins the early return: nothing
+	// was re-extracted either. cover.Store names by content hash, so a
+	// regenerated cover would land back at the same path and leave
+	// cover_path looking untouched — only the file itself tells them apart.
+	if second.CoversRegenerated != 0 {
+		t.Errorf("second scan = %+v, want CoversRegenerated=0", second)
+	}
+	if _, err := os.Stat(book.CoverPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat cover = %v, want it still missing — nothing may be re-extracted on an unknown provenance", err)
 	}
 }

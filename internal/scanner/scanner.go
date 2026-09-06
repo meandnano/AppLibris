@@ -363,6 +363,39 @@ func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Boo
 		}
 	}
 
+	// A cover a provider supplied has no embedded original behind it, so
+	// there is nothing here to re-extract and every sweep would warn about
+	// it forever while cover_path went on naming a file that is not there —
+	// which the grid renders as a broken image, since it branches on the
+	// path being set rather than on the file existing.
+	//
+	// The test is that a field_sources row *exists*, not that it names a
+	// provider rather than "embedded": setEmbeddedFieldSourcesTx never
+	// writes a cover row, so a cover the scanner extracted has no
+	// provenance at all, and comparing against "embedded" would match
+	// nothing and read as correct. ApplyEnrichedFields is the only writer
+	// of that row.
+	sources, err := db.FieldSourcesForBook(ctx, book.ID)
+	if err != nil {
+		// A storage error says nothing about where the cover came from, and
+		// guessing either way is how a scanner-extracted cover gets silently
+		// discarded. Leave it for the next sweep — the same posture
+		// missing-file reconciliation takes toward an ambiguous Lstat.
+		slog.Warn("read cover provenance failed", "book_id", book.ID, "error", err)
+		return
+	}
+	if _, fromProvider := sources[storage.FieldCover]; fromProvider {
+		// Clearing rather than warning puts the cover back in enrichment's
+		// missing set, so the Fetch button repairs it — no new affordance —
+		// and the grid shows its honest "no cover" box meanwhile.
+		if _, err := db.ClearProviderCover(ctx, book.ID, time.Now()); err != nil {
+			slog.Warn("clear provider cover failed", "book_id", book.ID, "error", err)
+			return
+		}
+		slog.Info("provider cover forgotten", "book_id", book.ID, "cover_path", book.CoverPath)
+		return
+	}
+
 	coverBytes, err := readEmbeddedCover(sourcePath, matchedSuffix(sourcePath))
 	if err != nil {
 		slog.Warn("regenerate cover failed", "path", sourcePath, "error", err)

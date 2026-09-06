@@ -250,3 +250,42 @@ func (db *DB) UpdateBookAuthors(ctx context.Context, bookID int64, names []strin
 	})
 	return exists, err
 }
+
+// ClearProviderCover forgets a provider-supplied cover whose stored file has
+// gone: it empties cover_path, clears cover_retry and deletes the cover row
+// from field_sources, so the book reads as having no cover and the next
+// enrichment run offers to fetch one again. It reports false for an unknown
+// book — the finders' absent-isn't-an-error contract.
+//
+// cover_retry is cleared alongside because the marker means "a cover store
+// failed, retry the extraction next sweep" and there is no embedded original
+// to extract. Leaving it set would send the next sweep straight back into
+// readEmbeddedCover for a book that has nothing to read, reinstating the
+// warning loop this exists to end — the same pairing UpdateBookCoverPath
+// makes in the other direction.
+//
+// Deleting the field_sources row is not incidental either: a row naming a
+// provider beside an empty cover_path is a claim about a value that no
+// longer exists, and it is what enrich.Resolve's isMissing would consult.
+//
+// It deliberately does not check provenance itself. The caller has already
+// read field_sources to decide it is looking at a provider's cover, and a
+// method re-deriving that decision would either duplicate the predicate or
+// invite a second, differently-wrong copy of it — see internal/scanner's
+// maybeRegenerateCover for why "a row exists" is the whole test.
+func (db *DB) ClearProviderCover(ctx context.Context, bookID int64, at time.Time) (exists bool, err error) {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM books WHERE id = ?)`, bookID).Scan(&exists); err != nil || !exists {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE books SET cover_path = '', cover_retry = 0, modified_at = ? WHERE id = ?`,
+			formatTime(at), bookID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx,
+			`DELETE FROM field_sources WHERE book_id = ? AND field = ?`, bookID, FieldCover)
+		return err
+	})
+	return exists, err
+}

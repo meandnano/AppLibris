@@ -648,8 +648,13 @@ func TestWorkerRefusesANonHTTPCoverURL(t *testing.T) {
 	}}
 	New(db, []Provider{p}, coversDir).drain(ctx)
 
-	if got := jobStatus(t, db, id); got != "done" {
-		t.Errorf("job status = %q, want done", got)
+	// The subject of this test is the scheme refusal: nothing is fetched and
+	// no path is stored. The job's own outcome is failed rather than done
+	// because the cover was this run's only result — see the cover-only
+	// tests below — which is a change from when a lost cover was always
+	// tolerated.
+	if got := jobStatus(t, db, id); got != "failed" {
+		t.Errorf("job status = %q, want failed", got)
 	}
 	book, err := db.FindBookByID(ctx, id)
 	if err != nil || book == nil {
@@ -833,5 +838,142 @@ func TestWorkerCancellationIsNotRecordedAsAVerdict(t *testing.T) {
 	}
 	if status != string(storage.EnrichmentRunning) {
 		t.Fatalf("status = %q, want running — an abandoned run is not a verdict", status)
+	}
+}
+
+// Decision 3: a run whose only result was a cover it could not save is a
+// failed job, not "Nothing to add".
+//
+// storeCover's tolerance justifies itself with "must not fail a job whose
+// text fields already resolved" — and for a book missing only its cover
+// there are none, so the reason for the tolerance is absent while the
+// tolerance still applies. Step 01's classification cannot see this case:
+// Failed == 0, because the provider answered perfectly well.
+func TestWorkerCoverOnlyRunThatLosesItsCoverFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"fetch yields nothing", nil},
+		{"store rejects the image", []byte("not-an-image")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			ctx := context.Background()
+
+			// Everything but the cover is already present, so the cover is
+			// the run's only possible result.
+			id, err := db.CreateBook(ctx, storage.Book{
+				ContentHash: "worker-cover-only", Title: "Book", SortTitle: "book",
+				Publisher: "Press", PublishedDate: "2020", Language: "en",
+				ISBN: "9780000000001", Description: "Text",
+			}, []string{"An Author"})
+			if err != nil {
+				t.Fatalf("CreateBook: %v", err)
+			}
+			if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+				t.Fatalf("EnqueueEnrichment: %v", err)
+			}
+
+			coverURL, _ := coverServer(t, tc.body)
+			p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+				return Metadata{CoverURL: coverURL}, nil
+			}}
+			New(db, []Provider{p}, t.TempDir()).drain(ctx)
+
+			var status, reason, fields string
+			if err := db.Read().QueryRow(`SELECT status, failure_reason, updated_fields FROM enrichment_jobs WHERE book_id = ?`, id).
+				Scan(&status, &reason, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if status != string(storage.EnrichmentFailed) {
+				t.Errorf("status = %q, want failed — the run found a cover and dropped it", status)
+			}
+			if reason != coverLostReason {
+				t.Errorf("failure_reason = %q, want %q", reason, coverLostReason)
+			}
+			if fields != "" {
+				t.Errorf("updated_fields = %q, want empty", fields)
+			}
+		})
+	}
+}
+
+// The honest case that must not be swept in: nothing was missing but the
+// cover, and the provider had no cover to offer. Nothing found, nothing
+// lost — "Nothing to add" is true.
+func TestWorkerCoverOnlyRunWithNoCoverOfferedIsDone(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "worker-cover-none", Title: "Book", SortTitle: "book",
+		Publisher: "Press", PublishedDate: "2020", Language: "en",
+		ISBN: "9780000000001", Description: "Text",
+	}, []string{"An Author"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, nil
+	}}
+	New(db, []Provider{p}, t.TempDir()).drain(ctx)
+
+	var status, reason string
+	if err := db.Read().QueryRow(`SELECT status, failure_reason FROM enrichment_jobs WHERE book_id = ?`, id).
+		Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(storage.EnrichmentDone) {
+		t.Errorf("status = %q, want done — no cover was offered, so none was lost", status)
+	}
+	if reason != "" {
+		t.Errorf("failure_reason = %q, want empty", reason)
+	}
+}
+
+// The mixed shape, stated so the overlap reads as intended: one provider
+// fails outright, another answers with nothing but a cover, and the store
+// then fails. The run wrote nothing and lost a cover it found, so it fails
+// for *this* reason rather than step 01's — a provider did answer.
+func TestWorkerCoverOnlyRunFailsForTheCoverNotTheProvider(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "worker-cover-mixed", Title: "Book", SortTitle: "book",
+		Publisher: "Press", PublishedDate: "2020", Language: "en",
+		ISBN: "9780000000001", Description: "Text",
+	}, []string{"An Author"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	coverURL, _ := coverServer(t, []byte("not-an-image"))
+	a := &fakeProvider{name: "provider-a", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, errors.New("503 service unavailable")
+	}}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{CoverURL: coverURL}, nil
+	}}
+	New(db, []Provider{a, b}, t.TempDir()).drain(ctx)
+
+	var status, reason string
+	if err := db.Read().QueryRow(`SELECT status, failure_reason FROM enrichment_jobs WHERE book_id = ?`, id).
+		Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(storage.EnrichmentFailed) {
+		t.Errorf("status = %q, want failed", status)
+	}
+	if reason != coverLostReason {
+		t.Errorf("failure_reason = %q, want %q — a provider did answer, so it is the cover that failed", reason, coverLostReason)
 	}
 }

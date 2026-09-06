@@ -222,3 +222,83 @@ func TestUpdateBookAuthorsDropsRepeatsAtFirstOccurrence(t *testing.T) {
 		}
 	}
 }
+
+func TestClearProviderCover(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, Book{
+		ContentHash: "clear-cover", Title: "The Book", Publisher: "Press",
+	}, []string{"An Author"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if err := db.UpdateBookCoverPath(ctx, id, "covers/abc.jpg"); err != nil {
+		t.Fatalf("UpdateBookCoverPath: %v", err)
+	}
+	// The state a provider-fetched cover leaves: a path, and a field_sources
+	// row naming the provider — the only writer of a cover row.
+	if _, _, err := db.ApplyEnrichedFields(ctx, id,
+		map[MetadataField]string{FieldCover: "covers/abc.jpg"},
+		map[MetadataField]string{FieldCover: "openlibrary"}, time.Now()); err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+	if _, err := db.Read().Exec(`UPDATE books SET cover_retry = 1 WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := db.FindBookByID(ctx, id)
+	if err != nil || before == nil {
+		t.Fatalf("FindBookByID: %+v, %v", before, err)
+	}
+
+	at := time.Now().Add(time.Hour).Truncate(time.Second)
+	exists, err := db.ClearProviderCover(ctx, id, at)
+	if err != nil || !exists {
+		t.Fatalf("ClearProviderCover: exists=%v, err=%v", exists, err)
+	}
+
+	after, err := db.FindBookByID(ctx, id)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", after.CoverPath)
+	}
+	// cover_retry means "retry the extraction", and there is no embedded
+	// original to extract — leaving it set sends the next sweep straight
+	// back into the loop this exists to end.
+	if after.CoverRetry {
+		t.Error("CoverRetry still set")
+	}
+	if !after.ModifiedAt.After(before.ModifiedAt) {
+		t.Errorf("modified_at = %v, want later than %v", after.ModifiedAt, before.ModifiedAt)
+	}
+
+	sources, err := db.FieldSourcesForBook(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src, ok := sources[FieldCover]; ok {
+		t.Errorf("cover source = %q, want the row gone", src)
+	}
+	// Row-scoped, not book-scoped: a DELETE without the field clause would
+	// pass every assertion above and silently drop every other provenance
+	// the book has.
+	for _, f := range []MetadataField{FieldTitle, FieldPublisher, FieldAuthors} {
+		if sources[f] == "" {
+			t.Errorf("%s source was removed too; the delete must be row-scoped", f)
+		}
+	}
+}
+
+func TestClearProviderCoverUnknownBook(t *testing.T) {
+	db := openTestDB(t)
+	exists, err := db.ClearProviderCover(context.Background(), 9999, time.Now())
+	if err != nil {
+		t.Fatalf("ClearProviderCover: %v", err)
+	}
+	if exists {
+		t.Error("exists = true for an unknown book")
+	}
+}
