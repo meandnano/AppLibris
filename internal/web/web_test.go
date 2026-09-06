@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -979,6 +981,89 @@ func TestAuthorLine(t *testing.T) {
 	for _, c := range cases {
 		if got := authorLine(c.names); got != c.want {
 			t.Errorf("authorLine(%v) = %q, want %q", c.names, got, c.want)
+		}
+	}
+}
+
+// embeddedFiles lists every regular file under root, so a guard over the
+// shipped assets covers whatever is there rather than a list that goes stale
+// the first time a template is added.
+func embeddedFiles(t *testing.T, fsys fs.FS, root string) []string {
+	t.Helper()
+	var paths []string
+	err := fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return paths
+}
+
+// The send control, the enrichment control and the inline editors share one
+// .button/.spinner system.
+// A rename that stops half way leaves a retired block in the stylesheet or
+// retired markup pointing at nothing, and shows up only in whichever control
+// nobody happened to look at.
+func TestRetiredButtonClassesAreGone(t *testing.T) {
+	retired := []string{"send__button", "send__spinner", "enrich__button", "enrich__spinner"}
+	trees := []struct {
+		fsys fs.FS
+		root string
+	}{
+		{templateFS, "templates"},
+		{staticFS, "static/css"},
+	}
+	for _, tree := range trees {
+		for _, path := range embeddedFiles(t, tree.fsys, tree.root) {
+			b, err := fs.ReadFile(tree.fsys, path)
+			if err != nil {
+				t.Errorf("read %s: %v", path, err)
+				continue
+			}
+			for _, name := range retired {
+				if strings.Contains(string(b), name) {
+					t.Errorf("%s still references %s; the button system is .button/.spinner", path, name)
+				}
+			}
+		}
+	}
+}
+
+// The other half of the same rename, which the check above cannot see: markup
+// naming a class the stylesheet has no rule for. A mistyped modifier renders
+// as a bare .button, so the control loses its size, its ground and its
+// disabled treatment while every handler test stays green.
+func TestButtonClassesInMarkupHaveRules(t *testing.T) {
+	css, err := fs.ReadFile(staticFS, "static/css/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	named := regexp.MustCompile(`\b(?:button|spinner)(?:--[a-z]+)?\b`)
+	seen := make(map[string]bool)
+	for _, path := range embeddedFiles(t, templateFS, "templates") {
+		b, err := fs.ReadFile(templateFS, path)
+		if err != nil {
+			t.Errorf("read %s: %v", path, err)
+			continue
+		}
+		for _, name := range named.FindAllString(string(b), -1) {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			// Trailing class character excluded so .button does not match
+			// the .button--lg rule and report itself as defined.
+			rule := regexp.MustCompile(`\.` + regexp.QuoteMeta(name) + `[^0-9A-Za-z_-]`)
+			if !rule.Match(css) {
+				t.Errorf("%s names .%s, which app.css has no rule for", path, name)
+			}
 		}
 	}
 }
