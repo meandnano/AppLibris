@@ -517,9 +517,16 @@ full design.
   Stephen King file. Overlap is only consulted when both sides have
   authors, an authorless answer being silence rather than disagreement.
   Titles are compared as **delimited segments**, not as substrings and not
-  as bare token runs. A title is split at `:;,()[]{}—–/|` (and at a hyphen
-  only when the separator also has a space, so `" - "` is a dash and
-  `"Twenty-One"` a compound); two titles match when their segments agree
+  as bare token runs. A title is split at `:;,()[]{}—–/|`, and at `-.?!`
+  only when the separator also carries whitespace — each of those has a
+  word-internal meaning a bare occurrence usually intends, so `" - "` is a
+  dash while `"Twenty-One"` is a compound, and `". "` ends a segment while
+  `"J.R.R."` does not. The period is there for the Russian
+  `"Series. Title"` convention, the population DESIGN.md names as the
+  reason this path exists; its cost is that an abbreviation splits a title
+  (`"No"` matches `"Dr. No"`), the same over-match this design accepts
+  elsewhere and which `maxSegments` still keeps away from a contents list.
+  Two titles match when their segments agree
   pairwise, or when a one-segment title equals a segment of a title with at
   most **`maxSegments` (2)** parts.
   Three rules, each of which a cheaper version gets wrong:
@@ -561,6 +568,14 @@ full design.
   comparing it: the matcher is quadratic and runs on a provider's *raw*
   title, before `sanitizeValue` caps anything, while a provider client
   bounds only the whole response at megabytes.
+  **Where the code and plan `2026090602` disagree, CLAUDE.md is right.**
+  That plan's Decision 2 specifies plain contiguous-run containment; what
+  shipped requires a *delimited* run and bounds the answer to
+  `maxSegments`, because review found plain containment matched a sequel
+  and then a collected edition — `Dune`/`Dune Messiah`,
+  `Hamlet`/`Shakespeare: Hamlet, Othello, Macbeth` — neither of which the
+  author veto can catch. A completed plan is immutable, so the supersession
+  is recorded here rather than there.
   `internal/enrich/match.go` is the one file in the package that imports
   outside the standard library — `golang.org/x/text` for `cases.Fold` and
   NFD. Its plan (`2026090602`) said the file would import nothing beyond
@@ -574,8 +589,8 @@ full design.
   unable to match NFC text, since a composed `é` is a single non-mark
   rune.
   A rejected answer is treated as a no-match, not a
-  failure — the chain continues with the missing set intact, no provenance
-  recorded and no cover taken, and `Failed` unchanged; the rejection is
+  failure — the chain continues with the missing set otherwise intact (only
+  `isbn` has left it, above), no provenance recorded and no cover taken, and `Failed` unchanged; the rejection is
   logged at `Debug` with a `reason` (`title_mismatch` or `author_veto`),
   since an author veto otherwise shows two titles that look like a fine
   match and says nothing about why it was refused. The accepting line is

@@ -12,7 +12,7 @@ described here:
   is a false statement to a person's face rather than a distinction a
   table cannot express.
 - **Gap 3, an ISBN lookup never falling back to a title search** →
-  `docs/plans/2026090602-search-match-confidence.md`, where it belongs
+  `docs/plans/completed/2026090602-search-match-confidence.md`, where it belongs
   beside the match-confidence guard that makes the search path safe to
   widen. The two were always one decision, as both items said.
 

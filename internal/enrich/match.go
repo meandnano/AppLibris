@@ -13,10 +13,26 @@ import (
 // cases this file has to tell apart: "The Hobbit: 75th Anniversary Edition"
 // extends a title *after a delimiter* and is the same book, while "Dune
 // Messiah" extends it with nothing but a space and is a different one.
-//
-// A hyphen counts only when the separator also contains a space — " - "
-// reads as a dash, "Twenty-One" as one compound word.
 const subtitleDelimiters = ":;,()[]{}—–/|"
+
+// spacedDelimiters do the same job, but only when the separator also
+// carries whitespace — they all have a second, word-internal meaning that a
+// bare occurrence usually intends. " - " is a dash and "Twenty-One" a
+// compound; ". " ends a segment and "J.R.R." does not.
+//
+// The period earns its place from the population this path serves: Russian
+// editions, which DESIGN.md names as the reason the title search exists,
+// conventionally write "Series. Title" — without it "Властелин колец" could
+// never match "Властелин колец. Братство кольца", where the equivalent
+// colon form already matches. The cost is an abbreviation splitting a
+// title, so "No" matches "Dr. No" and "Dalloway" matches "Mrs. Dalloway".
+// Both are the over-match this design already accepts elsewhere (a
+// delimited segment matching a whole title is the same rule that makes
+// "The Hobbit" match "The Hobbit, or There and Back Again"), the author
+// veto still applies, and maxSegments still refuses a period-separated
+// contents list. Recorded rather than left implicit, so a reader can tell
+// this was decided.
+const spacedDelimiters = "-.?!"
 
 // maxSegments bounds how many delimited parts an answer may have and still
 // match on one of them. Two — the title, and at most one subtitle, series
@@ -77,7 +93,7 @@ func isBoundary(sep string) bool {
 	if strings.ContainsAny(sep, subtitleDelimiters) {
 		return true
 	}
-	return strings.ContainsRune(sep, '-') && strings.ContainsAny(sep, " \t\n")
+	return strings.ContainsAny(sep, spacedDelimiters) && strings.ContainsAny(sep, " \t\n")
 }
 
 // isWordRune reports whether r continues a word. Marks count: Mn is already

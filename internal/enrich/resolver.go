@@ -202,15 +202,34 @@ type Resolution struct {
 // testable without a real provider, per DESIGN.md.
 //
 // If nothing is missing, no provider is called at all. Otherwise providers
-// are asked in the given order; each is asked by ISBN when book has one,
-// by title and author otherwise. Only the fields still missing that a
-// provider actually answered are kept, each recorded under that provider's
-// Name() in sourceName — a provider cannot supply a value for a field that
-// isn't missing, or overwrite a field an earlier provider in the same run
-// already answered. Once nothing is left missing, the loop stops without
-// calling the remaining providers — DESIGN.md's "the chain stops early and
-// saves the API calls" — which is why a two-provider test where the first
-// answers everything must show the second is never called.
+// are asked in the given order. Each is asked by ISBN when book has one and
+// by title and author otherwise — and, when an ISBN lookup comes back a
+// clean no-match, by title as well, on the same provider before the chain
+// moves on: a catalogue that does not hold that edition may still hold the
+// book. An ISBN lookup that *errors* is not followed up, since a 5xx says
+// nothing about whether the ISBN is right.
+//
+// Only the fields still missing that a provider actually answered are kept,
+// each recorded under that provider's Name() in SourceName — a provider
+// cannot supply a value for a field that isn't missing, or overwrite a field
+// an earlier provider in the same run already answered. Two rules narrow
+// that further, and both apply to answers reached by title rather than by
+// ISBN, since those are whatever a remote ranking put first for a title that
+// is frequently the filename:
+//
+//   - the answer must clear plausibleMatch (see match.go) before any of it
+//     is merged, and one that does not is treated as a no-match — nothing
+//     kept, no provenance recorded, no cover taken, and the chain carries
+//     on to the next provider;
+//   - isbn is never filled from such an answer, which is enforced by
+//     dropping it from the missing set as soon as the title path is taken.
+//     That one line also lets the early stop fire for a book with no ISBN,
+//     so moving it re-opens the write as well as the wasted call.
+//
+// Once nothing is left missing, the loop stops without calling the
+// remaining providers — DESIGN.md's "the chain stops early and saves the
+// API calls" — which is why a two-provider test where the first answers
+// everything must show the second is never called.
 //
 // A provider returning an error is logged and skipped; the chain continues
 // to the next one. That is deliberately not this function's failure to
@@ -310,7 +329,8 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 		// ranking put first for a title that is often the filename, so it
 		// has to earn the merge. A rejected answer is treated as no match —
 		// the ordinary zero Metadata — so the chain continues to the next
-		// provider with the missing set intact.
+		// provider with the missing set otherwise intact — isbn has already
+		// left it above, which is why "intact" is not quite the word.
 		if viaSearch && !answer.IsEmpty() {
 			if ok, reason := plausibleMatch(book.Title, authors, answer); !ok {
 				// The reason matters: an author veto shows two titles that

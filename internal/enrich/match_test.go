@@ -20,6 +20,23 @@ func TestTitlesMatch(t *testing.T) {
 		{"parenthesised edition note", "The Hobbit", "The Hobbit (75th Anniversary Edition)", true},
 		{"spaced hyphen reads as a dash", "The Hobbit", "The Hobbit - Illustrated", true},
 		{"leading article dropped", "Hobbit", "The Hobbit", true},
+		{"article a dropped", "Wizard of Earthsea", "A Wizard of Earthsea", true},
+		{"article an dropped", "Wrinkle in Time", "An Wrinkle in Time", true},
+
+		// The Russian "Series. Title" convention, which DESIGN.md names as
+		// the population the title search exists for. Without the period the
+		// colon form matched and this one did not.
+		{"russian series convention", "Властелин колец", "Властелин колец. Братство кольца", true},
+		{"russian series, volume side", "Братство кольца", "Властелин колец. Братство кольца", true},
+		{"question mark ends a segment", "Who's Afraid of Virginia Woolf", "Who's Afraid of Virginia Woolf? A Play", true},
+		// The cost of the period, accepted and pinned: an abbreviation
+		// splits a title. Same over-match class the design accepts
+		// elsewhere, and the author veto still applies.
+		{"abbreviation splits — accepted cost", "No", "Dr. No", true},
+		// An unspaced period does not split, so initials stay one word.
+		{"initials are not a boundary", "J.R.R. Tolkien A Biography", "J.R.R. Tolkien A Biography", true},
+		// maxSegments still refuses a period-separated contents list.
+		{"period-separated contents list", "Гамлет", "Шекспир. Гамлет. Отелло", false},
 		{"different books", "The Hobbit", "The Silmarillion", false},
 		{"substring but not a token run", "It", "Italy", false},
 		{"token run must be contiguous", "Fellowship Ring", "The Fellowship of the Ring", false},
@@ -214,6 +231,20 @@ func TestPlausibleMatch(t *testing.T) {
 		if !got && reason != c.reason {
 			t.Errorf("%s: reason = %q, want %q", c.name, reason, c.reason)
 		}
+	}
+}
+
+// The two rejection reasons have to stay distinguishable. TestPlausibleMatch
+// compares the returned reason against these same constants, so collapsing
+// them to one string leaves it green while making the log unable to tell a
+// title mismatch from an author veto — which is the whole point of carrying
+// a reason at all.
+func TestRejectionReasonsAreDistinct(t *testing.T) {
+	if reasonTitleMismatch == reasonAuthorVeto {
+		t.Fatalf("both reasons are %q; a veto must be distinguishable from a mismatch", reasonTitleMismatch)
+	}
+	if reasonTitleMismatch == "" || reasonAuthorVeto == "" {
+		t.Error("a rejection reason is empty; an accepted match is what reports no reason")
 	}
 }
 
