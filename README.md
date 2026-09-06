@@ -72,7 +72,7 @@ Each book's detail page has a "Fetch metadata" button that queues the
 work and reports what it filled in; a field a provider supplied is marked
 with its source, so you can tell a guess from what the file itself said.
 Nothing is enriched automatically — a run is always something you asked
-for, on a book you chose. If no provider could be reached, the run is
+for, on a book you chose. If no provider could answer, the run is
 reported as failed with a Retry button rather than as nothing found — a
 throttled API and an unknown book are not the same answer.
 

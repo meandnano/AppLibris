@@ -38,7 +38,10 @@ const lookupFailedReason = "could not read the library index — try again"
 const applyFailedReason = "could not save enriched metadata"
 
 // allProvidersFailedReason is recorded when every provider the run asked
-// returned an error — a throttle, a 5xx, a timeout. It is deliberately not
+// returned an error — a throttle, a 5xx, a timeout. "Could answer" rather
+// than "could be reached": a 429 and a 5xx are the provider being reached
+// and refusing, and this is the one sentence the whole step exists to make
+// true. It is deliberately not
 // a done job with an empty result: that row is indistinguishable from an
 // honest "this book is in neither catalogue", and internal/web renders it
 // in the success treatment as "Nothing to add", telling a person there is
@@ -49,7 +52,7 @@ const applyFailedReason = "could not save enriched metadata"
 // purpose is to ask providers, and a run that reached none did not do it —
 // and because failed already renders with a Retry button, which is the one
 // thing a person can usefully do about it.
-const allProvidersFailedReason = "no metadata provider could be reached — try again"
+const allProvidersFailedReason = "no metadata provider could answer — try again"
 
 // coverFetchTimeout bounds one cover download. The worker owns this client
 // rather than borrowing a provider's, because the download is the worker's
