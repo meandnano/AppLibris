@@ -264,9 +264,9 @@ func TestClearProviderCover(t *testing.T) {
 	}
 
 	at := time.Now().Add(time.Hour).Truncate(time.Second)
-	exists, err := db.ClearProviderCover(ctx, id, at)
-	if err != nil || !exists {
-		t.Fatalf("ClearProviderCover: exists=%v, err=%v", exists, err)
+	cleared, err := db.ClearProviderCover(ctx, id, before.CoverPath, at)
+	if err != nil || !cleared {
+		t.Fatalf("ClearProviderCover: cleared=%v, err=%v", cleared, err)
 	}
 
 	after, err := db.FindBookByID(ctx, id)
@@ -309,11 +309,101 @@ func TestClearProviderCover(t *testing.T) {
 
 func TestClearProviderCoverUnknownBook(t *testing.T) {
 	db := openTestDB(t)
-	exists, err := db.ClearProviderCover(context.Background(), 9999, time.Now())
+	cleared, err := db.ClearProviderCover(context.Background(), 9999, "covers/abc.jpg", time.Now())
 	if err != nil {
 		t.Fatalf("ClearProviderCover: %v", err)
 	}
-	if exists {
-		t.Error("exists = true for an unknown book")
+	if cleared {
+		t.Error("cleared = true for an unknown book")
+	}
+}
+
+// The staleness guard: a cover that arrived after the caller looked is not
+// the one it decided to forget.
+//
+// The scanner decides from a snapshot, then stats, parses a whole EPUB and
+// reads provenance before the write lands — and an enrichment run can write
+// a fresh cover and its row inside that window. It is the same staleness
+// fieldIsStillMissingTx closes for every other field.
+func TestClearProviderCoverRefusesAStalePath(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, Book{ContentHash: "clear-stale", Title: "The Book"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, _, err := db.ApplyEnrichedFields(ctx, id,
+		map[MetadataField]string{FieldCover: "covers/fresh.jpg"},
+		map[MetadataField]string{FieldCover: "openlibrary"}, time.Now()); err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+
+	// The caller observed an earlier state — here the empty path a
+	// cover_retry-marked book carries, which is the reachable interleaving.
+	cleared, err := db.ClearProviderCover(ctx, id, "", time.Now())
+	if err != nil {
+		t.Fatalf("ClearProviderCover: %v", err)
+	}
+	if cleared {
+		t.Error("cleared = true against a stale path")
+	}
+
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID: %+v, %v", book, err)
+	}
+	if book.CoverPath != "covers/fresh.jpg" {
+		t.Errorf("CoverPath = %q, want the freshly fetched one kept", book.CoverPath)
+	}
+	sources, err := db.FieldSourcesForBook(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sources[FieldCover] != "openlibrary" {
+		t.Errorf("cover source = %q, want openlibrary — the row belongs to the fresh cover", sources[FieldCover])
+	}
+}
+
+// UpdateBookCoverPath is the scanner's, and a cover the scanner extracted
+// has no provenance by definition — that absence is the discriminator
+// internal/scanner reads. So writing a path must also drop any cover row,
+// or a re-extraction over a provider cover leaves a row claiming a provider
+// supplied the scanner's own image.
+func TestUpdateBookCoverPathDropsProviderProvenance(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, Book{ContentHash: "cover-provenance", Title: "The Book", Publisher: "Press"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, _, err := db.ApplyEnrichedFields(ctx, id,
+		map[MetadataField]string{FieldCover: "covers/from-provider.jpg"},
+		map[MetadataField]string{FieldCover: "openlibrary"}, time.Now()); err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+
+	if err := db.UpdateBookCoverPath(ctx, id, "covers/from-the-book.jpg"); err != nil {
+		t.Fatalf("UpdateBookCoverPath: %v", err)
+	}
+
+	sources, err := db.FieldSourcesForBook(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src, ok := sources[FieldCover]; ok {
+		t.Errorf("cover source = %q, want no row — this path is the scanner's own extraction", src)
+	}
+	// Row-scoped, like ClearProviderCover's: other provenance survives.
+	if sources[FieldPublisher] == "" {
+		t.Error("publisher provenance was removed too; the delete must be row-scoped")
+	}
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID: %+v, %v", book, err)
+	}
+	if book.CoverPath != "covers/from-the-book.jpg" {
+		t.Errorf("CoverPath = %q, want the new path", book.CoverPath)
 	}
 }

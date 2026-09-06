@@ -346,16 +346,31 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 	return nil
 }
 
-// coverFileUsable reports whether the stored thumbnail is present and
-// non-empty. maybeRegenerateCover's own stat is skipped when cover_retry is
-// set, so a clear reached by that route would otherwise have no evidence the
-// file is gone at all.
-func coverFileUsable(path string) bool {
+// coverFileDefinitelyGone reports whether the stored thumbnail is known to
+// be unusable: nothing recorded, absent, or empty. maybeRegenerateCover's
+// own stat is skipped when cover_retry is set, so a clear reached by that
+// route would otherwise have no evidence about the file at all.
+//
+// Only fs.ErrNotExist counts as absent. Any other stat failure — an EACCES
+// or EIO on COVERS_DIR — leaves it unknown, and forgetting a cover on an
+// unknown is the same mistake as forgetting one on an unreadable
+// provenance: it says nothing about whether the file is there. That is the
+// posture maybeRegenerateCover's own stat takes, and the one missing-file
+// reconciliation takes toward an ambiguous Lstat.
+func coverFileDefinitelyGone(path string) bool {
 	if path == "" {
-		return false
+		return true
 	}
 	info, err := os.Stat(path)
-	return err == nil && info.Size() > 0
+	switch {
+	case err == nil:
+		return info.Size() == 0
+	case errors.Is(err, fs.ErrNotExist):
+		return true
+	default:
+		slog.Warn("inspect cover failed", "path", path, "error", err)
+		return false
+	}
 }
 
 // forgetUnregenerableCover handles a book whose stored cover is unusable and
@@ -373,10 +388,26 @@ func coverFileUsable(path string) bool {
 // and comparing against "embedded" would match nothing while reading as
 // correct.
 //
-// readErr is whatever readEmbeddedCover reported, so the ordinary
-// warning still distinguishes a parse failure from a book that simply has
-// no cover in it.
+// readErr is whatever readEmbeddedCover reported. It is not merely phrasing
+// for the warning: a non-nil one stops this function before it can forget
+// anything, per the first branch.
 func forgetUnregenerableCover(ctx context.Context, db *storage.DB, book *storage.Book, sourcePath string, readErr error) {
+	// A read *error* establishes nothing. len(coverBytes) == 0 means the
+	// file holds no cover; a failure to open or parse it means the question
+	// was never answered, and clearing on that would discard a regenerable
+	// cover permanently — once cover_path is empty this function is never
+	// reached again, so the embedded original is not recovered even when the
+	// read starts working. The only repair left would be Fetch, which brings
+	// back the provider's image rather than the book's own, and COVERS_DIR
+	// stops being disposable for that book by a different door.
+	//
+	// Same standard the provenance read below holds itself to, and the one
+	// missing-file reconciliation holds for an ambiguous Lstat.
+	if readErr != nil {
+		slog.Warn("regenerate cover failed", "path", sourcePath, "error", readErr)
+		return
+	}
+
 	sources, err := db.FieldSourcesForBook(ctx, book.ID)
 	if err != nil {
 		// A storage error says nothing about where the cover came from, and
@@ -395,19 +426,20 @@ func forgetUnregenerableCover(ctx context.Context, db *storage.DB, book *storage
 	// updateBookColumnTx clears the marker whenever it writes a path — but
 	// the invariant lives in another package and nothing here would notice
 	// it breaking.
-	if fromProvider && !coverFileUsable(book.CoverPath) {
-		if _, err := db.ClearProviderCover(ctx, book.ID, time.Now()); err != nil {
+	if fromProvider && coverFileDefinitelyGone(book.CoverPath) {
+		// The observed path is passed through so the write can refuse a
+		// cover that arrived while this sweep was parsing.
+		cleared, err := db.ClearProviderCover(ctx, book.ID, book.CoverPath, time.Now())
+		if err != nil {
 			slog.Warn("clear provider cover failed", "book_id", book.ID, "error", err)
 			return
 		}
-		slog.Info("provider cover forgotten", "book_id", book.ID, "cover_path", book.CoverPath)
+		if cleared {
+			slog.Info("provider cover forgotten", "book_id", book.ID, "cover_path", book.CoverPath)
+		}
 		return
 	}
 
-	if readErr != nil {
-		slog.Warn("regenerate cover failed", "path", sourcePath, "error", readErr)
-		return
-	}
 	slog.Warn("regenerate cover failed", "path", sourcePath, "error", "embedded cover is missing")
 }
 

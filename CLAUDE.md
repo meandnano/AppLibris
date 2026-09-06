@@ -119,12 +119,14 @@ full design.
   every text field. Writing `cover_path` also clears `cover_retry`, the
   same pairing `UpdateBookCoverPath` makes: the marker means "a cover
   store failed, try again next sweep", and the scanner skips its stat
-  check entirely while it is set, so leaving it would send the next sweep
-  past that check into the branch that *forgets* a provider cover — throwing
-  away one that is sitting there intact. The rule is more necessary than it
-  was, not less: `internal/scanner` keeps its own guard against that state
-  (`coverFileUsable`) precisely because the invariant lives here, one
-  package away, where nothing over there would notice it breaking. See
+  check entirely while it is set, so leaving it sends the next sweep past
+  that check with no evidence about the file at all — and what happens then
+  depends on the book: one with an embedded cover gets re-extracted over the
+  provider's image, one without has a perfectly good provider cover
+  *forgotten*. Both are wrong, which is why the pairing is not optional.
+  `internal/scanner` keeps its own guard against that state
+  (`coverFileDefinitelyGone`) precisely because the invariant lives here,
+  one package away, where nothing over there would notice it breaking. See
   `internal/enrich` below for the fetch and storage side of this.
 - `books_fts` is an FTS5 virtual table (`title`, `authors`, `description`,
   `isbn`, `tokenize='unicode61 remove_diacritics 2'`) — a plain table, not
@@ -928,23 +930,42 @@ full design.
   *suffix* rather than `filepath.Ext`, since a `.fb2.zip` archive is two
   extensions and `Ext` would only ever see the last one. For known content,
   a sweep re-extracts a recorded cover whose file is missing or zero bytes
-  and refreshes its stored path, making `COVERS_DIR` disposable — but only
-  for a cover the scanner itself extracted. A **provider-supplied** cover
-  has no embedded original behind it, so there is nothing to re-extract:
-  the sweep forgets it instead (`storage.ClearProviderCover`), which puts
-  it back in enrichment's missing set so the Fetch button repairs it, and
-  leaves the grid showing its honest "no cover" box rather than an `<img>`
-  pointing at a file that is gone. Without that, every sweep warned about
-  the same book forever while `cover_path` went on naming nothing.
-  **The test is that a `field_sources` row exists, not that it names a
-  provider rather than `embedded`** — `setEmbeddedFieldSourcesTx` never
-  writes a `cover` row, so a scanner-extracted cover has no provenance at
-  all and a string comparison against `embedded` would match nothing while
-  reading as correct. That is exactly the tidy-up a later reader would
-  make. A provenance read that *fails* leaves the book untouched and
-  re-extracts nothing: a storage error says nothing about where the cover
-  came from, and guessing either way loses something — the same posture
-  missing-file reconciliation takes toward an ambiguous `Lstat`. An empty
+  and refreshes its stored path, making `COVERS_DIR` disposable — but a
+  cover a *provider* supplied has no original in the book to rebuild from,
+  and the sweep must not simply fail to re-extract it forever.
+  **The ordering is the whole rule, and it is what a reader implementing
+  from this paragraph would otherwise get backwards: `readEmbeddedCover`
+  runs first, and `field_sources` is consulted only once re-extraction has
+  already come back empty.** Establish, don't infer — a book can carry an
+  embedded cover *and* a provider row (`cover.Store` fails at first sight,
+  leaving `cover_retry` set and no cover row since
+  `setEmbeddedFieldSourcesTx` never writes one; enrichment then supplies a
+  cover and creates the row), so "there is a provider row" never meant
+  "there is nothing to re-extract". Plan `2026090603`'s Decision 2 says the
+  branch "returns without touching `readEmbeddedCover`"; that is superseded,
+  and since a completed plan is immutable this is the only record of it.
+  A cover that *is* re-extracted goes through `UpdateBookCoverPath`, which
+  drops the `cover` row in the same transaction — the image is now the
+  scanner's, and a row claiming otherwise is the state the discriminator
+  below forbids.
+  Only when the book yields nothing is the cover forgotten
+  (`storage.ClearProviderCover`), which puts it back in enrichment's missing
+  set so the Fetch button repairs it and leaves the grid showing its honest
+  "no cover" box rather than an `<img>` pointing at a file that is gone.
+  **The provider test is that a `field_sources` row exists, not that it
+  names a provider rather than `embedded`** — a scanner-extracted cover has
+  no provenance at all, so a string comparison against `embedded` would
+  match nothing while reading as correct. That is exactly the tidy-up a
+  later reader would make.
+  Three separate ambiguities are all resolved the same way — **an unknown is
+  not evidence**, the posture missing-file reconciliation takes toward a
+  non-`ErrNotExist` `Lstat`. A failed provenance read, a failed
+  `readEmbeddedCover`, and a stat that fails with anything but
+  `fs.ErrNotExist` (`coverFileDefinitelyGone`) each leave the book untouched
+  rather than forgetting a cover on a guess. The read-error one matters most:
+  clearing there is permanent, because an empty `cover_path` returns at
+  `maybeRegenerateCover`'s first guard on every later sweep, so the embedded
+  original is never recovered even once the read works again. An empty
   stored cover path records that no embedded cover was found and is not
   retried on every sweep; a separate `cover_retry` marker records a
   transient initial store failure and retries it later. Cover inspection

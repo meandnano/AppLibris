@@ -166,8 +166,9 @@ func updateBookColumnTx(ctx context.Context, tx *sql.Tx, bookID int64, field Met
 		// UpdateBookCoverPath does: it marks "a cover store failed, try
 		// again next sweep", and a book that now has a cover has nothing
 		// left to retry. Leaving it set would make the scanner skip its
-		// stat check and re-extract the embedded cover over this one,
-		// while field_sources went on naming the provider.
+		// stat check and act with no evidence about the file — re-extracting
+		// the embedded cover over this one for a book that has one, and
+		// forgetting a perfectly good cover for a book that does not.
 		_, err = tx.ExecContext(ctx, `UPDATE books SET cover_path = ?, cover_retry = 0, modified_at = ? WHERE id = ?`, value, formatTime(modifiedAt), bookID)
 	default:
 		return ErrInvalidMetadataField
@@ -254,8 +255,12 @@ func (db *DB) UpdateBookAuthors(ctx context.Context, bookID int64, names []strin
 // ClearProviderCover forgets a provider-supplied cover whose stored file has
 // gone: it empties cover_path, clears cover_retry and deletes the cover row
 // from field_sources, so the book reads as having no cover and the next
-// enrichment run offers to fetch one again. It reports false for an unknown
-// book — the finders' absent-isn't-an-error contract.
+// enrichment run offers to fetch one again.
+//
+// It reports false when the book is gone, and equally when its cover_path is
+// no longer observedPath — the value the caller saw before deciding. Both
+// are "nothing to do here" rather than errors, the finders'
+// absent-isn't-an-error contract.
 //
 // cover_retry is cleared alongside the path — see updateBookColumnTx's
 // FieldCover branch, which owns that pairing and is what this composes.
@@ -272,9 +277,18 @@ func (db *DB) UpdateBookAuthors(ctx context.Context, bookID int64, names []strin
 // method re-deriving that decision would either duplicate the predicate or
 // invite a second, differently-wrong copy of it — see internal/scanner's
 // maybeRegenerateCover for why "a row exists" is the whole test.
-func (db *DB) ClearProviderCover(ctx context.Context, bookID int64, at time.Time) (exists bool, err error) {
+func (db *DB) ClearProviderCover(ctx context.Context, bookID int64, observedPath string, at time.Time) (cleared bool, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM books WHERE id = ?)`, bookID).Scan(&exists); err != nil || !exists {
+		// Guarded on the path the caller actually looked at, not merely on
+		// the book existing. The scanner decides to clear from a snapshot
+		// and then does a stat, a full EPUB/FB2 parse and a provenance round
+		// trip before this write lands; in that window an enrichment run can
+		// write a fresh cover and its row, and an unguarded blank would
+		// throw it away. Same staleness fieldIsStillMissingTx closes for
+		// every other field — no reason for this one to opt out.
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM books WHERE id = ? AND cover_path = ?)`,
+			bookID, observedPath).Scan(&cleared); err != nil || !cleared {
 			return err
 		}
 		// Through the shared helper rather than a second copy of its
@@ -288,5 +302,5 @@ func (db *DB) ClearProviderCover(ctx context.Context, bookID int64, at time.Time
 			`DELETE FROM field_sources WHERE book_id = ? AND field = ?`, bookID, FieldCover)
 		return err
 	})
-	return exists, err
+	return cleared, err
 }
