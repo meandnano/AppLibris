@@ -254,8 +254,13 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			perr      error
 			viaSearch bool
 		)
-		res.Asked++
+		// Asked counts providers this run actually called, so it is
+		// incremented inside each calling branch rather than above them: a
+		// book with neither an ISBN nor a title calls nobody, and counting
+		// it would report a run as broader than it was — the invariant the
+		// worker's Asked > 0 && Failed == Asked rule rests on.
 		if book.ISBN != "" {
+			res.Asked++
 			answer, perr = p.ByISBN(ctx, book.ISBN)
 			// A clean no-match means this catalogue does not hold that
 			// edition, and the title is still worth asking about — subject
@@ -267,8 +272,32 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 				viaSearch = true
 			}
 		} else if book.Title != "" {
+			res.Asked++
 			answer, perr = p.Search(ctx, book.Title, authors)
 			viaSearch = true
+		}
+		if viaSearch {
+			// Dropping isbn from the missing set is what withholds it, and
+			// it does two jobs at once — so moving or removing this line
+			// re-opens the write, not just the early stop.
+			//
+			// A search answer must never supply an ISBN, even having passed
+			// the gate below. Every other field is a description that is
+			// roughly right or roughly wrong; an ISBN is an identifier that
+			// either names this book or names a different one, and it is the
+			// lookup key every later run would use — so a wrong one compounds
+			// instead of sitting still. And because the field can never be
+			// filled from here, leaving it in the set would mean the set
+			// never empties for a book without an ISBN: every such book would
+			// spend a call and a rate-limit token on every remaining provider,
+			// on every run, for a field none of them may answer.
+			//
+			// The consequence is worth stating because it reads as an
+			// oversight otherwise: enrichment cannot write isbn by any route.
+			// The field is only ever missing for a book that has none, such a
+			// book can only reach a provider through Search, and a book that
+			// has one does not need it.
+			delete(missing, storage.FieldISBN)
 		}
 		if perr != nil {
 			res.Failed++
@@ -283,26 +312,21 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 		// the ordinary zero Metadata — so the chain continues to the next
 		// provider with the missing set intact.
 		if viaSearch && !answer.IsEmpty() {
-			if !plausibleMatch(book.Title, authors, answer) {
+			if ok, reason := plausibleMatch(book.Title, authors, answer); !ok {
+				// The reason matters: an author veto shows two titles that
+				// look like a fine match and says nothing about why it was
+				// refused, so without it the two rejection causes are
+				// indistinguishable in the record.
 				slog.Debug("enrichment search answer rejected", "provider", p.Name(),
-					"book_id", book.ID, "query_title", book.Title, "candidate_title", answer.Title)
+					"book_id", book.ID, "reason", reason, "query_title", book.Title,
+					"candidate_title", answer.Title, "candidate_authors", answer.Authors)
 				continue
 			}
-			slog.Info("enrichment matched by search", "provider", p.Name(),
-				"book_id", book.ID, "query_title", book.Title, "matched_title", answer.Title)
 		}
 
+		before := len(res.Values)
 		for field, value := range metadataValues(answer) {
 			if !missing[field] || value == "" {
-				continue
-			}
-			// A search answer never supplies an ISBN, even having passed
-			// the gate. Every other field is a description that is roughly
-			// right or roughly wrong; an ISBN is an identifier that either
-			// names this book or names a different one, and it is the
-			// lookup key every later run would use — so a wrong one
-			// compounds instead of sitting still.
-			if viaSearch && field == storage.FieldISBN {
 				continue
 			}
 			res.Values[field] = value
@@ -310,10 +334,21 @@ func Resolve(ctx context.Context, book storage.Book, authors []string,
 			delete(missing, field)
 		}
 
+		tookCover := false
 		if missing[storage.FieldCover] && answer.CoverURL != "" {
 			res.CoverURL = answer.CoverURL
 			res.CoverSource = p.Name()
 			delete(missing, storage.FieldCover)
+			tookCover = true
+		}
+
+		// Logged after the merge rather than before it, and only when the
+		// answer actually contributed: Decision 5 justifies this line as
+		// "the line that explains a field's value", and an accepted answer
+		// that filled nothing explains none.
+		if viaSearch && (len(res.Values) > before || tookCover) {
+			slog.Info("enrichment matched by search", "provider", p.Name(),
+				"book_id", book.ID, "query_title", book.Title, "matched_title", answer.Title)
 		}
 	}
 	return res, nil

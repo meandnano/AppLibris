@@ -540,35 +540,103 @@ func TestSanitizeValueCapsOneAuthorName(t *testing.T) {
 }
 
 // A search answer that fails the gate is treated as no match: nothing is
-// merged, the missing set is untouched, and the chain carries on to the
-// next provider with the full set still to fill.
+// merged, no provenance is recorded, no cover is taken, the missing set is
+// untouched, and the chain carries on — so the next provider can still fill
+// everything.
 func TestResolveRejectsAnImplausibleSearchAnswer(t *testing.T) {
 	book := storage.Book{ID: 1, Title: "01 - Fellowship"}
 	sources := map[storage.MetadataField]string{}
 
 	a := &fakeProvider{name: "provider-a", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
-		return Metadata{Title: "The Fellowship of the Ring", Publisher: "Allen & Unwin", Description: "A different book"}, nil
+		return Metadata{
+			Title: "The Fellowship of Being", Publisher: "Wrong Press",
+			Description: "A different book", CoverURL: "https://covers.example/wrong.jpg",
+		}, nil
 	}}
-	var sawMissing []storage.MetadataField
 	b := &fakeProvider{name: "provider-b", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
-		sawMissing = append(sawMissing, storage.FieldPublisher)
-		return Metadata{}, nil
+		return Metadata{Title: "01 - Fellowship", Publisher: "Right Press", Description: "The real one"}, nil
 	}}
 
 	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Values) != 0 {
-		t.Errorf("values = %v, want empty — the answer was about a different book", res.Values)
+	// The rejected answer consumed none of the missing set, so provider-b
+	// could still fill everything — the claim a call-count assertion alone
+	// cannot make.
+	if res.Values[storage.FieldPublisher] != "Right Press" || res.Values[storage.FieldDescription] != "The real one" {
+		t.Errorf("values = %v, want provider-b's answer for both fields", res.Values)
 	}
-	if b.calls != 1 || len(sawMissing) != 1 {
-		t.Errorf("provider-b calls = %d, want 1 — a rejected answer must not end the chain", b.calls)
+	for _, f := range []storage.MetadataField{storage.FieldPublisher, storage.FieldDescription} {
+		if res.SourceName[f] != "provider-b" {
+			t.Errorf("sourceName[%s] = %q, want provider-b — a rejected answer must leak no provenance", f, res.SourceName[f])
+		}
+	}
+	// The cover is the most visible field on the grid, and a wrong-book one
+	// is stored, provenanced and never reconsidered. The rejection has to
+	// stop it before the cover block, not only before the merge.
+	if res.CoverURL != "" || res.CoverSource != "" {
+		t.Errorf("coverURL = %q from %q, want neither — the answer was rejected", res.CoverURL, res.CoverSource)
 	}
 	// A rejection is not a provider failure: it is an answer this book
 	// cannot use, which is the four-case contract's no-match case.
 	if res.Failed != 0 {
 		t.Errorf("failed = %d, want 0 — a rejected answer is not a provider error", res.Failed)
+	}
+}
+
+// Single-provider rejection: nothing at all comes back, and no provenance
+// is recorded for a field that was never filled.
+func TestResolveRejectionRecordsNoProvenance(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "01 - Fellowship"}
+	sources := map[storage.MetadataField]string{}
+	p := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		return Metadata{Title: "The Fellowship of Being", Publisher: "Wrong Press"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Values) != 0 || len(res.SourceName) != 0 {
+		t.Errorf("values = %v, sourceName = %v, want both empty", res.Values, res.SourceName)
+	}
+}
+
+// The gate on the *fallback* path — the path this step was ordered around,
+// and the one a missing viaSearch on the ISBN branch would silently open.
+// Without it the answer skips the gate and becomes eligible to write the
+// identifier every later run keys off.
+func TestResolveGatesTheFallbackSearchAnswer(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "01 - Fellowship", ISBN: "9780000000001"}
+	sources := map[storage.MetadataField]string{}
+
+	a := &fakeProvider{
+		name:   "provider-a",
+		byISBN: func(ctx context.Context, isbn string) (Metadata, error) { return Metadata{}, nil },
+		search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+			return Metadata{
+				Title: "The Fellowship of Being", Publisher: "Wrong Press",
+				ISBN: "9781111111111", CoverURL: "https://covers.example/wrong.jpg",
+			}, nil
+		},
+	}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Publisher: "Right Press"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Values[storage.FieldPublisher] != "Right Press" {
+		t.Errorf("values[publisher] = %q, want provider-b's — provider-a's fallback answer was implausible", res.Values[storage.FieldPublisher])
+	}
+	if res.CoverURL != "" {
+		t.Errorf("coverURL = %q, want empty", res.CoverURL)
+	}
+	if got, ok := res.Values[storage.FieldISBN]; ok {
+		t.Errorf("values[isbn] = %q, want it absent", got)
 	}
 }
 
@@ -813,5 +881,65 @@ func TestResolveDoesNotSearchWithoutATitle(t *testing.T) {
 		if searched {
 			t.Errorf("book %d: search was called with an empty title", book.ID)
 		}
+	}
+}
+
+// The early stop has to fire for a no-ISBN book too. isbn is in such a
+// book's missing set and can never be filled from the search path, so
+// without removing it the set never empties and every remaining provider
+// is called for a field none of them may answer — a wasted request and
+// rate-limit token per book per run, against DESIGN.md's "the chain stops
+// early and saves the API calls".
+func TestResolveStopsEarlyForANoISBNBook(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit"}
+	sources := map[storage.MetadataField]string{}
+
+	a := &fakeProvider{name: "provider-a", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		return Metadata{
+			Title: "The Hobbit", Authors: []string{"J.R.R. Tolkien"},
+			Publisher: "Allen & Unwin", PublishedDate: "1937", Language: "en",
+			Description: "In a hole in the ground…", CoverURL: "https://covers.example/hobbit.jpg",
+		}, nil
+	}}
+	b := &fakeProvider{name: "provider-b", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		t.Error("provider-b was called; provider-a answered everything fillable")
+		return Metadata{}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.calls != 0 {
+		t.Errorf("provider-b calls = %d, want 0", b.calls)
+	}
+	if res.Asked != 1 {
+		t.Errorf("asked = %d, want 1", res.Asked)
+	}
+	// isbn is not merely skipped at the merge — it has left the missing set,
+	// which is what lets the loop break.
+	if got, ok := res.Values[storage.FieldISBN]; ok {
+		t.Errorf("values[isbn] = %q, want it absent", got)
+	}
+}
+
+// Asked counts providers this run actually called. A book with neither an
+// ISBN nor a title calls nobody, and counting it would break the invariant
+// the worker's Asked > 0 && Failed == Asked rule rests on.
+func TestResolveCountsNoProviderWhenItCallsNone(t *testing.T) {
+	book := storage.Book{ID: 1}
+	sources := map[storage.MetadataField]string{}
+	a := &fakeProvider{name: "provider-a"}
+	b := &fakeProvider{name: "provider-b"}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.calls != 0 || b.calls != 0 {
+		t.Fatalf("calls: a=%d, b=%d, want 0 each", a.calls, b.calls)
+	}
+	if res.Asked != 0 || res.Failed != 0 {
+		t.Errorf("asked = %d, failed = %d, want 0 and 0", res.Asked, res.Failed)
 	}
 }

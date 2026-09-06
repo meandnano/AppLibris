@@ -516,21 +516,50 @@ full design.
   "titles match *or* authors match" accepts any Stephen King novel for any
   Stephen King file. Overlap is only consulted when both sides have
   authors, an authorless answer being silence rather than disagreement.
-  Titles match on **contiguous whole-token runs**, not substrings, so
-  "The Hobbit" matches "The Hobbit: 75th Anniversary Edition" while "It"
-  does not match "Italy". A rejected answer is treated as a no-match, not a
-  failure — the chain continues with the missing set intact and `Failed`
-  unchanged. It rejects most filename-titled books on purpose: an empty
+  Titles match on **delimited** contiguous whole-token runs. Whole tokens
+  rather than substrings, so "It" does not match "Italy"; *delimited*
+  because that is the only thing separating a subtitle from a sequel —
+  "The Hobbit" stands behind a `:` inside "The Hobbit: 75th Anniversary
+  Edition" and behind nothing but a space inside "The Hobbit Companion".
+  Bare containment is the rule to avoid, and the author veto cannot
+  substitute for it: a sequel shares its author, so `Dune` against `Dune
+  Messiah` clears the veto, and one-word and series titles are common in
+  exactly the sparse no-ISBN population this path serves. A run need not be
+  a prefix — a delimited suffix run is how a series-prefixed answer ("The
+  Lord of the Rings: The Fellowship of the Ring") matches. Titles are
+  folded to NFD with combining marks dropped before tokenising, so
+  decomposed text — macOS filenames, which `filenameTitle` turns into
+  titles for these very books — compares equal to the composed text a
+  provider returns; that also folds diacritics away, matching `books_fts`'s
+  own `remove_diacritics 2`. One leading English article is optional on
+  either side, compared both ways round rather than simply stripped, since
+  an article is only redundant at a title's edge.
+  A rejected answer is treated as a no-match, not a
+  failure — the chain continues with the missing set intact, no provenance
+  recorded and no cover taken, and `Failed` unchanged; the rejection is
+  logged at `Debug` with a `reason` (`title_mismatch` or `author_veto`),
+  since an author veto otherwise shows two titles that look like a fine
+  match and says nothing about why it was refused. The accepting line is
+  `Info` and is emitted **after** the merge, only when the answer actually
+  contributed — it exists to explain a field's value, and an accepted
+  answer that filled nothing explains none.
+  It rejects most filename-titled books on purpose: an empty
   field is recoverable, while a plausible wrong answer is written,
   provenanced and never reconsidered.
   A `Search`-sourced answer additionally **never fills `isbn`**, even
   having cleared the gate, because that field is the lookup key every later
-  run uses and an identifier has no partial credit. The consequence is
+  run uses and an identifier has no partial credit. It is withheld by
+  dropping `isbn` from the missing set as soon as the search path is taken,
+  one line doing two jobs: it is also what lets the **early stop** fire for
+  a book with no ISBN, since a field that can never be filled would
+  otherwise keep the set non-empty and spend a call on every remaining
+  provider, on every run. Moving or removing that line re-opens the write,
+  not just the wasted request. The consequence is
   worth stating because it reads as a bug otherwise: **enrichment can no
   longer write `isbn` by any route at all.** The field is only ever missing
   for a book that has none, such a book can only reach a provider through
   `Search`, and there the value is withheld — while a book that has one
-  does not need it. A test pins that. A provider erroring is
+  does not need it. Three tests pin it. A provider erroring is
   logged and skipped, indistinguishable (deliberately — see above) from
   one abandoned by a cancelled `ctx`; either way the chain continues, and
   neither is `Resolve`'s own failure to report. A book's authors are
