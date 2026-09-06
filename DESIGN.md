@@ -360,6 +360,20 @@ an error log that fires constantly is one nobody reads. A provider erroring
 is logged and skipped, and the chain continues — it is not the resolver's
 own failure to report.
 
+That last clause needed its other half, which was missing long enough to
+ship a wrong sentence to a person's face. The resolver still does not
+fail — but a run in which *every* provider errored produced an empty
+result stored identically to an honest no-match, and the UI rendered it as
+"Nothing to add" in the success treatment, telling someone their book had
+nothing left to find on a day nobody was reachable. So the resolver now
+reports how many providers it asked and how many failed, and the *worker*
+decides: `Asked > 0 && Failed == Asked` is a `failed` job with a reason,
+where anything else that comes back empty is the honest success this table
+is protecting. `Failed == Asked` rather than `Failed > 0`, because one
+throttled provider beside one that answered cleanly is still a run that
+learned something, and failing it would hide a real answer behind a flaky
+neighbour.
+
 ### Provider interface
 
 Deliberately tiny:
@@ -995,9 +1009,15 @@ as the six above, and belong here rather than reading as gaps:
   themselves.
 
 If the first of those ever arrives, one thing has to arrive with it: a
-ceiling on how many times a book is asked about, and something in the job
-record that can tell "asked, and nothing exists to find" from "asked, and
-every provider was down". Today a run in which every provider failed is
-recorded exactly like an honest no-match, which is fine while a person is
-the trigger and wrong the moment anything else is
-(`docs/backlog/2026090402-enrichment-has-no-attempt-ceiling.md`).
+ceiling on how many times a book is asked about. The other half of that
+requirement — something in the job record that can tell "asked, and
+nothing exists to find" from "asked, and every provider was down" — has
+since been built, because it turned out to be wrong on screen rather than
+merely wrong in principle: with a person as the trigger, a run where every
+provider was throttled was still rendered to them as "Nothing to add"
+(`docs/plans/completed/2026090601-enrichment-failure-honesty.md`). Such a
+run is now a `failed` job naming its cause, which is also the prerequisite
+for a ceiling that counts the right thing — a cap built on the old rows
+would have counted the network's bad days as evidence about the book. The
+ceiling itself remains deferred and is still tracked in
+`docs/backlog/2026090402-enrichment-has-no-attempt-ceiling.md`.
