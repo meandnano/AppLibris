@@ -69,7 +69,7 @@ code yet, which now means only the deferred items. (There is no longer a
 | Send to Kindle: job model, recipient picker | Built |
 | Send to Kindle: history view, recipient management | Built — `/history`; a saved address can be removed from the picker |
 | Web UI: server-side templates, embedded CSS, service layer | Built |
-| Web UI: library grid | Built |
+| Web UI: library grid | Built — paged, 48 at a time, keyset cursor |
 | Web UI: htmx, search, book detail | Built |
 | Web UI: inline metadata editing | Built |
 | Web UI: send control | Built |
@@ -765,11 +765,14 @@ htmx is used only where dynamism is actually needed:
 - inline metadata editing, per field, on the book detail page
 - the fetch-metadata button doing the same as the send button, for an
   enrichment job
+- the library grid appending its next page when the trigger under it is
+  revealed
 
-**Status: Built.** All four htmx interactions this section names now
-exist — the fourth was added with the enrichment UI and is deliberately
+**Status: Built.** All five htmx interactions this section names now
+exist. The fourth was added with the enrichment UI and is deliberately
 the same shape as the second, because a queued background job against one
-book is the same thing whichever queue it lands on.
+book is the same thing whichever queue it lands on; the fifth is the last
+thing in the handoff that was drawn but unbuilt.
 
 Built: `internal/web` serves the library grid at `GET /`, a book detail
 page at `GET /books/{id}` and the send history at `GET /history`, with
@@ -795,7 +798,7 @@ terminal fragment carries no trigger; the enrichment control does the
 same, sharing that state machine rather than repeating it; and inline
 editing swaps one field at a time between a read view and its editor.
 
-Every one of the four degrades without JavaScript, and by the same
+Every one of the five degrades without JavaScript, and by the same
 method: one markup path rather than a parallel no-JS path that drifts. A
 read affordance is an `<a>` carrying both an `href` and an `hx-get`, an
 editor is a `<form>` carrying both an `action` and an `hx-post`, and the
@@ -827,6 +830,70 @@ page. Both its items — the current-page marker and the right-hand note —
 are passed in by the handler rather than decided in the template, so
 `/history` can put its scope line where the library puts its book count
 without the partial branching on which page is rendering it.
+
+### Paging the grid
+
+The grid renders **48 books at a time** and appends the next batch when
+the trigger beneath it scrolls into view, rather than rendering the whole
+library. At the handoff's own reference size of 1,284 books, the unpaged
+version was 1,284 rows scanned, 1,284 cards of HTML and 1,284
+lazily-loaded cover requests in one document; it worked, and nothing
+about it was bounded. 48 is the handoff's own figure — a number in a
+mockup is a decision about how much scrolling one reveal buys.
+
+**The cursor is keyset, not `LIMIT`/`OFFSET`**, and the reason is specific
+to this application rather than general good practice: the library
+changes underneath the reader. The scanner sweeps every fifteen minutes
+and on every filesystem event, inserting wherever a book's `sort_title`
+falls, so under `OFFSET` a book inserted above the reader's position
+shifts every later row down by one — the next page repeats a card, and on
+a delete silently skips one. A cursor naming the last row seen has no
+such window.
+
+**The order is `(sort_title, id)` for both the unfiltered and the search
+path, and that is what lets one cursor serve both.** The search deliberately
+does not order by relevance — a decision made earlier and for an
+unrelated reason, that a grid someone is scanning while they type must
+not reorder under them — and it happens to be exactly the property paging
+needed. So there is one cursor type and one page size, and a search
+matching nine hundred books is not the case that got forgotten.
+
+The `id` is part of the cursor because `sort_title` is emphatically not
+unique: it is a normalised title with the leading article stripped and the
+case folded, so two editions of one book collide by construction, and a
+cursor on a non-unique column either loops on the collision or skips past
+it.
+
+Two things this design did not anticipate, both worth recording:
+
+- **A page is not the whole match set, so the results line needed its own
+  count.** "4 of 1,284" took its first number from the rows in hand,
+  which was correct while an unfiltered grid held every match and became
+  a lie the moment it held one page — it would have read "48 of 1,284"
+  for a search that matched nine hundred. A separate count over the FTS
+  join answers it now, on the search path only.
+- **Paging created the possibility of being deep in the library, so it
+  had to create a way out.** With JavaScript off there was nothing to be
+  deep in before, and the affordances that would normally lead home are
+  all inert here: the masthead brand and the current-page nav item are
+  plain text by design, and the search bar's clear link is hidden by CSS
+  whenever the box is empty — precisely a deep unfiltered page's state.
+  The clear link therefore persists there, reading "first page" rather
+  than naming a search that is not running. The rule this follows is the
+  plan's: a paging implementation that forgets the fallback makes the
+  no-JS experience *worse* than the unpaged grid it replaced, which was
+  the one thing that already worked without scripting.
+
+One implementation note, because it inverts what the obvious reading
+would be: the cursor comparison is written as SQLite's row-value form,
+`(sort_title, id) > (?, ?)`, and carries **no** explicit `COLLATE
+NOCASE`. Spelling the collation out — which is the more readable choice,
+given that the comparison agreeing with the `ORDER BY` is the whole
+correctness of paging — turns the query plan from a seek into a full scan
+of the index, because an explicitly collated expression is no longer the
+indexed one. Measured with `EXPLAIN QUERY PLAN`, both ways. The collation
+is guaranteed by the column's own `COLLATE NOCASE` declaration and by a
+test whose titles differ only in case.
 
 ### Layering for a future API
 
