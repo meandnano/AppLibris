@@ -2,6 +2,7 @@ package googlebooks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,17 +15,31 @@ import (
 	"library/internal/enrich"
 )
 
-// The fixtures under testdata are shaped after the Google Books Volumes
-// API's documented response format
-// (https://developers.google.com/books/docs/v1/using) rather than a live
-// capture: this sandbox has no outbound network access, so a real request
-// can't be made from here. Field names and nesting match the API's stable,
-// publicly documented shape. volumes_match.json omits imageLinks
-// deliberately — a real one is an absolute URL at a live Google host, and
-// this sandbox has no outbound network access, so any test that exercises
-// a cover fetch builds its own response inline with imageLinks.thumbnail
-// pointing at a local httptest.Server instead of reading it from a static
-// file — a fixture can't bake in a server address chosen at test run time.
+// Every fixture under testdata is a **live capture** of the Volumes API,
+// taken with a real GOOGLE_BOOKS_API_KEY on 2026-09-06 (see
+// docs/plans/completed/ for the verification that took them). None is
+// hand-shaped from the documentation, and none is hand-edited to fit a
+// change: a fixture adjusted until the code passes tests the parser
+// against its author's expectations instead of against the API, which is
+// how internal/openlibrary shipped a Bulgarian language for an English
+// book with every test green.
+//
+//   - volumes_match.json — GET /volumes?q=isbn:9780547928227&maxResults=1
+//   - volumes_search_match.json — the intitle:/inauthor: fallback's shape
+//   - volumes_no_match.json — an ISBN the API knows nothing about
+//   - volumes_detail.json — GET /volumes/{id}, the *other* endpoint, kept
+//     as the evidence that the larger imageLinks sizes live only there
+//   - volumes_regional_language.json — a pt-BR volume, the language tag
+//     Google really answers with
+//   - volumes_wrong_edition.json — a Portuguese-titled volume Google
+//     labels "en"
+//   - error_400_bad_key.json, error_429_per_day.json,
+//     error_429_per_minute.json — the three failures the live check
+//     actually provoked, which is what settled the retry classification
+//
+// A cover fetch still builds its response inline with imageLinks.thumbnail
+// pointing at a local httptest.Server: a fixture cannot bake in a server
+// address chosen at test run time.
 
 func testClient(t *testing.T, apiKey string, handler http.HandlerFunc) (*Client, *int) {
 	t.Helper()
@@ -69,38 +84,141 @@ func TestByISBNMatchParsesFixture(t *testing.T) {
 		w.Write(readFixture(t, "volumes_match.json"))
 	})
 
-	got, err := client.ByISBN(context.Background(), "9780262011532")
+	got, err := client.ByISBN(context.Background(), "9780547928227")
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
 
-	if got.Title != "Structure and Interpretation of Computer Programs" {
+	if got.Title != "The Hobbit, Or, There and Back Again" {
 		t.Errorf("Title = %q", got.Title)
 	}
-	wantAuthors := []string{"Harold Abelson", "Gerald Jay Sussman"}
-	if len(got.Authors) != len(wantAuthors) || got.Authors[0] != wantAuthors[0] || got.Authors[1] != wantAuthors[1] {
+	wantAuthors := []string{"J. R. R. Tolkien"}
+	if len(got.Authors) != len(wantAuthors) || got.Authors[0] != wantAuthors[0] {
 		t.Errorf("Authors = %v, want %v", got.Authors, wantAuthors)
 	}
-	if got.Publisher != "MIT Press" {
-		t.Errorf("Publisher = %q, want %q", got.Publisher, "MIT Press")
+	if got.Publisher != "Mariner Books" {
+		t.Errorf("Publisher = %q, want %q", got.Publisher, "Mariner Books")
 	}
-	if got.PublishedDate != "1996" {
-		t.Errorf("PublishedDate = %q, want %q", got.PublishedDate, "1996")
+	// The edition's year, not the work's. Open Library's search endpoint
+	// answered 1937 for this same ISBN, which is what
+	// docs/plans/completed/2026090401 moved it off search.json to fix; the
+	// Volumes API returns one volume per edition, so it does not have that
+	// failure mode.
+	if got.PublishedDate != "2012" {
+		t.Errorf("PublishedDate = %q, want %q — the 2012 Mariner edition, not the work's 1937", got.PublishedDate, "2012")
 	}
 	if got.Language != "en" {
 		t.Errorf("Language = %q, want %q", got.Language, "en")
 	}
-	if got.ISBN != "9780262011532" {
-		t.Errorf("ISBN = %q, want %q (the 13-digit form, normalised)", got.ISBN, "9780262011532")
+	if got.ISBN != "9780547928227" {
+		t.Errorf("ISBN = %q, want %q (the 13-digit form, normalised)", got.ISBN, "9780547928227")
 	}
-	// The Volumes API documents description as HTML-formatted, and nothing
-	// downstream renders markup — html/template escapes the detail page's
-	// description, so a tag left in shows up literally.
-	wantDescription := "Structure and Interpretation of Computer Programs has had a dramatic " +
-		"impact on computer science curricula over the past decade.\n\n" +
-		"It is used at MIT & elsewhere."
+	// The list endpoint's description arrives with markup already
+	// stripped — see TestListEndpointDescriptionCarriesNoMarkup.
+	wantDescription := "Celebrating 75 years of one of the world's most treasured classics with an " +
+		"all new trade paperback edition. Repackaged with new cover art. 500,000 first printing."
 	if got.Description != wantDescription {
 		t.Errorf("Description = %q, want %q", got.Description, wantDescription)
+	}
+}
+
+func TestSearchMatchParsesFixture(t *testing.T) {
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "volumes_search_match.json"))
+	})
+
+	got, err := client.Search(context.Background(), "Pride and Prejudice", []string{"Jane Austen"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	if got.Title != "Pride and Prejudice" {
+		t.Errorf("Title = %q", got.Title)
+	}
+	// Unlike Open Library's /search.json, which describes a work and so
+	// cannot answer either of these for one edition, the Volumes API
+	// answers the search path with a volume — one edition — so language
+	// and published date are the edition's on this path too.
+	if got.Language != "en" {
+		t.Errorf("Language = %q, want %q", got.Language, "en")
+	}
+	if got.PublishedDate == "" {
+		t.Error("PublishedDate is empty — the search path answers an edition, so it has one")
+	}
+	if got.ISBN == "" {
+		t.Error("ISBN is empty — the search path answers an edition, so it has one")
+	}
+}
+
+// The capture is what the client's own request shape (GET /volumes?q=…)
+// really answers, and it carries only the two smallest sizes. extraLarge,
+// large, medium and small exist only on the single-volume endpoint
+// (volumes_detail.json, same volume, five sizes) — so best()'s ladder above
+// Thumbnail is unreachable from this client as written, and every
+// Google-sourced cover is the ~128x192 thumbnail. Pinned so the next change
+// to best() has to confront it rather than assume it away.
+func TestListEndpointOffersOnlyTheThumbnailSizes(t *testing.T) {
+	var parsed volumesResponse
+	if err := json.Unmarshal(readFixture(t, "volumes_match.json"), &parsed); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	links := parsed.Items[0].VolumeInfo.ImageLinks
+	if links.Thumbnail == "" {
+		t.Fatal("the capture carries no thumbnail")
+	}
+	if links.ExtraLarge != "" || links.Large != "" || links.Medium != "" || links.Small != "" {
+		t.Errorf("the list endpoint answered a size above thumbnail: %+v", links)
+	}
+
+	var detail volume
+	if err := json.Unmarshal(readFixture(t, "volumes_detail.json"), &detail); err != nil {
+		t.Fatalf("unmarshal detail fixture: %v", err)
+	}
+	if detail.VolumeInfo.ImageLinks.Large == "" {
+		t.Error("volumes_detail.json carries no large link — the capture no longer shows the contrast it exists for")
+	}
+}
+
+// The Volumes API documents volumeInfo.description as HTML-formatted, and
+// plainText renders it — but that documentation describes the
+// single-volume endpoint. The list endpoint this client calls strips the
+// markup itself (and truncates), so plainText is a no-op on every real
+// answer this client receives. Both captures of the same volume are here
+// to show it, since it is the kind of claim that reads as settled and is
+// not.
+func TestListEndpointDescriptionCarriesNoMarkup(t *testing.T) {
+	var list volumesResponse
+	if err := json.Unmarshal(readFixture(t, "volumes_match.json"), &list); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	if strings.ContainsAny(list.Items[0].VolumeInfo.Description, "<>") {
+		t.Errorf("the list endpoint answered markup: %q", list.Items[0].VolumeInfo.Description)
+	}
+
+	var detail volume
+	if err := json.Unmarshal(readFixture(t, "volumes_detail.json"), &detail); err != nil {
+		t.Fatalf("unmarshal detail fixture: %v", err)
+	}
+	if !strings.Contains(detail.VolumeInfo.Description, "<p>") {
+		t.Error("volumes_detail.json carries no markup — the capture no longer shows the contrast it exists for")
+	}
+}
+
+// totalItems is an estimate, not a count: the same isbn: query answers 300
+// at maxResults=1 and 1 at maxResults=5. Nothing reads it, and this pins
+// that — a no-match test written against totalItems would pass on a
+// response that has items.
+func TestNoMatchIsDecidedByItemsNotTotalItems(t *testing.T) {
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"kind":"books#volumes","totalItems":0,"items":[{"volumeInfo":{"title":"Present anyway"}}]}`))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if got.Title != "Present anyway" {
+		t.Errorf("Title = %q — an item present under totalItems 0 is still a match", got.Title)
 	}
 }
 
@@ -438,17 +556,36 @@ func TestByISBNNamesCoverURLWithoutFetchingIt(t *testing.T) {
 	}
 }
 
-func TestByISBNNoImageLinksLeavesCoverURLEmpty(t *testing.T) {
+func TestNoImageLinksLeavesCoverURLEmpty(t *testing.T) {
 	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
-		w.Write(readFixture(t, "volumes_match.json"))
+		w.Write([]byte(`{"totalItems":1,"items":[{"volumeInfo":{"title":"No cover here"}}]}`))
 	})
 
-	got, err := client.ByISBN(context.Background(), "9780262011532")
+	got, err := client.ByISBN(context.Background(), "9780547928227")
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
 	if got.CoverURL != "" {
-		t.Errorf("CoverURL = %q, want empty — volumes_match.json carries no imageLinks", got.CoverURL)
+		t.Errorf("CoverURL = %q, want empty — the volume carries no imageLinks", got.CoverURL)
+	}
+}
+
+// The capture's own cover URL, end to end: http as Google answers it,
+// upgraded, and the zoom=1 thumbnail — 128x192 when fetched, which
+// internal/cover stores as-is since it never upscales past its 400px
+// target.
+func TestByISBNCoverURLFromCaptureIsTheUpgradedThumbnail(t *testing.T) {
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "volumes_match.json"))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	want := "https://books.google.com/books/content?id=LLSpngEACAAJ&printsec=frontcover&img=1&zoom=1&source=gbs_api"
+	if got.CoverURL != want {
+		t.Errorf("CoverURL = %q, want %q", got.CoverURL, want)
 	}
 }
 
@@ -568,5 +705,138 @@ func TestRequestsCarryAUserAgent(t *testing.T) {
 	}
 	if got != userAgent {
 		t.Errorf("User-Agent = %q, want %q", got, userAgent)
+	}
+}
+
+// The three failures the live check actually provoked, replayed with their
+// real bodies. They are here because the classification they decide was
+// written from the documentation and got its premise backwards: the
+// package comment reasoned that "a 403 is Google's over-quota and
+// rejected-key answer", and neither is. A rejected key is 400 and
+// over-quota is 429, on both the per-day and the per-minute limit; no
+// probe produced a 403 at all.
+func TestLiveErrorBodiesAreClassified(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		fixture     string
+		retryable   bool
+		bodyExcerpt string
+	}{
+		{
+			name:        "a rejected key is 400 and is not worth asking twice",
+			status:      http.StatusBadRequest,
+			fixture:     "error_400_bad_key.json",
+			retryable:   false,
+			bodyExcerpt: "API key not valid",
+		},
+		{
+			name:        "an exhausted per-day quota is 429",
+			status:      http.StatusTooManyRequests,
+			fixture:     "error_429_per_day.json",
+			retryable:   true,
+			bodyExcerpt: "Queries per day",
+		},
+		{
+			name:        "ordinary per-minute throttling is 429 too",
+			status:      http.StatusTooManyRequests,
+			fixture:     "error_429_per_minute.json",
+			retryable:   true,
+			bodyExcerpt: "Queries per minute per user",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				w.Write(readFixture(t, tt.fixture))
+			})
+
+			_, err := client.ByISBN(context.Background(), "9780547928227")
+			if err == nil {
+				t.Fatalf("ByISBN: want an error on %d", tt.status)
+			}
+			if got := errors.Is(err, enrich.ErrRetryable); got != tt.retryable {
+				t.Errorf("errors.Is(err, ErrRetryable) = %v, want %v: %v", got, tt.retryable, err)
+			}
+			// The body reaches the error text: Google's message names
+			// which limit was hit, which is the only place that
+			// distinction exists — there is no Retry-After header on
+			// either 429.
+			if !strings.Contains(err.Error(), tt.bodyExcerpt) {
+				t.Errorf("error text does not carry %q: %v", tt.bodyExcerpt, err)
+			}
+		})
+	}
+}
+
+// maxErrorBodyBytes truncates, and Google's real 429 body is longer than
+// it — so the part of the message that names the limit has to survive the
+// cut for the error to be worth reading at all.
+func TestLiveQuotaBodyNamesItsLimitWithinTheErrorBodyCap(t *testing.T) {
+	for _, fixture := range []string{"error_429_per_day.json", "error_429_per_minute.json"} {
+		body := readFixture(t, fixture)
+		if len(body) <= maxErrorBodyBytes {
+			t.Errorf("%s is %d bytes, no longer over the %d-byte cap this test exists for", fixture, len(body), maxErrorBodyBytes)
+		}
+		if !strings.Contains(string(body[:maxErrorBodyBytes]), "Quota exceeded for quota metric") {
+			t.Errorf("%s: the quota message falls outside the first %d bytes", fixture, maxErrorBodyBytes)
+		}
+	}
+}
+
+// volumeInfo.language is a BCP-47 tag, not the ISO 639-1 code CLAUDE.md
+// claims this provider produces: a scan of 188 live volumes returned
+// pt-BR 50 times and zh-CN 32, alongside plain en/ru/ja/sv. So
+// books.language holds "pt" for a book internal/epub, internal/fb2 or
+// internal/openlibrary answered and "pt-BR" for the next one Google did —
+// the same one-column-two-vocabularies split that marcToISO639 exists in
+// internal/openlibrary to prevent.
+//
+// This pins what the code does today, not what it should do; the fix is
+// its own plan.
+func TestRegionalLanguageTagReachesMetadataUnchanged(t *testing.T) {
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "volumes_regional_language.json"))
+	})
+
+	got, err := client.Search(context.Background(), "O Hobbit", nil)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got.Language != "pt-BR" {
+		t.Errorf("Language = %q, want %q — the capture's own value, passed through as-is", got.Language, "pt-BR")
+	}
+}
+
+// A volume Google has correctly identified and mislabelled: titled in
+// Portuguese, credited to Paulo Coelho, language "en". A thin
+// OCLC-derived stub — one OCLC identifier, no publisher, no description.
+//
+// enrich.plausibleMatch compares title and author, so it accepts this and
+// "en" reaches books.language. That is a limit of any title/author gate
+// rather than a fault in one: the gate refuses the cross-language
+// mismatches it can see (a transliterated title is a title mismatch), and
+// withholding language from search answers would cost four correct values
+// to avoid this one. Recorded in
+// docs/backlog/2026090609-provider-language-can-be-wrong.md and
+// deliberately not fixed.
+//
+// The capture lives here because this package's lookup produced it.
+func TestSearchCanAnswerAMislabelledLanguage(t *testing.T) {
+	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "volumes_wrong_edition.json"))
+	})
+
+	got, err := client.Search(context.Background(), "O Alquimista", []string{"Paulo Coelho"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got.Title != "O Alquimista" || len(got.Authors) != 1 || got.Authors[0] != "Paulo Coelho" {
+		t.Fatalf("the capture no longer shows an exact title and author match: %q / %v", got.Title, got.Authors)
+	}
+	if got.Language != "en" {
+		t.Errorf("Language = %q, want %q — the capture's own value, and the point of the capture", got.Language, "en")
 	}
 }

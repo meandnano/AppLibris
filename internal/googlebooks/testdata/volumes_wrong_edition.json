@@ -1,0 +1,63 @@
+{
+  "kind": "books#volumes",
+  "totalItems": 300,
+  "items": [
+    {
+      "kind": "books#volume",
+      "id": "QlkNzQEACAAJ",
+      "etag": "9k6wkHZfnyM",
+      "selfLink": "https://www.googleapis.com/books/v1/volumes/QlkNzQEACAAJ",
+      "volumeInfo": {
+        "title": "O Alquimista",
+        "authors": [
+          "Paulo Coelho"
+        ],
+        "publishedDate": "2001",
+        "industryIdentifiers": [
+          {
+            "type": "OTHER",
+            "identifier": "OCLC:1055765354"
+          }
+        ],
+        "readingModes": {
+          "text": false,
+          "image": false
+        },
+        "pageCount": 247,
+        "printType": "BOOK",
+        "maturityRating": "NOT_MATURE",
+        "allowAnonLogging": false,
+        "contentVersion": "preview-1.0.0",
+        "panelizationSummary": {
+          "containsEpubBubbles": false,
+          "containsImageBubbles": false
+        },
+        "language": "en",
+        "previewLink": "http://books.google.se/books?id=QlkNzQEACAAJ&dq=intitle:%22O+Alquimista%22+inauthor:%22Paulo+Coelho%22&hl=&cd=1&source=gbs_api",
+        "infoLink": "http://books.google.se/books?id=QlkNzQEACAAJ&dq=intitle:%22O+Alquimista%22+inauthor:%22Paulo+Coelho%22&hl=&source=gbs_api",
+        "canonicalVolumeLink": "https://books.google.com/books/about/O_Alquimista.html?hl=&id=QlkNzQEACAAJ"
+      },
+      "saleInfo": {
+        "country": "SE",
+        "saleability": "NOT_FOR_SALE",
+        "isEbook": false
+      },
+      "accessInfo": {
+        "country": "SE",
+        "viewability": "NO_PAGES",
+        "embeddable": false,
+        "publicDomain": false,
+        "textToSpeechPermission": "ALLOWED",
+        "epub": {
+          "isAvailable": false
+        },
+        "pdf": {
+          "isAvailable": false
+        },
+        "webReaderLink": "http://play.google.com/books/reader?id=QlkNzQEACAAJ&hl=&source=gbs_api",
+        "accessViewStatus": "NONE",
+        "quoteSharingAllowed": false
+      }
+    }
+  ]
+}
