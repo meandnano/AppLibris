@@ -741,10 +741,26 @@ func (db *DB) UpdateBookFileStat(ctx context.Context, fileID int64, size int64, 
 	})
 }
 
-// UpdateBookCoverPath records the current derived cover location and clears any retry marker
+// UpdateBookCoverPath records the current derived cover location, clears any
+// retry marker, and drops the cover row from field_sources.
+//
+// The delete is not incidental: this method is the scanner's, and a cover
+// the scanner extracted from the book's own file has no provenance by
+// definition — that absence is the whole discriminator internal/scanner
+// reads to tell a scanner cover from a provider's. Without it, a book whose
+// provider cover was re-extracted from its embedded original keeps a row
+// claiming a provider supplied the scanner's image, which is the state
+// Decision 1's table forbids and which the sweep would later act on.
+//
+// All three in one transaction, since a path written without the row
+// removed is exactly the false state this prevents.
 func (db *DB) UpdateBookCoverPath(ctx context.Context, bookID int64, path string) error {
 	return db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE books SET cover_path = ?, cover_retry = 0 WHERE id = ?`, path, bookID)
+		if _, err := tx.ExecContext(ctx, `UPDATE books SET cover_path = ?, cover_retry = 0 WHERE id = ?`, path, bookID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx,
+			`DELETE FROM field_sources WHERE book_id = ? AND field = ?`, bookID, FieldCover)
 		return err
 	})
 }

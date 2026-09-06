@@ -109,7 +109,9 @@ full design.
   render an empty field fragment pointing at `/books/0/metadata/`, where
   a name nobody may edit should simply 404. `UpdateBookField` still
   refuses `FieldCover` outright alongside `authors` as a second guard, and
-  `ApplyEnrichedFields` is the only writer, storing a fetched cover's
+  `ApplyEnrichedFields` is the only writer that *creates* one — two remove
+  it, `ClearProviderCover` and `UpdateBookCoverPath`, both below — storing
+  a fetched cover's
   on-disk path (never a remote URL) under the answering provider's name
   through the same `updateBookColumnTx`/`fieldIsStillMissingTx` path every
   other field uses — so a cover the scanner already found is never
@@ -117,10 +119,15 @@ full design.
   every text field. Writing `cover_path` also clears `cover_retry`, the
   same pairing `UpdateBookCoverPath` makes: the marker means "a cover
   store failed, try again next sweep", and the scanner skips its stat
-  check entirely while it is set, so leaving it would have the next sweep
-  re-extract the embedded cover over the provider's one while
-  `field_sources` went on naming the provider. See `internal/enrich` below
-  for the fetch and storage side of this.
+  check entirely while it is set, so leaving it sends the next sweep past
+  that check with no evidence about the file at all — and what happens then
+  depends on the book: one with an embedded cover gets re-extracted over the
+  provider's image, one without has a perfectly good provider cover
+  *forgotten*. Both are wrong, which is why the pairing is not optional.
+  `internal/scanner` keeps its own guard against that state
+  (`coverFileDefinitelyGone`) precisely because the invariant lives here,
+  one package away, where nothing over there would notice it breaking. See
+  `internal/enrich` below for the fetch and storage side of this.
 - `books_fts` is an FTS5 virtual table (`title`, `authors`, `description`,
   `isbn`, `tokenize='unicode61 remove_diacritics 2'`) — a plain table, not
   `content='books'`, since `authors` isn't a books column to begin with
@@ -298,8 +305,9 @@ full design.
   the opposite of `internal/sender`'s "retry is a new row" rule. And a
   vanished book *is* a `failed` job, not a `done` one with nothing to
   enrich — `failed` is reserved for the job itself going wrong (the book
-  gone, a write failed, or **no provider the run asked being able to
-  answer**), the same way it would be a bug for `internal/sender`
+  gone, a write failed, **no provider the run asked being able to answer**,
+  or **a run whose only result was a cover it could not save**), the same
+  way it would be a bug for `internal/sender`
   to call a send "delivered" because there was nothing left to send. The
   cascade normally removes a claimed job's row along with its book before
   this can be observed; it exists for the narrow claim-then-delete race.
@@ -326,6 +334,32 @@ full design.
   introduced with inline editing — a field absent from the returned map
   (never embedded, never edited) reads back as an empty source, which the
   resolver's missing-field rule already treats as not-`manual`.
+  `ClearProviderCover` is one of two writers that *remove* the `cover` row
+  (`UpdateBookCoverPath` is the other, for the scanner's own re-extraction —
+  see `internal/scanner` below): it empties `cover_path`, clears
+  `cover_retry` and deletes that one row, in one transaction, so a
+  provider-fetched cover whose stored file has gone reads as no cover at
+  all.
+  It takes the **path the caller observed** and refuses to blank anything
+  else, which is the part of the signature that surprises: the scanner
+  decides from a snapshot and then stats, parses a whole book file and
+  reads provenance before the write lands, and an enrichment run finishing
+  inside that window would otherwise have its fresh cover thrown away. It
+  is the staleness `fieldIsStillMissingTx` closes for every other field.
+  The returned bool therefore means *cleared*, not *exists* — an unknown
+  book and a moved path give the same "nothing to do here" answer. Plan
+  `2026090603` specifies `ClearProviderCover(ctx, bookID, at)`; the guard
+  came out of review afterwards, and since a completed plan is immutable
+  this is the only record of the divergence. `cover_retry` goes with it because the marker means
+  "retry the extraction" and there is nothing to extract — the same pairing
+  `UpdateBookCoverPath` makes in the other direction — and the row goes
+  because a provider's name beside an empty `cover_path` is a claim about a
+  value that no longer exists. The `DELETE` is scoped to `(book_id, field)`,
+  not `book_id`: dropping the field clause would pass every other assertion
+  while silently erasing the book's whole provenance. It deliberately does
+  **not** check provenance itself — `internal/scanner` has already decided
+  that, and a second copy of the row-existence predicate is exactly how the
+  two drift apart.
   `ApplyEnrichedFields` is `UpdateBookField`/`UpdateBookAuthors`
   generalised rather than a parallel path: both now call shared
   unexported helpers (`updateBookColumnTx`, `updateBookAuthorsTx`) that
@@ -681,6 +715,19 @@ full design.
   it is logged and the field is left out of
   `Values`, the same tolerance the scanner gives a cover that fails to
   store, since it must not fail a job whose text fields already resolved.
+  **That tolerance holds only when text fields did resolve**, which is the
+  whole distinction: for a book whose *only* missing field was its cover
+  there are none, so the reason for the tolerance is absent while the
+  tolerance still applies, and such a run would report "Nothing to add"
+  for a cover it found and dropped. So a run that wrote nothing at all and
+  lost a cover it was offered is `failed` with `coverLostReason` — which
+  names the cover rather than reusing `allProvidersFailedReason`, since a
+  provider did answer and the failure is on this side of the call. The
+  rule is deliberately narrower than "a failed cover fails the job": a run
+  that resolved text fields and lost its cover stays `done`, and a run
+  offered no cover at all is still an honest "Nothing to add". The check
+  sits *after* the store, because a successful store has just put
+  `FieldCover` into `Values`.
   The job itself failing (the book vanished between
   enqueue and claim, a write failed) is a `failed` job; a provider having
   nothing to say — the ordinary case for most books against most
@@ -895,7 +942,42 @@ full design.
   *suffix* rather than `filepath.Ext`, since a `.fb2.zip` archive is two
   extensions and `Ext` would only ever see the last one. For known content,
   a sweep re-extracts a recorded cover whose file is missing or zero bytes
-  and refreshes its stored path, making `COVERS_DIR` disposable. An empty
+  and refreshes its stored path, making `COVERS_DIR` disposable — but a
+  cover a *provider* supplied has no original in the book to rebuild from,
+  and the sweep must not simply fail to re-extract it forever.
+  **The ordering is the whole rule, and it is what a reader implementing
+  from this paragraph would otherwise get backwards: `readEmbeddedCover`
+  runs first, and `field_sources` is consulted only once re-extraction has
+  already come back empty.** Establish, don't infer — a book can carry an
+  embedded cover *and* a provider row (`cover.Store` fails at first sight,
+  leaving `cover_retry` set and no cover row since
+  `setEmbeddedFieldSourcesTx` never writes one; enrichment then supplies a
+  cover and creates the row), so "there is a provider row" never meant
+  "there is nothing to re-extract". Plan `2026090603`'s Decision 2 says the
+  branch "returns without touching `readEmbeddedCover`"; that is superseded,
+  and since a completed plan is immutable this is the only record of it.
+  A cover that *is* re-extracted goes through `UpdateBookCoverPath`, which
+  drops the `cover` row in the same transaction — the image is now the
+  scanner's, and a row claiming otherwise is the state the discriminator
+  below forbids.
+  Only when the book yields nothing is the cover forgotten
+  (`storage.ClearProviderCover`), which puts it back in enrichment's missing
+  set so the Fetch button repairs it and leaves the grid showing its honest
+  "no cover" box rather than an `<img>` pointing at a file that is gone.
+  **The provider test is that a `field_sources` row exists, not that it
+  names a provider rather than `embedded`** — a scanner-extracted cover has
+  no provenance at all, so a string comparison against `embedded` would
+  match nothing while reading as correct. That is exactly the tidy-up a
+  later reader would make.
+  Three separate ambiguities are all resolved the same way — **an unknown is
+  not evidence**, the posture missing-file reconciliation takes toward a
+  non-`ErrNotExist` `Lstat`. A failed provenance read, a failed
+  `readEmbeddedCover`, and a stat that fails with anything but
+  `fs.ErrNotExist` (`coverFileDefinitelyGone`) each leave the book untouched
+  rather than forgetting a cover on a guess. The read-error one matters most:
+  clearing there is permanent, because an empty `cover_path` returns at
+  `maybeRegenerateCover`'s first guard on every later sweep, so the embedded
+  original is never recovered even once the read works again. An empty
   stored cover path records that no embedded cover was found and is not
   retried on every sweep; a separate `cover_retry` marker records a
   transient initial store failure and retries it later. Cover inspection
