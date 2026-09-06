@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +59,8 @@ func TestSanitizeFTSQueryNeverProducesAnInvalidExpression(t *testing.T) {
 		"hel\x00lo",
 		"\x00\x00\x00",
 		"\x01\x02\x1f",
+		"--",
+		"978-0-",
 	}
 	for _, in := range inputs {
 		t.Run(in, func(t *testing.T) {
@@ -117,6 +120,27 @@ func TestSanitizeFTSQueryNormalizesISBNShapedInput(t *testing.T) {
 		{"0-306-40615-2", `"0306406152"*`},
 		{"030640615X", `"030640615X"*`},
 		{"0-306-40615-x", `"030640615X"*`}, // lower-case check character upper-cased
+
+		// Partway through typing a hyphenated one: two hyphens and four
+		// digits is where the ISBN path takes over, so that the results
+		// stop going empty from the second hyphen onward.
+		{"978-0-85705", `"978085705"*`},
+		{"978-0-8", `"97808"*`},
+		{"978-0-", `"9780"*`},                      // a trailing hyphen is what is on screen between two groups
+		{"978-0-85705-998-5-", `"9780857059985"*`}, // thirteen digits: the complete shape takes it, hyphens and all
+		{"0-19-8", `"0198"*`},                      // the keystroke that recovers a two-digit-registrant ISBN-10
+
+		// An accepted cost, recorded rather than discovered: a three-group
+		// number past the digit floor reads as an ISBN prefix, so a title
+		// carrying an ISO-style date stops being findable by it. Separating
+		// the two needs the number's meaning, not its punctuation.
+		{"2026-09-06", `"20260906"*`},
+
+		// Whitespace around either shape is trimmed before anything else,
+		// including the U+00A0 the complete shape's own Replacer would
+		// leave in place.
+		{" 978-0-85705 ", `"978085705"*`},
+		{"\u00a09780857059985\u00a0", `"9780857059985"*`},
 	}
 	for _, c := range cases {
 		if got := SanitizeFTSQuery(c.in); got != c.want {
@@ -126,17 +150,75 @@ func TestSanitizeFTSQueryNormalizesISBNShapedInput(t *testing.T) {
 }
 
 func TestSanitizeFTSQueryDoesNotTreatOrdinaryNumbersAsISBNs(t *testing.T) {
-	// Too short/long to be ISBN-10 or ISBN-13, so these fall through to the
-	// ordinary per-word path rather than the ISBN one.
+	// None of these is a complete ISBN or a hyphenated one being typed, so
+	// they fall through to the ordinary per-word path.
 	cases := []struct {
 		in, want string
 	}{
 		{"1984", `"1984"*`},
 		{"12345678901234", `"12345678901234"*`},
+		{"1984-2001", `"1984-2001"*`},                             // a date range, kept a title query by the two-hyphen rule
+		{"978085", `"978085"*`},                                   // an unpunctuated partial already prefix-matches as one token
+		{"Twenty-One Balloons", `"Twenty-One"* "Balloons"*`},      // a hyphenated title
+		{"978-0-85705-998-51", `"978-0-85705-998-51"*`},           // fourteen digits, one past a whole ISBN-13
+		{"978-0-85705-998-5-1-2-3", `"978-0-85705-998-5-1-2-3"*`}, // sixteen, well past it
+		{"ISBN-978-0", `"ISBN-978-0"*`},                           // letters, so not digits and hyphens
+		{"9-1-1", `"9-1-1"*`},                                     // three groups, under the digit floor
+		{"1-2-3", `"1-2-3"*`},
+		{"1--", `"1--"*`},                            // one digit: nothing an identifier could be
+		{"--", `"--"*`},                              // no digits at all, so never an empty prefix term
+		{"---", `"---"*`},                            // and no number of hyphens changes that
+		{"978-0-85705 998", `"978-0-85705"* "998"*`}, // a space still separates tokens, hyphens either side of it or not
+		{"1984-85 2000-01", `"1984-85"* "2000-01"*`}, // the pair of ranges the no-space rule exists for
+
+		// The digit floor's own cost, on the population this feature
+		// serves: an ISBN-10 whose registrant is two digits (0-19 OUP, 0-14
+		// Penguin) reaches its second hyphen three digits in, so it waits
+		// one keystroke longer than an ISBN-13 does. No threshold separates
+		// it from "9-1-1" above, which is the same three digits and two
+		// hyphens — but that one would never match its book, where this one
+		// matches on the very next character (see the ISBN table).
+		{"0-19-", `"0-19-"*`},
+		{"0-14-", `"0-14-"*`},
 	}
 	for _, c := range cases {
 		if got := SanitizeFTSQuery(c.in); got != c.want {
 			t.Errorf("SanitizeFTSQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestSanitizeFTSQueryMatchesEveryStateOfATypedHyphenatedISBN asserts the
+// sequence rather than any one input: the defect this covers was that the
+// results went empty partway through typing and filled back in on the last
+// character, which no single query can show. Both halves are here, since
+// where the ISBN path takes over is the design and not an accident — the
+// one state that still matches nothing, "978-0", is the two-hyphen rule's
+// own cost.
+func TestSanitizeFTSQueryMatchesEveryStateOfATypedHyphenatedISBN(t *testing.T) {
+	const (
+		typed   = "978-0-85705-998-5"
+		indexed = "9780857059985"
+	)
+	for i := 1; i <= len(typed); i++ {
+		prefix := typed[:i]
+		got := SanitizeFTSQuery(prefix)
+
+		if strings.Count(prefix, "-") < 2 {
+			want := `"` + prefix + `"*`
+			if got != want {
+				t.Errorf("SanitizeFTSQuery(%q) = %q, want the per-word %q", prefix, got, want)
+			}
+			continue
+		}
+
+		term := strings.TrimSuffix(strings.TrimPrefix(got, `"`), `"*`)
+		if term == got || term == "" {
+			t.Errorf("SanitizeFTSQuery(%q) = %q, want a single quoted prefix term", prefix, got)
+			continue
+		}
+		if !strings.HasPrefix(indexed, term) {
+			t.Errorf("typing %q produced the term %q, which is not a prefix of the indexed token %q", prefix, term, indexed)
 		}
 	}
 }

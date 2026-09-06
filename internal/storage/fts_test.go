@@ -247,7 +247,9 @@ func TestSearchBooksFindsISBNRegardlessOfSourceFormat(t *testing.T) {
 		t.Fatalf("CreateBook fb2-shaped: %v", err)
 	}
 
-	for _, query := range []string{"9780857059985", "978-0-85705-998-5"} {
+	// The third is a hyphenated ISBN partway through being typed, which has
+	// to reach both storage shapes for the same reason the complete forms do.
+	for _, query := range []string{"9780857059985", "978-0-85705-998-5", "978-0-85705"} {
 		t.Run(query, func(t *testing.T) {
 			books, err := db.SearchBooks(ctx, SanitizeFTSQuery(query), BookPage{})
 			if err != nil {

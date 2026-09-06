@@ -158,7 +158,46 @@ full design.
   `MATCH` expression; `SanitizeFTSQuery` (also `internal/storage`, no DB
   access) is the one place raw user input becomes one, by quoting and
   prefix-terming every whitespace-separated token so no input, however
-  adversarial, can reach `MATCH` unescaped.
+  adversarial, can reach `MATCH` unescaped. Two query shapes skip that
+  per-word path and are normalised to bare digits instead, matching the
+  index's own `replace(replace(b.isbn, '-', ''), ' ', '')`: a **complete**
+  ISBN however punctuated (10 or 13 characters once hyphens and spaces are
+  stripped, a trailing `X` permitted — what a paste produces), and a
+  **partial hyphenated** one still being typed (digits and hyphens only, at
+  least two hyphens, at least four digits, at most thirteen). The two lower
+  bounds are decisions a test pins in both directions, since the whole
+  design is which numeric queries stop being title queries. Two
+  hyphens is what keeps `1984-2001` a title query: at one, it would become
+  `"19842001"*` and match nothing, where today it is the phrase `1984 2001`
+  and finds *Collected Essays 1984–2001* — the same "trade one dead input
+  for another" this step exists to avoid. Four digits is the same rule one
+  group further along, where the hyphen count alone stops helping: it keeps
+  `9-1-1` and `1-2-3` — both of which title books — title queries, and
+  costs an ISBN-13 nothing, since `978-0-` already carries four digits.
+  **Two costs it does have, recorded rather than left to be discovered**,
+  both asserted: a three-group number past the floor is read as an ISBN, so
+  an ISO-style date (`2026-09-06`) no longer finds a title carrying it; and
+  an ISBN-10 whose registrant is two digits (`0-19-` OUP, `0-14-` Penguin)
+  reaches its second hyphen only three digits in, so it waits one keystroke
+  longer than an ISBN-13 before matching. No threshold separates either
+  from `9-1-1`, which is the same three digits and two hyphens — the trade
+  was decided on which recovers: the ISBN-10 matches on the very next
+  character, where `9-1-1` typed in full never would. The thirteen-digit
+  cap is the one bound observable in a single direction only: every
+  13-digit query of digits and hyphens strips to a complete ISBN, so the
+  complete shape takes it first and **exactly thirteen never reaches the
+  partial one** — which is why lowering the cap to twelve changes no
+  behaviour, while raising it admits a fourteen-digit query and deleting it
+  as unreachable breaks a test. Plan
+  `2026090604` specifies the hyphen count and the cap alone; the four-digit
+  floor came out of review afterwards, and since a completed plan is
+  immutable this is the only record of it. The partial shape
+  accepts **hyphens but not spaces**, where the complete one strips both: a
+  space separates tokens for the whole rest of the search box, so
+  `1984-85 2000-01` would collapse into one twelve-digit query instead of
+  the two terms typed. An unpunctuated partial (`978085`) needs neither
+  shape — it is one digit token, so the per-word path already produces the
+  identical prefix term.
 - Single-book lookups, for the detail page: `FindBookByID` (nil, nil on an
   unknown id, same contract as `FindBookByContentHash`); `ListBookFiles`
   (a book's own locations, ordered by `file_path`, `missing_since`
@@ -1335,8 +1374,9 @@ full design.
   the grid jumps on every keystroke. Plate 02e's empty-library state dims
   and disables the whole control — with nothing indexed there is nothing to
   search. Its "Scan library" button and library path are the one part of
-  that plate not built, tracked in
-  `docs/backlog/2026090203-empty-library-scan-action.md`. With JavaScript
+  that plate not built, planned in
+  `2026090605-empty-library-scan-action` (a path that moves once it
+  ships, so the id is what to search for). With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
   drift out of sync. A `q` that sanitizes to nothing is "not
