@@ -72,7 +72,25 @@ Each book's detail page has a "Fetch metadata" button that queues the
 work and reports what it filled in; a field a provider supplied is marked
 with its source, so you can tell a guess from what the file itself said.
 Nothing is enriched automatically — a run is always something you asked
-for, on a book you chose.
+for, on a book you chose. A run is reported as failed rather than as
+nothing found when no provider could answer, and when the only thing it
+found was a cover it could not save — a throttled API, a broken image and
+an unknown book are three different answers, and only the last one means
+there is nothing there.
+
+A book with no ISBN is looked up by title and author instead, and an
+answer that doesn't plausibly match the book is discarded rather than
+written — so a file named `01 - Fellowship` reports "nothing to add"
+instead of acquiring some other book's publisher and cover. That is the
+common outcome for files whose titles came from their filenames, and it is
+the intended one: an empty field can still be filled by hand or by a later
+run, where a wrong one is recorded as though it were known.
+
+Covers fetched this way live in `COVERS_DIR` alongside the ones read out
+of book files, and that directory stays safe to delete: the next scan
+rebuilds a cover it can re-extract from the book itself, and simply forgets
+one a provider supplied — the book shows an empty cover again, and "Fetch
+metadata" puts it back.
 
 `METADATA_PROVIDERS` (default `openlibrary,googlebooks`) lists which
 providers to use and in what order. Set it to an empty value

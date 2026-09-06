@@ -109,7 +109,9 @@ full design.
   render an empty field fragment pointing at `/books/0/metadata/`, where
   a name nobody may edit should simply 404. `UpdateBookField` still
   refuses `FieldCover` outright alongside `authors` as a second guard, and
-  `ApplyEnrichedFields` is the only writer, storing a fetched cover's
+  `ApplyEnrichedFields` is the only writer that *creates* one — two remove
+  it, `ClearProviderCover` and `UpdateBookCoverPath`, both below — storing
+  a fetched cover's
   on-disk path (never a remote URL) under the answering provider's name
   through the same `updateBookColumnTx`/`fieldIsStillMissingTx` path every
   other field uses — so a cover the scanner already found is never
@@ -117,10 +119,15 @@ full design.
   every text field. Writing `cover_path` also clears `cover_retry`, the
   same pairing `UpdateBookCoverPath` makes: the marker means "a cover
   store failed, try again next sweep", and the scanner skips its stat
-  check entirely while it is set, so leaving it would have the next sweep
-  re-extract the embedded cover over the provider's one while
-  `field_sources` went on naming the provider. See `internal/enrich` below
-  for the fetch and storage side of this.
+  check entirely while it is set, so leaving it sends the next sweep past
+  that check with no evidence about the file at all — and what happens then
+  depends on the book: one with an embedded cover gets re-extracted over the
+  provider's image, one without has a perfectly good provider cover
+  *forgotten*. Both are wrong, which is why the pairing is not optional.
+  `internal/scanner` keeps its own guard against that state
+  (`coverFileDefinitelyGone`) precisely because the invariant lives here,
+  one package away, where nothing over there would notice it breaking. See
+  `internal/enrich` below for the fetch and storage side of this.
 - `books_fts` is an FTS5 virtual table (`title`, `authors`, `description`,
   `isbn`, `tokenize='unicode61 remove_diacritics 2'`) — a plain table, not
   `content='books'`, since `authors` isn't a books column to begin with
@@ -298,7 +305,9 @@ full design.
   the opposite of `internal/sender`'s "retry is a new row" rule. And a
   vanished book *is* a `failed` job, not a `done` one with nothing to
   enrich — `failed` is reserved for the job itself going wrong (the book
-  gone, a write failed), the same way it would be a bug for `internal/sender`
+  gone, a write failed, **no provider the run asked being able to answer**,
+  or **a run whose only result was a cover it could not save**), the same
+  way it would be a bug for `internal/sender`
   to call a send "delivered" because there was nothing left to send. The
   cascade normally removes a claimed job's row along with its book before
   this can be observed; it exists for the narrow claim-then-delete race.
@@ -325,12 +334,38 @@ full design.
   introduced with inline editing — a field absent from the returned map
   (never embedded, never edited) reads back as an empty source, which the
   resolver's missing-field rule already treats as not-`manual`.
+  `ClearProviderCover` is one of two writers that *remove* the `cover` row
+  (`UpdateBookCoverPath` is the other, for the scanner's own re-extraction —
+  see `internal/scanner` below): it empties `cover_path`, clears
+  `cover_retry` and deletes that one row, in one transaction, so a
+  provider-fetched cover whose stored file has gone reads as no cover at
+  all.
+  It takes the **path the caller observed** and refuses to blank anything
+  else, which is the part of the signature that surprises: the scanner
+  decides from a snapshot and then stats, parses a whole book file and
+  reads provenance before the write lands, and an enrichment run finishing
+  inside that window would otherwise have its fresh cover thrown away. It
+  is the staleness `fieldIsStillMissingTx` closes for every other field.
+  The returned bool therefore means *cleared*, not *exists* — an unknown
+  book and a moved path give the same "nothing to do here" answer. Plan
+  `2026090603` specifies `ClearProviderCover(ctx, bookID, at)`; the guard
+  came out of review afterwards, and since a completed plan is immutable
+  this is the only record of the divergence. `cover_retry` goes with it because the marker means
+  "retry the extraction" and there is nothing to extract — the same pairing
+  `UpdateBookCoverPath` makes in the other direction — and the row goes
+  because a provider's name beside an empty `cover_path` is a claim about a
+  value that no longer exists. The `DELETE` is scoped to `(book_id, field)`,
+  not `book_id`: dropping the field clause would pass every other assertion
+  while silently erasing the book's whole provenance. It deliberately does
+  **not** check provenance itself — `internal/scanner` has already decided
+  that, and a second copy of the row-existence predicate is exactly how the
+  two drift apart.
   `ApplyEnrichedFields` is `UpdateBookField`/`UpdateBookAuthors`
   generalised rather than a parallel path: both now call shared
   unexported helpers (`updateBookColumnTx`, `updateBookAuthorsTx`) that
   take a `source` parameter, with the public methods passing `"manual"`
   and `ApplyEnrichedFields` taking a `sourceName map[MetadataField]string`
-  instead of one shared `source` — `Resolve`'s own return value, passed
+  instead of one shared `source` — `Resolve`'s `SourceName`, passed
   straight through, so a job that pulled fields from more than one
   provider still records each field under whichever one actually answered
   it, all in the one transaction `ApplyEnrichedFields` runs as. Before
@@ -493,7 +528,126 @@ full design.
   order, each only for what's still missing at the time it's asked; once
   the missing set is empty the loop stops without calling the rest — an
   explicit test asserts the un-called provider really is never
-  called, not just that its answer goes unused. A provider erroring is
+  called, not just that its answer goes unused.
+  Each provider is asked **by ISBN when the book has one, by title and
+  author otherwise** — and, since a clean ISBN no-match means that
+  catalogue simply lacks the edition, the same provider is then asked by
+  title in the same iteration. An ISBN *error* deliberately does **not**
+  fall back: a 5xx says nothing about whether the ISBN is right, and
+  searching on it would accept a fuzzy answer because a host was briefly
+  unreachable. A cover-only reply is an answer rather than a no-match
+  (`Metadata.IsEmpty` counts `CoverURL`), so nothing searches past one; a
+  book with no title never searches at all, since the gate below would
+  reject whatever came back.
+  A `Search`-sourced answer must clear `plausibleMatch` (`match.go`) before
+  any of it is merged, where a `ByISBN` answer never is — an ISBN names one
+  edition, so that answer is about this book by construction, and gating it
+  would reject correct data over a differing title string. The gate is
+  **title match required, author overlap a veto and never a pass**: both
+  providers bind the author into the query, so an author match only
+  confirms they honoured a constraint this package supplied and says
+  nothing about which of that author's books the ranking put first —
+  "titles match *or* authors match" accepts any Stephen King novel for any
+  Stephen King file. Overlap is only consulted when both sides have
+  authors, an authorless answer being silence rather than disagreement.
+  Titles are compared as **delimited segments**, not as substrings and not
+  as bare token runs. A title is split at `:;,()[]{}—–/|`, and at `-.?!`
+  only when the separator also carries whitespace — each of those has a
+  word-internal meaning a bare occurrence usually intends, so `" - "` is a
+  dash while `"Twenty-One"` is a compound, and `". "` ends a segment while
+  `"J.R.R."` does not. The period is there for the Russian
+  `"Series. Title"` convention, the population DESIGN.md names as the
+  reason this path exists; its cost is that an abbreviation splits a title
+  (`"No"` matches `"Dr. No"`), the same over-match this design accepts
+  elsewhere and which `maxSegments` still keeps away from a contents list.
+  Two titles match when their segments agree
+  pairwise, or when a one-segment title equals a segment of a title with at
+  most **`maxSegments` (2)** parts.
+  Three rules, each of which a cheaper version gets wrong:
+  whole words rather than substrings, so "It" does not match "Italy";
+  *delimited*, because that is the only thing separating a subtitle from a
+  sequel — "The Hobbit" stands behind a `:` in "The Hobbit: 75th
+  Anniversary Edition" and behind nothing but a space in "The Hobbit
+  Companion"; and *at most two segments*, because a delimited segment alone
+  would make "Hamlet" match "Shakespeare: Hamlet, Othello, Macbeth" — a
+  contents list is not a subtitle. The author veto rescues neither case: a
+  sequel and a collected edition both share their author, which is why the
+  title rule carries the whole weight, and why one-word and series titles —
+  common in exactly the sparse no-ISBN population this path serves — are
+  the shapes to test against. The matched segment may be any of the two, so
+  a series-prefixed answer ("The Lord of the Rings: The Fellowship of the
+  Ring") matches on its last; there is deliberately no separate
+  first-or-last test, since at two segments every segment already touches
+  an end and the branch would be untestable.
+  **A known limit, recorded rather than left to be discovered:** a
+  two-segment answer whose second part *describes* the book still matches,
+  so "The Hobbit" accepts "The Hobbit: A Study Guide" — a different book
+  with its own publisher and cover. Separating an edition note from a
+  companion volume needs the words' meaning, not their punctuation. The
+  three-segment form ("Tolkien: The Hobbit: A Reader's Guide") is refused
+  by `maxSegments`.
+  Text is case-*folded* (`cases.Fold`, not `strings.ToLower`, which maps
+  `Σ`→`σ` unconditionally and would never match natively-written Greek
+  ending in `ς`), then NFD with combining marks dropped — so decomposed
+  text, which is what macOS filenames and therefore `filenameTitle` produce
+  for these very books, equals composed text, and diacritics fold away to
+  match `books_fts`'s own `remove_diacritics 2`. Spacing marks (`Mc`/`Me`)
+  *continue* a word rather than splitting it, or Indic vowel signs shred a
+  title into one-letter fragments that collide across unrelated books. One
+  leading English article is optional **per segment**, not per title: an
+  article is redundant at a segment's edge, and a segment is not always at
+  its title's edge — "The Fellowship of the Ring" sits inside "The Lord of
+  the Rings: …" with its own article intact.
+  `maxTitleTokens` (64) refuses an absurd title outright rather than
+  comparing it: the matcher is quadratic and runs on a provider's *raw*
+  title, before `sanitizeValue` caps anything, while a provider client
+  bounds only the whole response at megabytes.
+  **Where the code and plan `2026090602` disagree, CLAUDE.md is right.**
+  That plan's Decision 2 specifies plain contiguous-run containment; what
+  shipped requires a *delimited* run and bounds the answer to
+  `maxSegments`, because review found plain containment matched a sequel
+  and then a collected edition — `Dune`/`Dune Messiah`,
+  `Hamlet`/`Shakespeare: Hamlet, Othello, Macbeth` — neither of which the
+  author veto can catch. A completed plan is immutable, so the supersession
+  is recorded here rather than there.
+  `internal/enrich/match.go` is the one file in the package that imports
+  outside the standard library — `golang.org/x/text` for `cases.Fold` and
+  NFD. Its plan (`2026090602`) said the file would import nothing beyond
+  `strings`, `unicode` and the package's own types, and that was written
+  before the folding defects were known; the deviation is recorded here
+  because a completed plan is immutable. It adds no module to the build:
+  `golang.org/x/text` was already present at the same version as an
+  indirect dependency of `golang.org/x/image`, which `internal/cover` uses
+  directly. Neither piece can be hand-rolled — composing or decomposing
+  needs the Unicode tables, and stripping marks alone leaves NFD text
+  unable to match NFC text, since a composed `é` is a single non-mark
+  rune.
+  A rejected answer is treated as a no-match, not a
+  failure — the chain continues with the missing set otherwise intact (only
+  `isbn` has left it, above), no provenance recorded and no cover taken, and `Failed` unchanged; the rejection is
+  logged at `Debug` with a `reason` (`title_mismatch` or `author_veto`),
+  since an author veto otherwise shows two titles that look like a fine
+  match and says nothing about why it was refused. The accepting line is
+  `Info` and is emitted **after** the merge, only when the answer actually
+  contributed — it exists to explain a field's value, and an accepted
+  answer that filled nothing explains none.
+  It rejects most filename-titled books on purpose: an empty
+  field is recoverable, while a plausible wrong answer is written,
+  provenanced and never reconsidered.
+  A `Search`-sourced answer additionally **never fills `isbn`**, even
+  having cleared the gate, because that field is the lookup key every later
+  run uses and an identifier has no partial credit. It is withheld by
+  dropping `isbn` from the missing set as soon as the search path is taken,
+  one line doing two jobs: it is also what lets the **early stop** fire for
+  a book with no ISBN, since a field that can never be filled would
+  otherwise keep the set non-empty and spend a call on every remaining
+  provider, on every run. Moving or removing that line re-opens the write,
+  not just the wasted request. The consequence is
+  worth stating because it reads as a bug otherwise: **enrichment can no
+  longer write `isbn` by any route at all.** The field is only ever missing
+  for a book that has none, such a book can only reach a provider through
+  `Search`, and there the value is withheld — while a book that has one
+  does not need it. Three tests pin it. A provider erroring is
   logged and skipped, indistinguishable (deliberately — see above) from
   one abandoned by a cancelled `ctx`; either way the chain continues, and
   neither is `Resolve`'s own failure to report. A book's authors are
@@ -503,10 +657,10 @@ full design.
   representation `ApplyEnrichedFields` (`internal/storage`) and the web
   layer's author textarea already use, so the join-table write on the way
   in is `storage.ApplyEnrichedFields`'s job, not this package's. The
-  worker passes `Resolve`'s `values` and `sourceName` straight through to
+  worker passes `Resolution`'s `Values` and `SourceName` straight through to
   one `ApplyEnrichedFields` call — DESIGN.md's field-level merge means a
   single job can legitimately resolve fields from more than one provider,
-  and `sourceName` already carries each field's own answerer, so there is
+  and `SourceName` already carries each field's own answerer, so there is
   no grouping to do here; keeping every resolved field in one call is also
   what lets `ApplyEnrichedFields` apply (or skip, per its own re-check)
   the whole set as one transaction.
@@ -528,7 +682,7 @@ full design.
   list into one name; the list is cut at 100 for the same reason each name
   is capped.
   A cover is resolved the same way but kept out of that map: `Resolve`
-  returns it separately, as `coverURL`/`coverSource`, since `values` only
+  returns it separately, as `CoverURL`/`CoverSource`, since `Values` only
   carries strings that go straight into a column and a cover's path does
   not exist until the image has been downloaded and passed through
   `internal/cover.Store` — I/O `Resolve` deliberately never performs
@@ -556,16 +710,58 @@ full design.
   silently unstored, nothing naming the cause. It then
   converts it exactly like the scanner converts an embedded one
   (`cover.Store`, resized, JPEG, named by the book's content hash — never
-  the remote URL) before folding the resulting path into `values` under
+  the remote URL) before folding the resulting path into `Values` under
   `storage.FieldCover`; a fetch or `Store` failure only loses the cover —
   it is logged and the field is left out of
-  `values`, the same tolerance the scanner gives a cover that fails to
+  `Values`, the same tolerance the scanner gives a cover that fails to
   store, since it must not fail a job whose text fields already resolved.
+  **That tolerance holds only when text fields did resolve**, which is the
+  whole distinction: for a book whose *only* missing field was its cover
+  there are none, so the reason for the tolerance is absent while the
+  tolerance still applies, and such a run would report "Nothing to add"
+  for a cover it found and dropped. So a run that wrote nothing at all and
+  lost a cover it was offered is `failed` with `coverLostReason` — which
+  names the cover rather than reusing `allProvidersFailedReason`, since a
+  provider did answer and the failure is on this side of the call. The
+  rule is deliberately narrower than "a failed cover fails the job": a run
+  that resolved text fields and lost its cover stays `done`, and a run
+  offered no cover at all is still an honest "Nothing to add". The check
+  sits *after* the store, because a successful store has just put
+  `FieldCover` into `Values`.
   The job itself failing (the book vanished between
   enqueue and claim, a write failed) is a `failed` job; a provider having
   nothing to say — the ordinary case for most books against most
-  providers — is not, and a job that reached at least one provider still
-  finishes `done`. `enrichment_jobs.book_id` cascades on delete (unlike
+  providers — is not, and a job **at least one provider answered** still
+  finishes `done`. A job in which **every provider it asked** failed is
+  `failed` too, with `allProvidersFailedReason`: `Resolve` returns a
+  `Resolution` carrying `Asked` (providers actually called — not
+  configured, since the early stop routinely skips some) and `Failed`,
+  and the worker's rule is `Asked > 0 && Failed == Asked`, beside a
+  `len(Values) == 0 && CoverURL == ""` pair that is unreachable by
+  construction today (a provider that errored is skipped before its
+  answer is read, so it contributes neither) and kept for the day it
+  stops being — the cover half is the one easy to omit, since a
+  cover-only answer has an empty `Values` and lives entirely in
+  `CoverURL`. `Failed == Asked` rather than `Failed > 0` because one
+  throttled provider beside one that answered cleanly and had nothing is
+  still a run that learned something, and failing it would hide a real
+  answer behind a flaky neighbour; `Asked > 0` keeps the two honest
+  zero-provider successes (nothing missing, and `METADATA_PROVIDERS=`)
+  out of it. Without this a run in which every provider 429'd was stored
+  byte-identically to an honest no-match and rendered as "Nothing to add"
+  in the *success* treatment — a false statement to the one person who
+  asked. That branch **guards itself** with its own `ctx.Err()` check
+  rather than leaning on the post-`Resolve` guard above it, matching
+  every other terminal write in `process`: during a shutdown every
+  provider "fails" for exactly the reason above, which is
+  indistinguishable here from every provider being unable to answer, and a
+  permanent `failed` row would deny the job the retry
+  `RequeueInterruptedEnrichment` exists to give it. The earlier guard is
+  still needed for its own reason — it stops a *partial* result being
+  recorded as the answer — but the classification no longer depends on
+  standing after it.
+
+  `enrichment_jobs.book_id` cascades on delete (unlike
   `send_log.book_id`, which must survive its book to keep the record a
   send happened): a queued or running enrichment job is a pending
   intention about a book, and once the book is gone the intention is
@@ -584,7 +780,14 @@ full design.
   check-digit `X` upper-cased — duplicated rather than imported, the same
   choice `internal/storage`'s own copy makes) so a lookup key round-trips;
   `Search` is the title/first-author fallback the resolver uses when a
-  book has no ISBN.
+  book has no ISBN, and now also when an ISBN lookup comes back a clean
+  no-match. Both clients still return their **top hit unchecked**
+  (`parsed.Docs[0]`, `parsed.Items[0]`) — deliberately: judging whether a
+  ranking's first result is the book in hand is `internal/enrich`'s
+  `plausibleMatch`, which lives there because it is the one place that
+  knows *which path it chose*, a fact a provider cannot know about itself,
+  and because DESIGN.md wants the merge logic testable without any real
+  provider.
   Open Library models a **work** (the book as written) separately from an
   **edition** (one publication of it), and the two `internal/openlibrary`
   paths hit different endpoints because of it — the distinction that
@@ -739,7 +942,42 @@ full design.
   *suffix* rather than `filepath.Ext`, since a `.fb2.zip` archive is two
   extensions and `Ext` would only ever see the last one. For known content,
   a sweep re-extracts a recorded cover whose file is missing or zero bytes
-  and refreshes its stored path, making `COVERS_DIR` disposable. An empty
+  and refreshes its stored path, making `COVERS_DIR` disposable — but a
+  cover a *provider* supplied has no original in the book to rebuild from,
+  and the sweep must not simply fail to re-extract it forever.
+  **The ordering is the whole rule, and it is what a reader implementing
+  from this paragraph would otherwise get backwards: `readEmbeddedCover`
+  runs first, and `field_sources` is consulted only once re-extraction has
+  already come back empty.** Establish, don't infer — a book can carry an
+  embedded cover *and* a provider row (`cover.Store` fails at first sight,
+  leaving `cover_retry` set and no cover row since
+  `setEmbeddedFieldSourcesTx` never writes one; enrichment then supplies a
+  cover and creates the row), so "there is a provider row" never meant
+  "there is nothing to re-extract". Plan `2026090603`'s Decision 2 says the
+  branch "returns without touching `readEmbeddedCover`"; that is superseded,
+  and since a completed plan is immutable this is the only record of it.
+  A cover that *is* re-extracted goes through `UpdateBookCoverPath`, which
+  drops the `cover` row in the same transaction — the image is now the
+  scanner's, and a row claiming otherwise is the state the discriminator
+  below forbids.
+  Only when the book yields nothing is the cover forgotten
+  (`storage.ClearProviderCover`), which puts it back in enrichment's missing
+  set so the Fetch button repairs it and leaves the grid showing its honest
+  "no cover" box rather than an `<img>` pointing at a file that is gone.
+  **The provider test is that a `field_sources` row exists, not that it
+  names a provider rather than `embedded`** — a scanner-extracted cover has
+  no provenance at all, so a string comparison against `embedded` would
+  match nothing while reading as correct. That is exactly the tidy-up a
+  later reader would make.
+  Three separate ambiguities are all resolved the same way — **an unknown is
+  not evidence**, the posture missing-file reconciliation takes toward a
+  non-`ErrNotExist` `Lstat`. A failed provenance read, a failed
+  `readEmbeddedCover`, and a stat that fails with anything but
+  `fs.ErrNotExist` (`coverFileDefinitelyGone`) each leave the book untouched
+  rather than forgetting a cover on a guess. The read-error one matters most:
+  clearing there is permanent, because an empty `cover_path` returns at
+  `maybeRegenerateCover`'s first guard on every later sweep, so the embedded
+  original is never recovered even once the read works again. An empty
   stored cover path records that no embedded cover was found and is not
   retried on every sweep; a separate `cover_retry` marker records a
   transient initial store failure and retries it later. Cover inspection

@@ -6,13 +6,13 @@ It was filed with three gaps. Two have become plans and are no longer
 described here:
 
 - **Gap 1, a total provider failure recorded as success** →
-  `docs/plans/2026090601-enrichment-failure-honesty.md`. It stopped being
+  `docs/plans/completed/2026090601-enrichment-failure-honesty.md`. It stopped being
   merely an observability hole when step 06 shipped a button: the control
   renders such a run as "Nothing to add" in the success treatment, which
   is a false statement to a person's face rather than a distinction a
   table cannot express.
 - **Gap 3, an ISBN lookup never falling back to a title search** →
-  `docs/plans/2026090602-search-match-confidence.md`, where it belongs
+  `docs/plans/completed/2026090602-search-match-confidence.md`, where it belongs
   beside the match-confidence guard that makes the search path safe to
   widen. The two were always one decision, as both items said.
 
@@ -30,11 +30,13 @@ about a book that will never resolve.
 count, and nothing on `books` either. Terminal history isn't pruned, so
 *counting* a book's rows is possible today without a schema change.
 
-Until `2026090601` lands, that count also cannot distinguish "asked twice,
-both times the API was down" from "asked twice, this book is not in either
-catalogue" — which is precisely why that plan is the prerequisite for this
-one and not merely adjacent to it. A ceiling built on today's rows would
-count the network's bad days as evidence about the book.
+Before `2026090601`, that count could not distinguish "asked twice, both
+times the API was down" from "asked twice, this book is not in either
+catalogue" — which is precisely why that plan was the prerequisite for
+this one and not merely adjacent to it. It has since landed, so the
+distinction now exists in the job row: a run in which every asked provider
+failed is `failed` with a reason rather than a bare `done`, and a ceiling
+built on those rows can count the right thing.
 
 `WithRetry` bounds attempts *within* one lookup (`DefaultRetryAttempts`,
 3). Nothing bounds how many times a book is put through the whole chain.

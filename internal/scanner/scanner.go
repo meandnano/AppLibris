@@ -346,6 +346,117 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 	return nil
 }
 
+// coverFileDefinitelyGone reports whether the stored thumbnail is known to
+// be unusable: nothing recorded, absent, or empty. maybeRegenerateCover's
+// own stat is skipped when cover_retry is set, so a clear reached by that
+// route would otherwise have no evidence about the file at all.
+//
+// Only fs.ErrNotExist counts as absent. Any other stat failure — an EACCES
+// or EIO on COVERS_DIR — leaves it unknown, and forgetting a cover on an
+// unknown is the same mistake as forgetting one on an unreadable
+// provenance: it says nothing about whether the file is there. That is the
+// posture maybeRegenerateCover's own stat takes, and the one missing-file
+// reconciliation takes toward an ambiguous Lstat.
+func coverFileDefinitelyGone(path string) bool {
+	if path == "" {
+		return true
+	}
+	info, err := os.Stat(path)
+	switch {
+	case err == nil:
+		return info.Size() == 0
+	case errors.Is(err, fs.ErrNotExist):
+		return true
+	default:
+		slog.Warn("inspect cover failed", "path", path, "error", err)
+		return false
+	}
+}
+
+// forgetUnregenerableCover handles a book whose stored cover is unusable and
+// whose source file has no embedded cover to rebuild it from. When a
+// provider supplied that cover there is nothing to regenerate and nothing to
+// warn about on every sweep forever, so the field is forgotten instead:
+// cover_path and its provenance go, which puts the cover back in
+// enrichment's missing set so the Fetch button repairs it, and leaves the
+// grid showing its honest "no cover" box rather than an <img> pointing at a
+// file that is gone.
+//
+// The provider test is that a field_sources row *exists*, not that it names
+// a provider rather than "embedded": setEmbeddedFieldSourcesTx never writes
+// a cover row, so a cover the scanner extracted has no provenance at all,
+// and comparing against "embedded" would match nothing while reading as
+// correct.
+//
+// readErr is whatever readEmbeddedCover reported. It is not merely phrasing
+// for the warning: a non-nil one stops this function before it can forget
+// anything, per the first branch.
+func forgetUnregenerableCover(ctx context.Context, db *storage.DB, book *storage.Book, sourcePath string, readErr error) {
+	// A read *error* establishes nothing. len(coverBytes) == 0 means the
+	// file holds no cover; a failure to open or parse it means the question
+	// was never answered, and clearing on that would discard a regenerable
+	// cover permanently — once cover_path is empty this function is never
+	// reached again, so the embedded original is not recovered even when the
+	// read starts working. The only repair left would be Fetch, which brings
+	// back the provider's image rather than the book's own, and COVERS_DIR
+	// stops being disposable for that book by a different door.
+	//
+	// Same standard the provenance read below holds itself to, and the one
+	// missing-file reconciliation holds for an ambiguous Lstat.
+	if readErr != nil {
+		slog.Warn("regenerate cover failed", "path", sourcePath, "error", readErr)
+		return
+	}
+
+	sources, err := db.FieldSourcesForBook(ctx, book.ID)
+	if err != nil {
+		// A storage error says nothing about where the cover came from, and
+		// guessing either way is how a scanner-extracted cover gets silently
+		// discarded. Leave it for the next sweep — the same posture
+		// missing-file reconciliation takes toward an ambiguous Lstat.
+		slog.Warn("read cover provenance failed", "book_id", book.ID, "error", err)
+		return
+	}
+	_, fromProvider := sources[storage.FieldCover]
+
+	// Confirmed unusable before clearing, not assumed. The stat in
+	// maybeRegenerateCover is skipped entirely when cover_retry is set, so
+	// without this a book carrying that marker beside a provider row could
+	// have a present, perfectly good cover thrown away.
+	//
+	// It covers the books that reach here, which is not every book in that
+	// state: one whose file *does* still hold an embedded cover never
+	// arrives, because re-extraction succeeds and UpdateBookCoverPath
+	// overwrites the path — orphaning the provider's file rather than
+	// forgetting it. That overwrite predates this branch and is at least
+	// self-consistent now that the same write drops the provenance row, so
+	// it is left alone rather than half-fixed here.
+	//
+	// The pairing should not occur at all — updateBookColumnTx clears the
+	// marker whenever it writes a path — but the invariant lives in another
+	// package and nothing here would notice it breaking.
+	if fromProvider && coverFileDefinitelyGone(book.CoverPath) {
+		// The observed path is passed through so the write can refuse a
+		// cover that arrived while this sweep was parsing.
+		cleared, err := db.ClearProviderCover(ctx, book.ID, book.CoverPath, time.Now())
+		if err != nil {
+			slog.Warn("clear provider cover failed", "book_id", book.ID, "error", err)
+			return
+		}
+		if cleared {
+			slog.Info("provider cover forgotten", "book_id", book.ID, "cover_path", book.CoverPath)
+		} else {
+			// Refused because the path moved under this sweep — correct, and
+			// a no-op, but an operator asking why an eligible-looking book
+			// was left alone has nothing to read otherwise.
+			slog.Debug("provider cover unchanged", "book_id", book.ID, "observed_path", book.CoverPath)
+		}
+		return
+	}
+
+	slog.Warn("regenerate cover failed", "path", sourcePath, "error", "embedded cover is missing")
+}
+
 func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Book, sourcePath, coversDir string, result *Result) {
 	if book == nil || (book.CoverPath == "" && !book.CoverRetry) {
 		return
@@ -364,12 +475,19 @@ func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Boo
 	}
 
 	coverBytes, err := readEmbeddedCover(sourcePath, matchedSuffix(sourcePath))
-	if err != nil {
-		slog.Warn("regenerate cover failed", "path", sourcePath, "error", err)
-		return
-	}
-	if len(coverBytes) == 0 {
-		slog.Warn("regenerate cover failed", "path", sourcePath, "error", "embedded cover is missing")
+	if err != nil || len(coverBytes) == 0 {
+		// Re-extraction produced nothing usable, by one of two routes the
+		// callee separates: the file holds no cover (len == 0), or the
+		// question was never answered (err). Only the first can justify
+		// forgetting anything.
+		//
+		// It is tried before provenance is consulted at all, because "there
+		// is a provider row" never implied "there is nothing to
+		// re-extract": a book can carry an embedded cover *and* a provider
+		// row, if cover.Store failed when it was first seen (leaving
+		// cover_retry set and no cover row, since setEmbeddedFieldSourcesTx
+		// never writes one) and enrichment then supplied a cover of its own.
+		forgetUnregenerableCover(ctx, db, book, sourcePath, err)
 		return
 	}
 

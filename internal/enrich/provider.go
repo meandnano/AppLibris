@@ -70,3 +70,18 @@ type Metadata struct {
 	// produced, keyed by the book's content hash, never a remote URL.
 	CoverURL string
 }
+
+// IsEmpty reports whether a provider had nothing at all to say — the zero
+// Metadata a 200-with-no-match and a 404 both produce, per the four-case
+// contract.
+//
+// It means "nothing", not "nothing this run wanted": CoverURL counts, so an
+// answer carrying only a cover is an answer. Resolve's ISBN fallback keys
+// on this, and searching past a cover-only reply would spend a call to
+// replace something a catalogue matched on an identifier with something a
+// ranking guessed at.
+func (m Metadata) IsEmpty() bool {
+	return m.Title == "" && len(m.Authors) == 0 && m.Publisher == "" &&
+		m.PublishedDate == "" && m.Language == "" && m.ISBN == "" &&
+		m.Description == "" && m.CoverURL == ""
+}

@@ -68,18 +68,18 @@ func TestResolveAsksForEmptyEmbeddedField(t *testing.T) {
 		return Metadata{Publisher: "Ace Books"}, nil
 	}}
 
-	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.calls != 1 {
 		t.Fatalf("provider calls = %d, want 1", p.calls)
 	}
-	if values[storage.FieldPublisher] != "Ace Books" {
-		t.Errorf("values[publisher] = %q, want %q", values[storage.FieldPublisher], "Ace Books")
+	if res.Values[storage.FieldPublisher] != "Ace Books" {
+		t.Errorf("values[publisher] = %q, want %q", res.Values[storage.FieldPublisher], "Ace Books")
 	}
-	if sourceName[storage.FieldPublisher] != "fake" {
-		t.Errorf("sourceName[publisher] = %q, want fake", sourceName[storage.FieldPublisher])
+	if res.SourceName[storage.FieldPublisher] != "fake" {
+		t.Errorf("sourceName[publisher] = %q, want fake", res.SourceName[storage.FieldPublisher])
 	}
 }
 
@@ -91,24 +91,24 @@ func TestResolveDoesNotAskForManuallyClearedField(t *testing.T) {
 	book := storage.Book{ID: 1, Title: "Book", Publisher: ""}
 	sources := map[storage.MetadataField]string{storage.FieldPublisher: "manual"}
 	p := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
-		return Metadata{Publisher: "Ace Books", Description: "A description"}, nil
+		return Metadata{Title: "Book", Publisher: "Ace Books", Description: "A description"}, nil
 	}}
 
-	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.calls != 1 {
 		t.Fatalf("provider calls = %d, want 1 (description was still missing)", p.calls)
 	}
-	if _, ok := values[storage.FieldPublisher]; ok {
-		t.Errorf("values contains publisher = %q, want it absent — the field was manually cleared", values[storage.FieldPublisher])
+	if _, ok := res.Values[storage.FieldPublisher]; ok {
+		t.Errorf("values contains publisher = %q, want it absent — the field was manually cleared", res.Values[storage.FieldPublisher])
 	}
-	if _, ok := sourceName[storage.FieldPublisher]; ok {
+	if _, ok := res.SourceName[storage.FieldPublisher]; ok {
 		t.Errorf("sourceName contains publisher, want it absent")
 	}
-	if values[storage.FieldDescription] != "A description" {
-		t.Errorf("values[description] = %q, want %q (this field genuinely was missing)", values[storage.FieldDescription], "A description")
+	if res.Values[storage.FieldDescription] != "A description" {
+		t.Errorf("values[description] = %q, want %q (this field genuinely was missing)", res.Values[storage.FieldDescription], "A description")
 	}
 }
 
@@ -118,18 +118,18 @@ func TestResolveNeverOverwritesAPresentValue(t *testing.T) {
 	book := storage.Book{ID: 1, Title: "Book", Publisher: "Original Press", Description: ""}
 	sources := map[storage.MetadataField]string{storage.FieldPublisher: "embedded"}
 	p := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
-		return Metadata{Publisher: "A Different Press", Description: "New description"}, nil
+		return Metadata{Title: "Book", Publisher: "A Different Press", Description: "New description"}, nil
 	}}
 
-	values, _, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := values[storage.FieldPublisher]; ok {
-		t.Errorf("values contains publisher = %q, want it absent — publisher already had a value", values[storage.FieldPublisher])
+	if _, ok := res.Values[storage.FieldPublisher]; ok {
+		t.Errorf("values contains publisher = %q, want it absent — publisher already had a value", res.Values[storage.FieldPublisher])
 	}
-	if values[storage.FieldDescription] != "New description" {
-		t.Errorf("values[description] = %q, want %q", values[storage.FieldDescription], "New description")
+	if res.Values[storage.FieldDescription] != "New description" {
+		t.Errorf("values[description] = %q, want %q", res.Values[storage.FieldDescription], "New description")
 	}
 }
 
@@ -144,15 +144,47 @@ func TestResolveCallsNoProviderWhenNothingIsMissing(t *testing.T) {
 	sources := map[storage.MetadataField]string{}
 	p := &fakeProvider{name: "fake"}
 
-	values, sourceName, _, _, err := Resolve(context.Background(), book, []string{"An Author"}, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, []string{"An Author"}, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.calls != 0 {
 		t.Fatalf("provider calls = %d, want 0", p.calls)
 	}
-	if len(values) != 0 || len(sourceName) != 0 {
-		t.Errorf("values = %v, sourceName = %v, want both empty", values, sourceName)
+	if len(res.Values) != 0 || len(res.SourceName) != 0 {
+		t.Errorf("values = %v, sourceName = %v, want both empty", res.Values, res.SourceName)
+	}
+	// Zero asked, not zero failed-of-some-asked: this run is an honest
+	// success and the worker's Asked > 0 clause is what keeps it one.
+	if res.Asked != 0 || res.Failed != 0 {
+		t.Errorf("asked = %d, failed = %d, want 0 and 0", res.Asked, res.Failed)
+	}
+}
+
+// Every provider failing is what the worker turns into a failed job, so
+// Resolve has to make it distinguishable: same empty Values as an honest
+// no-match, but Failed == Asked rather than zero. Resolve itself still
+// returns no error — a per-provider failure is not its own.
+func TestResolveReportsEveryProviderFailing(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "Book", ISBN: "9780000000001"}
+	sources := map[storage.MetadataField]string{}
+
+	a := &fakeProvider{name: "provider-a", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, errors.New("429 too many requests")
+	}}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, errors.New("503 service unavailable")
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatalf("Resolve returned an error for per-provider failures: %v", err)
+	}
+	if res.Asked != 2 || res.Failed != 2 {
+		t.Errorf("asked = %d, failed = %d, want 2 and 2", res.Asked, res.Failed)
+	}
+	if len(res.Values) != 0 {
+		t.Errorf("values = %v, want empty", res.Values)
 	}
 }
 
@@ -169,18 +201,21 @@ func TestResolveMergesFieldsAcrossProviders(t *testing.T) {
 		return Metadata{Description: "A description"}, nil
 	}}
 
-	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a.calls != 1 || b.calls != 1 {
 		t.Fatalf("calls: a=%d, b=%d, want 1 each", a.calls, b.calls)
 	}
-	if values[storage.FieldPublisher] != "Ace Books" || sourceName[storage.FieldPublisher] != "provider-a" {
-		t.Errorf("publisher = %q from %q, want Ace Books from provider-a", values[storage.FieldPublisher], sourceName[storage.FieldPublisher])
+	if res.Asked != 2 || res.Failed != 0 {
+		t.Errorf("asked = %d, failed = %d, want 2 and 0", res.Asked, res.Failed)
 	}
-	if values[storage.FieldDescription] != "A description" || sourceName[storage.FieldDescription] != "provider-b" {
-		t.Errorf("description = %q from %q, want A description from provider-b", values[storage.FieldDescription], sourceName[storage.FieldDescription])
+	if res.Values[storage.FieldPublisher] != "Ace Books" || res.SourceName[storage.FieldPublisher] != "provider-a" {
+		t.Errorf("publisher = %q from %q, want Ace Books from provider-a", res.Values[storage.FieldPublisher], res.SourceName[storage.FieldPublisher])
+	}
+	if res.Values[storage.FieldDescription] != "A description" || res.SourceName[storage.FieldDescription] != "provider-b" {
+		t.Errorf("description = %q from %q, want A description from provider-b", res.Values[storage.FieldDescription], res.SourceName[storage.FieldDescription])
 	}
 }
 
@@ -208,7 +243,7 @@ func TestResolveStopsEarlyOnceNothingIsMissing(t *testing.T) {
 		return Metadata{}, nil
 	}}
 
-	values, _, _, _, err := Resolve(context.Background(), book, authors, sources, []Provider{a, b})
+	res, err := Resolve(context.Background(), book, authors, sources, []Provider{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,8 +253,15 @@ func TestResolveStopsEarlyOnceNothingIsMissing(t *testing.T) {
 	if b.calls != 0 {
 		t.Fatalf("provider-b calls = %d, want 0", b.calls)
 	}
-	if values[storage.FieldPublisher] != "Ace Books" || values[storage.FieldDescription] != "A description" {
-		t.Errorf("values = %v, want both fields from provider-a", values)
+	// Asked counts providers actually called, not providers configured.
+	// The caller's failure rule is Failed == Asked, so counting the
+	// provider the early stop skipped would make a one-provider run look
+	// like a two-provider one that half-failed.
+	if res.Asked != 1 || res.Failed != 0 {
+		t.Errorf("asked = %d, failed = %d, want 1 and 0 — provider-b was never called", res.Asked, res.Failed)
+	}
+	if res.Values[storage.FieldPublisher] != "Ace Books" || res.Values[storage.FieldDescription] != "A description" {
+		t.Errorf("values = %v, want both fields from provider-a", res.Values)
 	}
 }
 
@@ -236,15 +278,18 @@ func TestResolveSkipsAProviderThatErrors(t *testing.T) {
 		return Metadata{Publisher: "Ace Books"}, nil
 	}}
 
-	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
 	if err != nil {
 		t.Fatalf("Resolve returned an error for a per-provider failure: %v", err)
 	}
 	if a.calls != 1 || b.calls != 1 {
 		t.Fatalf("calls: a=%d, b=%d, want 1 each — the error must not block the next provider", a.calls, b.calls)
 	}
-	if values[storage.FieldPublisher] != "Ace Books" || sourceName[storage.FieldPublisher] != "provider-b" {
-		t.Errorf("publisher = %q from %q, want Ace Books from provider-b", values[storage.FieldPublisher], sourceName[storage.FieldPublisher])
+	if res.Asked != 2 || res.Failed != 1 {
+		t.Errorf("asked = %d, failed = %d, want 2 and 1", res.Asked, res.Failed)
+	}
+	if res.Values[storage.FieldPublisher] != "Ace Books" || res.SourceName[storage.FieldPublisher] != "provider-b" {
+		t.Errorf("publisher = %q from %q, want Ace Books from provider-b", res.Values[storage.FieldPublisher], res.SourceName[storage.FieldPublisher])
 	}
 }
 
@@ -258,15 +303,15 @@ func TestResolveDiscardsAnswersForFieldsNotMissing(t *testing.T) {
 		return Metadata{Publisher: "Uninvited Press", Description: "A description"}, nil
 	}}
 
-	values, _, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := values[storage.FieldPublisher]; ok {
-		t.Errorf("values contains publisher = %q, want it discarded", values[storage.FieldPublisher])
+	if _, ok := res.Values[storage.FieldPublisher]; ok {
+		t.Errorf("values contains publisher = %q, want it discarded", res.Values[storage.FieldPublisher])
 	}
-	if values[storage.FieldDescription] != "A description" {
-		t.Errorf("values[description] = %q, want %q", values[storage.FieldDescription], "A description")
+	if res.Values[storage.FieldDescription] != "A description" {
+		t.Errorf("values[description] = %q, want %q", res.Values[storage.FieldDescription], "A description")
 	}
 }
 
@@ -276,19 +321,19 @@ func TestResolveHandlesAuthorsAsAMissingField(t *testing.T) {
 	book := storage.Book{ID: 1, Title: "Book"}
 	sources := map[storage.MetadataField]string{}
 	p := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
-		return Metadata{Authors: []string{"First Author", "Second Author"}}, nil
+		return Metadata{Title: "Book", Authors: []string{"First Author", "Second Author"}}, nil
 	}}
 
-	values, sourceName, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := "First Author\nSecond Author"
-	if values[storage.FieldAuthors] != want {
-		t.Errorf("values[authors] = %q, want %q", values[storage.FieldAuthors], want)
+	if res.Values[storage.FieldAuthors] != want {
+		t.Errorf("values[authors] = %q, want %q", res.Values[storage.FieldAuthors], want)
 	}
-	if sourceName[storage.FieldAuthors] != "fake" {
-		t.Errorf("sourceName[authors] = %q, want fake", sourceName[storage.FieldAuthors])
+	if res.SourceName[storage.FieldAuthors] != "fake" {
+		t.Errorf("sourceName[authors] = %q, want fake", res.SourceName[storage.FieldAuthors])
 	}
 }
 
@@ -299,18 +344,18 @@ func TestResolveDoesNotAskForPresentAuthors(t *testing.T) {
 		return Metadata{Authors: []string{"Someone Else"}}, nil
 	}}
 
-	values, _, _, _, err := Resolve(context.Background(), book, []string{"Existing Author"}, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, []string{"Existing Author"}, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := values[storage.FieldAuthors]; ok {
-		t.Errorf("values contains authors = %q, want it absent — the book already has authors", values[storage.FieldAuthors])
+	if _, ok := res.Values[storage.FieldAuthors]; ok {
+		t.Errorf("values contains authors = %q, want it absent — the book already has authors", res.Values[storage.FieldAuthors])
 	}
 }
 
 // A cover is missing exactly like any other empty field, and a provider's
-// answer for it comes back through Resolve's separate coverURL/coverSource
-// return values rather than the values map — see Resolve's doc comment for
+// answer for it comes back through Resolution's separate CoverURL and
+// CoverSource rather than the values map — see Resolve's doc comment for
 // why.
 func TestResolveAsksForCoverWhenMissing(t *testing.T) {
 	book := storage.Book{ID: 1, Title: "Book", ISBN: "9780000000001"}
@@ -320,19 +365,19 @@ func TestResolveAsksForCoverWhenMissing(t *testing.T) {
 		return Metadata{CoverURL: wantCover}, nil
 	}}
 
-	values, _, coverURL, coverSource, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if coverURL != wantCover {
-		t.Errorf("coverURL = %q, want %q", coverURL, wantCover)
+	if res.CoverURL != wantCover {
+		t.Errorf("coverURL = %q, want %q", res.CoverURL, wantCover)
 	}
-	if coverSource != "fake" {
-		t.Errorf("coverSource = %q, want fake", coverSource)
+	if res.CoverSource != "fake" {
+		t.Errorf("coverSource = %q, want fake", res.CoverSource)
 	}
 	// The URL must never travel in values, which goes straight into
 	// columns — cover_path holds a stored file's path, never a remote URL.
-	if got, ok := values[storage.FieldCover]; ok {
+	if got, ok := res.Values[storage.FieldCover]; ok {
 		t.Errorf("values[cover] = %q, want it absent — only the worker may put a path there", got)
 	}
 }
@@ -348,20 +393,20 @@ func TestResolveDoesNotAskForCoverWhenPresent(t *testing.T) {
 		return Metadata{CoverURL: "https://covers.example/new.jpg", Description: "A description"}, nil
 	}}
 
-	values, _, coverURL, coverSource, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Empty here is what stops the worker downloading an image the book has
 	// no use for — the whole reason Metadata carries a URL, not bytes.
-	if coverURL != "" {
-		t.Errorf("coverURL = %q, want empty — the book already has a cover", coverURL)
+	if res.CoverURL != "" {
+		t.Errorf("coverURL = %q, want empty — the book already has a cover", res.CoverURL)
 	}
-	if coverSource != "" {
-		t.Errorf("coverSource = %q, want empty", coverSource)
+	if res.CoverSource != "" {
+		t.Errorf("coverSource = %q, want empty", res.CoverSource)
 	}
-	if values[storage.FieldDescription] != "A description" {
-		t.Errorf("values[description] = %q, want %q (this field genuinely was missing)", values[storage.FieldDescription], "A description")
+	if res.Values[storage.FieldDescription] != "A description" {
+		t.Errorf("values[description] = %q, want %q (this field genuinely was missing)", res.Values[storage.FieldDescription], "A description")
 	}
 }
 
@@ -387,15 +432,15 @@ func TestResolveKeepsFirstProvidersCoverAnswer(t *testing.T) {
 		return Metadata{}, nil
 	}}
 
-	_, _, coverURL, coverSource, err := Resolve(context.Background(), book, authors, sources, []Provider{a, b})
+	res, err := Resolve(context.Background(), book, authors, sources, []Provider{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if coverURL != "https://covers.example/from-a.jpg" {
-		t.Errorf("coverURL = %q, want provider-a's", coverURL)
+	if res.CoverURL != "https://covers.example/from-a.jpg" {
+		t.Errorf("coverURL = %q, want provider-a's", res.CoverURL)
 	}
-	if coverSource != "provider-a" {
-		t.Errorf("coverSource = %q, want provider-a", coverSource)
+	if res.CoverSource != "provider-a" {
+		t.Errorf("coverSource = %q, want provider-a", res.CoverSource)
 	}
 }
 
@@ -418,22 +463,22 @@ func TestResolveSanitizesProviderValues(t *testing.T) {
 		}, nil
 	}}
 
-	values, _, _, _, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := values[storage.FieldTitle]; got != "A Title with a line break" {
+	if got := res.Values[storage.FieldTitle]; got != "A Title with a line break" {
 		t.Errorf("title = %q, want the line break collapsed and the value trimmed", got)
 	}
-	if got := values[storage.FieldPublisher]; got != "Press Inc" {
+	if got := res.Values[storage.FieldPublisher]; got != "Press Inc" {
 		t.Errorf("publisher = %q, want %q", got, "Press Inc")
 	}
 	// Each name is sanitised on its own: authorsJoin is itself a newline,
 	// so sanitising the joined string would collapse the list into one name.
-	if got := values[storage.FieldAuthors]; got != "First Author\nSecond Author" {
+	if got := res.Values[storage.FieldAuthors]; got != "First Author\nSecond Author" {
 		t.Errorf("authors = %q, want two names with the interior break collapsed and the blank dropped", got)
 	}
-	if got := len(values[storage.FieldDescription]); got > maxEnrichedDescriptionBytes {
+	if got := len(res.Values[storage.FieldDescription]); got > maxEnrichedDescriptionBytes {
 		t.Errorf("description is %d bytes, want at most %d", got, maxEnrichedDescriptionBytes)
 	}
 }
@@ -469,14 +514,14 @@ func TestResolveCapsMatchTheEditableLimits(t *testing.T) {
 		}, nil
 	}}
 
-	values, _, _, _, err := Resolve(context.Background(), book, nil, map[storage.MetadataField]string{}, []Provider{p})
+	res, err := Resolve(context.Background(), book, nil, map[storage.MetadataField]string{}, []Provider{p})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(values[storage.FieldTitle]); got != maxEnrichedTitleBytes {
+	if got := len(res.Values[storage.FieldTitle]); got != maxEnrichedTitleBytes {
 		t.Errorf("title is %d bytes, want it truncated to %d", got, maxEnrichedTitleBytes)
 	}
-	got := strings.Split(values[storage.FieldAuthors], authorsJoin)
+	got := strings.Split(res.Values[storage.FieldAuthors], authorsJoin)
 	if len(got) != maxEnrichedAuthors {
 		t.Errorf("authors = %d names, want the list cut at %d", len(got), maxEnrichedAuthors)
 	}
@@ -491,5 +536,410 @@ func TestSanitizeValueCapsOneAuthorName(t *testing.T) {
 	got := sanitizeValue(storage.FieldAuthors, strings.Repeat("a", maxEnrichedAuthorNameBytes+10))
 	if len(got) != maxEnrichedAuthorNameBytes {
 		t.Errorf("length = %d, want %d", len(got), maxEnrichedAuthorNameBytes)
+	}
+}
+
+// A search answer that fails the gate is treated as no match: nothing is
+// merged, no provenance is recorded, no cover is taken, the missing set is
+// untouched, and the chain carries on — so the next provider can still fill
+// everything.
+func TestResolveRejectsAnImplausibleSearchAnswer(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "01 - Fellowship"}
+	sources := map[storage.MetadataField]string{}
+
+	a := &fakeProvider{name: "provider-a", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		return Metadata{
+			Title: "The Fellowship of Being", Publisher: "Wrong Press",
+			Description: "A different book", CoverURL: "https://covers.example/wrong.jpg",
+		}, nil
+	}}
+	b := &fakeProvider{name: "provider-b", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		return Metadata{Title: "01 - Fellowship", Publisher: "Right Press", Description: "The real one"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The rejected answer consumed none of the missing set, so provider-b
+	// could still fill everything — the claim a call-count assertion alone
+	// cannot make.
+	if res.Values[storage.FieldPublisher] != "Right Press" || res.Values[storage.FieldDescription] != "The real one" {
+		t.Errorf("values = %v, want provider-b's answer for both fields", res.Values)
+	}
+	for _, f := range []storage.MetadataField{storage.FieldPublisher, storage.FieldDescription} {
+		if res.SourceName[f] != "provider-b" {
+			t.Errorf("sourceName[%s] = %q, want provider-b — a rejected answer must leak no provenance", f, res.SourceName[f])
+		}
+	}
+	// The cover is the most visible field on the grid, and a wrong-book one
+	// is stored, provenanced and never reconsidered. The rejection has to
+	// stop it before the cover block, not only before the merge.
+	if res.CoverURL != "" || res.CoverSource != "" {
+		t.Errorf("coverURL = %q from %q, want neither — the answer was rejected", res.CoverURL, res.CoverSource)
+	}
+	// A rejection is not a provider failure: it is an answer this book
+	// cannot use, which is the four-case contract's no-match case.
+	if res.Failed != 0 {
+		t.Errorf("failed = %d, want 0 — a rejected answer is not a provider error", res.Failed)
+	}
+}
+
+// Single-provider rejection: nothing at all comes back, and no provenance
+// is recorded for a field that was never filled.
+func TestResolveRejectionRecordsNoProvenance(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "01 - Fellowship"}
+	sources := map[storage.MetadataField]string{}
+	p := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		return Metadata{Title: "The Fellowship of Being", Publisher: "Wrong Press"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Values) != 0 || len(res.SourceName) != 0 {
+		t.Errorf("values = %v, sourceName = %v, want both empty", res.Values, res.SourceName)
+	}
+}
+
+// The gate on the *fallback* path — the path this step was ordered around,
+// and the one a missing viaSearch on the ISBN branch would silently open.
+// Without it the answer skips the gate and becomes eligible to write the
+// identifier every later run keys off.
+func TestResolveGatesTheFallbackSearchAnswer(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "01 - Fellowship", ISBN: "9780000000001"}
+	sources := map[storage.MetadataField]string{}
+
+	a := &fakeProvider{
+		name:   "provider-a",
+		byISBN: func(ctx context.Context, isbn string) (Metadata, error) { return Metadata{}, nil },
+		search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+			return Metadata{
+				Title: "The Fellowship of Being", Publisher: "Wrong Press",
+				ISBN: "9781111111111", CoverURL: "https://covers.example/wrong.jpg",
+			}, nil
+		},
+	}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Publisher: "Right Press"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Values[storage.FieldPublisher] != "Right Press" {
+		t.Errorf("values[publisher] = %q, want provider-b's — provider-a's fallback answer was implausible", res.Values[storage.FieldPublisher])
+	}
+	if res.CoverURL != "" {
+		t.Errorf("coverURL = %q, want empty", res.CoverURL)
+	}
+	if got, ok := res.Values[storage.FieldISBN]; ok {
+		t.Errorf("values[isbn] = %q, want it absent", got)
+	}
+}
+
+func TestResolveAcceptsAPlausibleSearchAnswer(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit"}
+	sources := map[storage.MetadataField]string{}
+	p := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		return Metadata{Title: "The Hobbit: 75th Anniversary Edition", Publisher: "Houghton Mifflin"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Values[storage.FieldPublisher] != "Houghton Mifflin" {
+		t.Errorf("values[publisher] = %q, want Houghton Mifflin", res.Values[storage.FieldPublisher])
+	}
+}
+
+// Decision 3, and the test a later "why is this field being dropped?"
+// cleanup deletes: a search answer never supplies an ISBN, even for a book
+// that has none and even when the answer clears the gate.
+func TestResolveNeverWritesISBNFromASearchAnswer(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit"}
+	sources := map[storage.MetadataField]string{}
+	p := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		return Metadata{Title: "The Hobbit", ISBN: "9780261102217", Publisher: "Allen & Unwin"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := res.Values[storage.FieldISBN]; ok {
+		t.Errorf("values[isbn] = %q, want it absent — a ranking is not an identification", got)
+	}
+	if res.Values[storage.FieldPublisher] != "Allen & Unwin" {
+		t.Errorf("values[publisher] = %q, want it kept — only isbn is withheld", res.Values[storage.FieldPublisher])
+	}
+}
+
+// The withholding is scoped to the search path, not to the field — which
+// shows up as a ByISBN answer never being gated at all. The titles here
+// disagree completely and the answer still merges, because an ISBN names
+// one edition: the answer is about this book by construction, and applying
+// a title-similarity test to it would reject correct data on the strength
+// of a provider's differing title string.
+func TestResolveNeverGatesAnISBNAnswer(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit", ISBN: "9780261102217"}
+	sources := map[storage.MetadataField]string{}
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Title: "Something Else Entirely", Publisher: "Allen & Unwin"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Values[storage.FieldPublisher] != "Allen & Unwin" {
+		t.Errorf("values[publisher] = %q, want Allen & Unwin — a ByISBN answer is never gated", res.Values[storage.FieldPublisher])
+	}
+}
+
+// Taken together with Decision 3, enrichment can no longer write isbn at
+// all, and that is the intended consequence rather than an oversight: the
+// field is only ever missing for a book with no ISBN, and such a book can
+// only reach a provider through Search, where the value is withheld. A book
+// that has one does not need it. Pinned because it reads as a bug to
+// anyone who meets the skip without this reasoning.
+func TestResolveNeverWritesISBNByAnyRoute(t *testing.T) {
+	sources := map[storage.MetadataField]string{}
+	answer := Metadata{Title: "The Hobbit", ISBN: "9780261102217", Publisher: "Allen & Unwin"}
+
+	for _, book := range []storage.Book{
+		{ID: 1, Title: "The Hobbit"},                        // no ISBN: search path
+		{ID: 2, Title: "The Hobbit", ISBN: "9780000000001"}, // has one: ByISBN, then the fallback
+	} {
+		p := &fakeProvider{
+			name:   "fake",
+			byISBN: func(ctx context.Context, isbn string) (Metadata, error) { return Metadata{}, nil },
+			search: func(ctx context.Context, title string, authors []string) (Metadata, error) { return answer, nil },
+		}
+		res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := res.Values[storage.FieldISBN]; ok {
+			t.Errorf("book %d: values[isbn] = %q, want it absent by every route", book.ID, got)
+		}
+	}
+}
+
+// Decision 4: a clean no-match by ISBN falls back to a title search on the
+// same provider, before the chain moves on.
+func TestResolveFallsBackToSearchOnACleanISBNNoMatch(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit", ISBN: "9780261102217"}
+	sources := map[storage.MetadataField]string{}
+
+	var searchTitle string
+	var searchAuthors []string
+	p := &fakeProvider{
+		name:   "fake",
+		byISBN: func(ctx context.Context, isbn string) (Metadata, error) { return Metadata{}, nil },
+		search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+			searchTitle, searchAuthors = title, authors
+			return Metadata{Title: "The Hobbit", Publisher: "Allen & Unwin"}, nil
+		},
+	}
+
+	res, err := Resolve(context.Background(), book, []string{"J.R.R. Tolkien"}, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searchTitle != "The Hobbit" || len(searchAuthors) != 1 {
+		t.Errorf("search called with (%q, %v), want the book's own title and authors", searchTitle, searchAuthors)
+	}
+	if res.Values[storage.FieldPublisher] != "Allen & Unwin" {
+		t.Errorf("values[publisher] = %q, want Allen & Unwin", res.Values[storage.FieldPublisher])
+	}
+	// One provider, two calls — Asked counts providers, not calls.
+	if res.Asked != 1 || res.Failed != 0 {
+		t.Errorf("asked = %d, failed = %d, want 1 and 0", res.Asked, res.Failed)
+	}
+}
+
+// The negative half, which matters more than the positive one: an ISBN
+// lookup that *errors* must not fall back. A transient 5xx says nothing
+// about whether the ISBN is right, and searching on it would accept a
+// fuzzy answer because a host was briefly unreachable.
+func TestResolveDoesNotFallBackWhenTheISBNLookupErrors(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit", ISBN: "9780261102217"}
+	sources := map[storage.MetadataField]string{}
+
+	searched := false
+	a := &fakeProvider{
+		name: "provider-a",
+		byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			return Metadata{}, errors.New("503 service unavailable")
+		},
+		search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+			searched = true
+			return Metadata{Title: "The Hobbit", Publisher: "Wrong Press"}, nil
+		},
+	}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Publisher: "Allen & Unwin"}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searched {
+		t.Error("provider-a's search was called after its ISBN lookup errored")
+	}
+	if res.Values[storage.FieldPublisher] != "Allen & Unwin" {
+		t.Errorf("values[publisher] = %q, want provider-b's answer", res.Values[storage.FieldPublisher])
+	}
+	if res.Asked != 2 || res.Failed != 1 {
+		t.Errorf("asked = %d, failed = %d, want 2 and 1", res.Asked, res.Failed)
+	}
+}
+
+// An ISBN lookup that answers is never followed by a search, however
+// partial the answer.
+func TestResolveDoesNotSearchWhenTheISBNLookupAnswers(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit", ISBN: "9780261102217"}
+	sources := map[storage.MetadataField]string{}
+
+	searched := false
+	p := &fakeProvider{
+		name: "fake",
+		byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			return Metadata{Publisher: "Allen & Unwin"}, nil
+		},
+		search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+			searched = true
+			return Metadata{}, nil
+		},
+	}
+
+	if _, err := Resolve(context.Background(), book, nil, sources, []Provider{p}); err != nil {
+		t.Fatal(err)
+	}
+	if searched {
+		t.Error("search was called even though the ISBN lookup answered")
+	}
+}
+
+// A cover-only reply is an answer, not a no-match — Metadata.IsEmpty says
+// so — and must not provoke a fallback search.
+func TestResolveDoesNotSearchPastACoverOnlyISBNAnswer(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit", ISBN: "9780261102217"}
+	sources := map[storage.MetadataField]string{}
+
+	searched := false
+	p := &fakeProvider{
+		name: "fake",
+		byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			return Metadata{CoverURL: "https://covers.example/1.jpg"}, nil
+		},
+		search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+			searched = true
+			return Metadata{}, nil
+		},
+	}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searched {
+		t.Error("search was called past a cover-only answer")
+	}
+	if res.CoverURL != "https://covers.example/1.jpg" {
+		t.Errorf("coverURL = %q, want the answer's", res.CoverURL)
+	}
+}
+
+// A book with no title has nothing to search on, so neither branch calls
+// Search — saving a round trip and a rate-limit token for an answer the
+// gate would reject anyway.
+func TestResolveDoesNotSearchWithoutATitle(t *testing.T) {
+	sources := map[storage.MetadataField]string{}
+
+	for _, book := range []storage.Book{
+		{ID: 1, Title: ""},
+		{ID: 2, Title: "", ISBN: "9780261102217"},
+	} {
+		searched := false
+		p := &fakeProvider{
+			name:   "fake",
+			byISBN: func(ctx context.Context, isbn string) (Metadata, error) { return Metadata{}, nil },
+			search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+				searched = true
+				return Metadata{}, nil
+			},
+		}
+		if _, err := Resolve(context.Background(), book, nil, sources, []Provider{p}); err != nil {
+			t.Fatal(err)
+		}
+		if searched {
+			t.Errorf("book %d: search was called with an empty title", book.ID)
+		}
+	}
+}
+
+// The early stop has to fire for a no-ISBN book too. isbn is in such a
+// book's missing set and can never be filled from the search path, so
+// without removing it the set never empties and every remaining provider
+// is called for a field none of them may answer — a wasted request and
+// rate-limit token per book per run, against DESIGN.md's "the chain stops
+// early and saves the API calls".
+func TestResolveStopsEarlyForANoISBNBook(t *testing.T) {
+	book := storage.Book{ID: 1, Title: "The Hobbit"}
+	sources := map[storage.MetadataField]string{}
+
+	a := &fakeProvider{name: "provider-a", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		return Metadata{
+			Title: "The Hobbit", Authors: []string{"J.R.R. Tolkien"},
+			Publisher: "Allen & Unwin", PublishedDate: "1937", Language: "en",
+			Description: "In a hole in the ground…", CoverURL: "https://covers.example/hobbit.jpg",
+		}, nil
+	}}
+	b := &fakeProvider{name: "provider-b", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		t.Error("provider-b was called; provider-a answered everything fillable")
+		return Metadata{}, nil
+	}}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.calls != 0 {
+		t.Errorf("provider-b calls = %d, want 0", b.calls)
+	}
+	if res.Asked != 1 {
+		t.Errorf("asked = %d, want 1", res.Asked)
+	}
+	// isbn is not merely skipped at the merge — it has left the missing set,
+	// which is what lets the loop break.
+	if got, ok := res.Values[storage.FieldISBN]; ok {
+		t.Errorf("values[isbn] = %q, want it absent", got)
+	}
+}
+
+// Asked counts providers this run actually called. A book with neither an
+// ISBN nor a title calls nobody, and counting it would break the invariant
+// the worker's Asked > 0 && Failed == Asked rule rests on.
+func TestResolveCountsNoProviderWhenItCallsNone(t *testing.T) {
+	book := storage.Book{ID: 1}
+	sources := map[storage.MetadataField]string{}
+	a := &fakeProvider{name: "provider-a"}
+	b := &fakeProvider{name: "provider-b"}
+
+	res, err := Resolve(context.Background(), book, nil, sources, []Provider{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.calls != 0 || b.calls != 0 {
+		t.Fatalf("calls: a=%d, b=%d, want 0 each", a.calls, b.calls)
+	}
+	if res.Asked != 0 || res.Failed != 0 {
+		t.Errorf("asked = %d, failed = %d, want 0 and 0", res.Asked, res.Failed)
 	}
 }
