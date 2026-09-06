@@ -675,6 +675,26 @@ reader ever sees a truncated cover, and a sweep re-extracts any recorded
 cover whose file has gone missing or zero-byte. FB2 covers are extracted
 too.
 
+One qualification, added once providers could supply a cover of their own:
+that property can only hold for a cover extracted from a book file, because
+a fetched one has no source file to regenerate from. So a sweep finding a
+provider-supplied cover missing **forgets** it — clearing the path and its
+provenance — rather than failing to re-extract it. `COVERS_DIR` stays
+disposable by a different route: the library ends up in a state a person
+can repair with the same button that produced the cover in the first place,
+and the grid shows an honest empty cover meanwhile instead of a broken
+image.
+
+That distinction has a second consequence, in the enrichment worker rather
+than the scanner. A lost cover is normally tolerated, on the grounds that
+it must not fail a job whose text fields resolved — but for a book whose
+only missing field *was* its cover there are no such fields, so the run
+would report "nothing to add" for a cover it found and dropped. That case
+is a failure, named as one. It is the same honesty rule as the
+provider-failure one above, reached from the opposite direction: there the
+run learned nothing and said it had, here it lost something and said the
+same.
+
 ## Conversion
 
 Not required for the primary flow (Amazon accepts EPUB directly), so it is a
