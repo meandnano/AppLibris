@@ -848,12 +848,28 @@ full design.
   both ways — and `thumbnail` is ~195px on the long edge, under
   `internal/cover`'s 400px target, which never upscales. `small` through
   `extraLarge` exist only on `GET /volumes/{id}`, so `enrichVolume` asks
-  it for a volume that matched and has a cover at all, and takes the
-  detail response's description while it is there. It **fails silently**:
+  it for any volume that matched and named an id — not only one that has a
+  cover, since skipping a coverless volume would be free on the cover half
+  and would silently drop the description half — and takes the detail
+  response's description while it is there. That description is often
+  different, fuller text rather than the same text differently punctuated;
+  its paragraph breaks reach the column but **not the page**, since
+  `.detail__description` sets no `white-space`, which
+  `docs/backlog/2026090610-description-paragraphs-do-not-render.md`
+  records. It **fails silently**:
   any non-200, malformed body or transport failure leaves the list
   answer's thumbnail and description exactly as they were, logged at
   Debug, since a lookup holding six good text fields must not fail over a
   nicety.
+  Two costs are priced in rather than overlooked: the request is made for a
+  `Search` answer *before* `plausibleMatch` sees it, so a hit the gate then
+  rejects has already paid for it; and it is made whether or not the
+  resolver needs a cover or a description, since a provider has no view of
+  the missing set. Both are one request against a background job.
+  `WithRateLimit` also gates the `Provider` *method*, not the HTTP call, so
+  one token now covers two requests — with the ISBN→`Search` fallback, the
+  worst case for one book is three requests on two tokens, times
+  `DefaultRetryAttempts` on a 429.
   Which size it then picks is **not the largest**, and that is the part
   that reads as a bug until the numbers are in front of you: `best()`
   prefers `medium`, then `large`, then `small`, then `thumbnail`, and
@@ -893,14 +909,22 @@ full design.
   Library's MARC three-letter language codes are mapped to ISO 639-1
   (`marcToISO639`) and Google's BCP-47 tags are cut back to their primary
   subtag (`baseLanguage` — the Volumes API answers `pt-BR` and `zh-CN`,
-  82 times in a 188-volume scan), so the two providers agree and the
-  column doesn't hold `eng` for one book and `en` for the next. A subtag
+  82 times in a 188-volume scan), so the column doesn't hold `eng` for one
+  book and `en` for the next. The two providers agree *as far as they
+  can*: `marcToISO639` lists only the languages this library plausibly
+  contains and passes anything else through unchanged, so an unmapped MARC
+  code is still answered as itself. A subtag
   cut rather than a second table, since Google's primary subtag is
   already ISO 639-1 in every observed value. This does **not** make the
   column consistent on its own, and the sentence here used to claim it
-  did: `internal/epub` passes `dc:language` straight through and that is
-  BCP-47 by specification, so a region subtag can still arrive from a
-  file. Closing that means one derivation shared by all four writers,
+  did: `internal/epub` and `internal/fb2` both pass their file's own value
+  straight through, and EPUB's `dc:language` is BCP-47 by specification,
+  so a subtagged value can still arrive from a file. `baseLanguage` also
+  drops script and variant, not only region — `zh-Hant` and `zh-Hans` both
+  become `zh` — which is a real loss where `pt-BR` against `pt-PT` is a
+  mild one, accepted because the column is one short code that three other
+  writers fill without any subtag at all. Closing that means one
+  derivation shared by all four writers,
   placed the way `SortTitle` is; nobody has yet seen a regional tag come
   out of a file here, so it is unwritten rather than planned. Google's
   `intitle:`/`inauthor:` values are quoted, which is load-bearing: the
@@ -1731,7 +1755,12 @@ full design.
   yet", but a misspelled provider name means "asked for something
   specific and didn't get it", the kind of silent shortfall nobody
   notices for months. `GOOGLE_BOOKS_API_KEY` is optional and only `Warn`s
-  when absent (Google's own anonymous quota still works); its value never
+  when absent, though "optional" overstates it: the anonymous quota is
+  shared across every keyless caller of the API and has been observed
+  exhausted on every attempt, so a keyless deployment should expect this
+  provider to answer 429 and be skipped. A Warn rather than a startup
+  failure all the same, since browsing and Open Library both work without
+  it. Its value never
   reaches a log line, in `cmd/server` or inside `internal/googlebooks`
   itself.
   `enrichEnabled` — whether any provider resolved — is what the *UI* gets,
@@ -1787,6 +1816,19 @@ Plans in `docs/plans/completed/` are immutable: never edit one after it's
 moved there, even to fix a mistake found later. If a problem is discovered
 in a completed plan, write a new plan for the fix instead of rewriting the
 old one.
+
+The one edit a plan may take on its way *into* `completed/` is a
+**correction found while implementing it**, in the same commit as the
+move — because a plan whose instruction the implementation had to
+contradict is misleading to anyone who later reads the two side by side.
+Such an edit must **append**, never rewrite: leave the wrong instruction
+standing, and add a block below it saying what was tried and what refuted
+it. Rewriting it silently produces a plan that appears to have been right
+all along, which git cannot distinguish from the honest version — the
+rename shows as one similarity score either way, so the discipline is the
+only thing separating them.
+`docs/plans/completed/2026090608-googlebooks-live-fidelity.md`'s cover-size
+block is the worked example.
 
 ## Backlog
 

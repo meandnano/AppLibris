@@ -1,0 +1,103 @@
+{
+  "kind": "books#volumes",
+  "totalItems": 300,
+  "items": [
+    {
+      "kind": "books#volume",
+      "id": "M1t9BgAAQBAJ",
+      "etag": "hFu3pamjACw",
+      "selfLink": "https://www.googleapis.com/books/v1/volumes/M1t9BgAAQBAJ",
+      "volumeInfo": {
+        "title": "The Collected Works of Samuel Taylor Coleridge, Volume 10",
+        "subtitle": "On the Constitution of the Church and State",
+        "authors": [
+          "Samuel Taylor Coleridge"
+        ],
+        "publisher": "Princeton University Press",
+        "publishedDate": "2015-03-08",
+        "description": "Based on a comparison of early editions, manuscripts, and copies annotated by the poet himself, this edition provides a reliable text of Coleridge's last prose work, first published in 1830. Originally intended to influence public opinion on the Catholic Emancipation Bill of 1829, the work became a brief but brilliant synthesis of Coleridge's political and theological thought, whose influence extended well beyond the nineteenth century. John Colmer's introduction and notes place the work in its literary and historical context and they illuminate Coleridge's process of composition and the development of his ideas on Church and State. John Comer's introduction and notes place the work in its literary and historical context and they illuminate Coleridge's process of composition and the development of his ideas on Church and State. Originally published in 1976. The Princeton Legacy Library uses the latest print-on-demand technology to again make available previously out-of-print books from the distinguished backlist of Princeton University Press. These editions preserve the original texts of these important books while presenting them in durable paperback and hardcover editions. The goal of the Princeton Legacy Library is to vastly increase access to the rich scholarly heritage found in the thousands of books published by Princeton University Press since its founding in 1905.",
+        "industryIdentifiers": [
+          {
+            "type": "ISBN_13",
+            "identifier": "9781400867851"
+          },
+          {
+            "type": "ISBN_10",
+            "identifier": "1400867851"
+          }
+        ],
+        "readingModes": {
+          "text": false,
+          "image": true
+        },
+        "pageCount": 380,
+        "printType": "BOOK",
+        "categories": [
+          "Literary Criticism"
+        ],
+        "maturityRating": "NOT_MATURE",
+        "allowAnonLogging": false,
+        "contentVersion": "2.4.3.0.preview.1",
+        "panelizationSummary": {
+          "containsEpubBubbles": false,
+          "containsImageBubbles": false
+        },
+        "imageLinks": {
+          "smallThumbnail": "http://books.google.com/books/content?id=M1t9BgAAQBAJ&printsec=frontcover&img=1&zoom=5&edge=curl&source=gbs_api",
+          "thumbnail": "http://books.google.com/books/content?id=M1t9BgAAQBAJ&printsec=frontcover&img=1&zoom=1&edge=curl&source=gbs_api"
+        },
+        "language": "en",
+        "previewLink": "http://books.google.se/books?id=M1t9BgAAQBAJ&pg=PA26&dq=intitle:%22pride+and+prejudice%22&hl=&as_brr=5&cd=1&source=gbs_api",
+        "infoLink": "https://play.google.com/store/books/details?id=M1t9BgAAQBAJ&source=gbs_api",
+        "canonicalVolumeLink": "https://play.google.com/store/books/details?id=M1t9BgAAQBAJ"
+      },
+      "saleInfo": {
+        "country": "SE",
+        "saleability": "FOR_SALE",
+        "isEbook": true,
+        "listPrice": {
+          "amount": 722.03,
+          "currencyCode": "SEK"
+        },
+        "retailPrice": {
+          "amount": 505.42,
+          "currencyCode": "SEK"
+        },
+        "buyLink": "https://play.google.com/store/books/details?id=M1t9BgAAQBAJ&rdid=book-M1t9BgAAQBAJ&rdot=1&source=gbs_api",
+        "offers": [
+          {
+            "finskyOfferType": 1,
+            "listPrice": {
+              "amountInMicros": 722030000,
+              "currencyCode": "SEK"
+            },
+            "retailPrice": {
+              "amountInMicros": 505420000,
+              "currencyCode": "SEK"
+            }
+          }
+        ]
+      },
+      "accessInfo": {
+        "country": "SE",
+        "viewability": "PARTIAL",
+        "embeddable": true,
+        "publicDomain": false,
+        "textToSpeechPermission": "ALLOWED",
+        "epub": {
+          "isAvailable": false
+        },
+        "pdf": {
+          "isAvailable": true,
+          "acsTokenLink": "http://books.google.se/books/download/The_Collected_Works_of_Samuel_Taylor_Col-sample-pdf.acsm?id=M1t9BgAAQBAJ&format=pdf&output=acs4_fulfillment_token&dl_type=sample&source=gbs_api"
+        },
+        "webReaderLink": "http://play.google.com/books/reader?id=M1t9BgAAQBAJ&hl=&as_brr=5&source=gbs_api",
+        "accessViewStatus": "SAMPLE",
+        "quoteSharingAllowed": false
+      },
+      "searchInfo": {
+        "textSnippet": "... \u003cb\u003epride and prejudice\u003c/b\u003e of less happy , less enlightened countries . Agri- culture , meanwhile , with its attendant ... \u003cb\u003eintitle\u003c/b\u003e the Major and Minor Barons ; both these , either by their interests or by the very effect of their&nbsp;..."
+      }
+    }
+  ]
+}

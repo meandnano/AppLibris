@@ -120,7 +120,7 @@ func TestByISBNMatchParsesFixture(t *testing.T) {
 		t.Errorf("PublishedDate = %q, want %q — the edition's year, not the work's 1937", got.PublishedDate, "2012")
 	}
 	// "/languages/eng" -> MARC "eng" -> ISO 639-1, the same form
-	// internal/epub and internal/fb2 produce.
+	// internal/googlebooks produces once baseLanguage has cut its tag.
 	if got.Language != "en" {
 		t.Errorf("Language = %q, want %q — not the work's 31-language list", got.Language, "en")
 	}
@@ -401,9 +401,11 @@ func TestByISBNNoCoverIDLeavesCoverURLEmpty(t *testing.T) {
 	}
 }
 
-// Open Library answers MARC three-letter codes; internal/epub, internal/fb2
-// and internal/googlebooks all produce ISO 639-1. Without the mapping the
-// language column holds "eng" for one book and "en" for the next.
+// Open Library answers MARC three-letter codes; internal/googlebooks
+// produces ISO 639-1 once baseLanguage has cut its BCP-47 tag. Without the
+// mapping the language column holds "eng" for one book and "en" for the
+// next. The file parsers normalise nothing and are not part of that
+// agreement — see marcToISO639's own comment.
 func TestLanguageIsMappedToISO639(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"eng", "en"},

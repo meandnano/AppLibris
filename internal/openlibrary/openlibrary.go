@@ -409,12 +409,20 @@ func firstNonEmpty(values ...string) string {
 }
 
 // marcToISO639 maps the MARC language codes search.json answers with
-// ("eng", "rus") onto the two-letter ISO 639-1 codes internal/epub,
-// internal/fb2 and internal/googlebooks all produce. Without it the
+// ("eng", "rus") onto the two-letter ISO 639-1 form. Without it the
 // language column holds "eng" for one book and "en" for the next, rendered
 // raw side by side on the detail page. Only the languages this library
 // plausibly contains are listed; anything else passes through unchanged,
 // which is still better than a wrong guess.
+//
+// This used to say the two-letter form is what "internal/epub,
+// internal/fb2 and internal/googlebooks all produce". Only the last is
+// true, and only since it gained baseLanguage: the Volumes API answers
+// BCP-47 (pt-BR, zh-CN) and the two file parsers normalise nothing at all,
+// while EPUB's dc:language is BCP-47 by specification. So this mapping
+// makes the two *providers* agree — as far as they can, since an unmapped
+// MARC code still passes through as itself — and the column can still
+// receive a subtagged value from a file.
 var marcToISO639 = map[string]string{
 	"ara": "ar", "ces": "cs", "chi": "zh", "dan": "da", "dut": "nl",
 	"eng": "en", "fin": "fi", "fre": "fr", "ger": "de", "gre": "el",

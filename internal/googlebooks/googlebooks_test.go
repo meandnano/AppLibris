@@ -1,12 +1,15 @@
 package googlebooks
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -66,7 +69,7 @@ func testClient(t *testing.T, apiKey string, handler http.HandlerFunc) (*Client,
 	return &Client{
 		baseURL:    server.URL,
 		apiKey:     apiKey,
-		httpClient: server.Client(),
+		httpClient: testHTTPClient(server),
 	}, &hits
 }
 
@@ -89,12 +92,23 @@ func detailClient(t *testing.T, list, detail http.HandlerFunc) (*Client, *int) {
 	return &Client{
 		baseURL:    server.URL,
 		apiKey:     "",
-		httpClient: server.Client(),
+		httpClient: testHTTPClient(server),
 	}, &detailHits
 }
 
+// testHTTPClient is httptest's client with this package's redirect policy
+// on it. httptest.Server.Client() does not carry one, so a helper handing
+// back the bare client silently tests against net/http's default hop limit
+// and no scheme check at all — which is how a CheckRedirect regression goes
+// unnoticed even with a redirect test in the file.
+func testHTTPClient(server *httptest.Server) *http.Client {
+	c := server.Client()
+	c.CheckRedirect = checkRedirect
+	return c
+}
+
 // isVolumeDetailPath reports whether p addresses one volume rather than the
-// list endpoint — "/volumes/LLSpngEACAAJ" rather than "/volumes".
+// list endpoint — "/volumes/{id}" rather than "/volumes".
 func isVolumeDetailPath(p string) bool {
 	return strings.HasPrefix(p, "/volumes/")
 }
@@ -112,6 +126,12 @@ func TestNewSetsTimeout(t *testing.T) {
 	c := New("")
 	if c.httpClient.Timeout != Timeout {
 		t.Errorf("httpClient.Timeout = %v, want Timeout (%v); http.DefaultClient has none at all", c.httpClient.Timeout, Timeout)
+	}
+}
+
+func TestNewSetsRedirectPolicy(t *testing.T) {
+	if New("").httpClient.CheckRedirect == nil {
+		t.Error("httpClient.CheckRedirect is nil; net/http would then follow any hop to any scheme")
 	}
 }
 
@@ -611,11 +631,15 @@ func TestNoImageLinksLeavesCoverURLEmpty(t *testing.T) {
 	}
 }
 
-// The capture's own cover URL, end to end: http as Google answers it,
-// upgraded, and the zoom=1 thumbnail — 128x192 when fetched, which
-// internal/cover stores as-is since it never upscales past its 400px
-// target.
-func TestByISBNCoverURLFromCaptureIsTheUpgradedThumbnail(t *testing.T) {
+// The list response in isolation: http as Google answers it, upgraded, and
+// the zoom=1 thumbnail, which is all that endpoint ever names.
+//
+// This is not what a lookup returns any more — enrichVolume replaces it
+// from the single-volume endpoint — and it passes here only because
+// testClient 404s that path. What it pins is the list half of the merge:
+// that toMetadata still reads a cover out of the list response at all, so
+// a book whose detail request fails has one to keep.
+func TestListResponseCoverURLIsTheUpgradedThumbnail(t *testing.T) {
 	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(readFixture(t, "volumes_match.json"))
 	})
@@ -685,20 +709,18 @@ func TestCoverURLPrefersTheSmallestLinkOverTheTargetAndUpgradesToHTTPS(t *testin
 // enrich.MaxCoverBytes (512 KiB), and past that a cover is refused
 // outright — the failure mode this ordering exists to avoid is a *better*
 // cover becoming no cover.
+//
+// A decode rather than a round trip: what is asserted is that the field is
+// absent from the struct, which no amount of HTTP would say more clearly.
 func TestExtraLargeIsIgnored(t *testing.T) {
-	body := `{"totalItems":1,"items":[{"id":"abc","volumeInfo":{"title":"T","imageLinks":{
-		"extraLarge":"https://books.example/xl","medium":"https://books.example/medium"}}}]}`
+	body := `{"imageLinks":{"extraLarge":"https://books.example/xl","medium":"https://books.example/medium"}}`
 
-	client, _ := detailClient(t,
-		func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) },
-		func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"id":"abc","volumeInfo":{}}`)) })
-
-	got, err := client.ByISBN(context.Background(), "9780547928227")
-	if err != nil {
-		t.Fatalf("ByISBN: %v", err)
+	var info volumeInfo
+	if err := json.Unmarshal([]byte(body), &info); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.CoverURL != "https://books.example/medium" {
-		t.Errorf("CoverURL = %q, want the medium link — extraLarge must not win", got.CoverURL)
+	if got := info.ImageLinks.best(); got != "https://books.example/medium" {
+		t.Errorf("best() = %q, want the medium link — extraLarge must not win", got)
 	}
 }
 
@@ -935,15 +957,19 @@ func TestSearchCanAnswerAMislabelledLanguage(t *testing.T) {
 	}
 }
 
-// listThenDetail serves volumes_match.json at the list endpoint and
-// volumes_detail.json at the single-volume one — the two captures of
-// different volumes, which is fine and deliberate: what these tests are
-// about is that the second response's larger cover and HTML description
-// replace the first's, not that the two describe one book.
+// pairVolumeID is the volume volumes_pair_list.json and volumes_detail.json
+// both describe — captures of one book from both endpoints, which is what
+// makes them a pair rather than two fixtures. enrichVolume refuses a detail
+// body naming a different id, so mismatched captures would exercise that
+// refusal instead of the merge these tests are about.
+const pairVolumeID = "M1t9BgAAQBAJ"
+
+// listThenDetail serves that pair: the list capture, then whatever the
+// caller wants at the single-volume endpoint.
 func listThenDetail(t *testing.T, detail http.HandlerFunc) (*Client, *int) {
 	t.Helper()
 	return detailClient(t,
-		func(w http.ResponseWriter, r *http.Request) { w.Write(readFixture(t, "volumes_match.json")) },
+		func(w http.ResponseWriter, r *http.Request) { w.Write(readFixture(t, "volumes_pair_list.json")) },
 		detail)
 }
 
@@ -952,7 +978,7 @@ func listThenDetail(t *testing.T, detail http.HandlerFunc) (*Client, *int) {
 // live only on /volumes/{id}.
 func TestMatchedVolumePrefersTheDetailEndpointsLargerCover(t *testing.T) {
 	client, detailHits := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/volumes/LLSpngEACAAJ" {
+		if r.URL.Path != "/volumes/"+pairVolumeID {
 			t.Errorf("detail path = %q, want the matched volume's id", r.URL.Path)
 		}
 		w.Write(readFixture(t, "volumes_detail.json"))
@@ -1007,19 +1033,37 @@ func TestMatchedVolumePrefersTheDetailEndpointsDescription(t *testing.T) {
 	if strings.ContainsAny(got.Description, "<>") {
 		t.Errorf("Description still carries markup: %q", got.Description)
 	}
-	if strings.Contains(got.Description, "Celebrating 75 years") {
-		t.Error("Description is still the list endpoint's")
+	if !strings.Contains(got.Description, "\n\n") {
+		t.Error("Description is still the list endpoint's flattened form")
+	}
+}
+
+// assertListAnswerIntact checks that m is exactly what volumes_pair_list.json
+// alone produces — every text field, the flattened description and the
+// thumbnail cover — so a failing detail request is provably a no-op rather
+// than merely not an error.
+func assertListAnswerIntact(t *testing.T, m enrich.Metadata) {
+	t.Helper()
+	if m.Title != "The Collected Works of Samuel Taylor Coleridge, Volume 10" {
+		t.Errorf("Title = %q, want the list answer intact", m.Title)
+	}
+	if !strings.HasPrefix(m.Description, "Based on a comparison of early editions,") {
+		t.Errorf("Description = %q, want the list answer's", m.Description)
+	}
+	if strings.Contains(m.Description, "\n") {
+		t.Errorf("Description gained a paragraph break, so the detail answer leaked in: %q", m.Description)
+	}
+	if m.CoverURL != "https://books.google.com/books/content?id=M1t9BgAAQBAJ&printsec=frontcover&img=1&zoom=1&edge=curl&source=gbs_api" {
+		t.Errorf("CoverURL = %q, want the list thumbnail %q", m.CoverURL, "https://books.google.com/books/content?id=M1t9BgAAQBAJ&printsec=frontcover&img=1&zoom=1&edge=curl&source=gbs_api")
 	}
 }
 
 // A bigger cover and a paragraph break are niceties. Six good text fields
 // are the answer, and no failure of the second request may cost them.
 func TestDetailRequestFailureKeepsTheListAnswer(t *testing.T) {
-	slow := func(w http.ResponseWriter, r *http.Request) { time.Sleep(50 * time.Millisecond) }
 	tests := []struct {
 		name   string
 		detail http.HandlerFunc
-		ctx    func(t *testing.T) context.Context
 	}{
 		{
 			name:   "server error",
@@ -1034,78 +1078,158 @@ func TestDetailRequestFailureKeepsTheListAnswer(t *testing.T) {
 			detail: func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{not valid json")) },
 		},
 		{
-			name:   "timeout",
-			detail: slow,
-			ctx: func(t *testing.T) context.Context {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-				t.Cleanup(cancel)
-				return ctx
-			},
+			name:   "empty body",
+			detail: func(w http.ResponseWriter, r *http.Request) {},
+		},
+		{
+			name:   "json null",
+			detail: func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("null")) },
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client, _ := listThenDetail(t, tt.detail)
-			ctx := context.Background()
-			if tt.ctx != nil {
-				ctx = tt.ctx(t)
-			}
 
-			got, err := client.ByISBN(ctx, "9780547928227")
+			got, err := client.ByISBN(context.Background(), "9780547928227")
 			if err != nil {
 				t.Fatalf("ByISBN: want nil error — a lost cover must not fail a lookup that has its text fields; got %v", err)
 			}
-			if got.Title != "The Hobbit, Or, There and Back Again" {
-				t.Errorf("Title = %q, want the list answer intact", got.Title)
-			}
-			if got.Publisher != "Mariner Books" || got.ISBN != "9780547928227" || got.Language != "en" {
-				t.Errorf("the list answer's fields did not survive: %+v", got)
-			}
-			want := "https://books.google.com/books/content?id=LLSpngEACAAJ&printsec=frontcover&img=1&zoom=1&source=gbs_api"
-			if got.CoverURL != want {
-				t.Errorf("CoverURL = %q, want the list thumbnail %q", got.CoverURL, want)
-			}
-			if !strings.Contains(got.Description, "Celebrating 75 years") {
-				t.Errorf("Description = %q, want the list answer's", got.Description)
-			}
+			assertListAnswerIntact(t, got)
 		})
 	}
 }
 
-// The two conditions that make the second request pointless before it is
-// made: nothing to address, or nothing to improve on.
-func TestDetailRequestIsSkippedWhenItCouldNotHelp(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{
-			name: "no volume id to address",
-			body: `{"totalItems":1,"items":[{"volumeInfo":{"title":"No id here","imageLinks":{"thumbnail":"http://books.example/t.jpg"}}}]}`,
-		},
-		{
-			// A volume with no cover at all has no larger one either.
-			name: "no cover to improve on",
-			body: `{"totalItems":1,"items":[{"id":"abc123","volumeInfo":{"title":"No cover here"}}]}`,
-		},
+// Cancellation is its own case because it must be provoked deterministically.
+// A wall-clock deadline set before the call covers the *list* request too, so
+// on a loaded machine that request is what times out and the test fails on a
+// cause it is not about — measured at roughly 9% under -race. Cancelling from
+// inside the detail handler cannot race: by then the list request has already
+// returned.
+func TestDetailRequestCancellationKeepsTheListAnswer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client, detailHits := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		<-r.Context().Done()
+	})
+
+	got, err := client.ByISBN(ctx, "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: want nil error on a cancelled detail request; got %v", err)
 	}
+	if *detailHits != 1 {
+		t.Fatalf("detail requests = %d, want 1 — the cancellation must happen inside the second request", *detailHits)
+	}
+	assertListAnswerIntact(t, got)
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client, detailHits := detailClient(t,
-				func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(tt.body)) },
-				func(w http.ResponseWriter, r *http.Request) {
-					t.Error("the detail endpoint was called")
-					w.Write(readFixture(t, "volumes_detail.json"))
-				})
+// The one condition that makes the second request pointless before it is
+// made: no id to address it to.
+func TestDetailRequestIsSkippedWithoutAVolumeID(t *testing.T) {
+	body := `{"totalItems":1,"items":[{"volumeInfo":{"title":"No id here","imageLinks":{"thumbnail":"http://books.example/t.jpg"}}}]}`
 
-			if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
+	client, detailHits := detailClient(t,
+		func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) },
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Error("the detail endpoint was called")
+		})
+
+	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if *detailHits != 0 {
+		t.Errorf("detail requests = %d, want 0", *detailHits)
+	}
+}
+
+// A volume with no cover art is still worth the request, for its
+// description. Skipping one would be free on the cover half and would
+// silently drop the other, which is the payoff for a book whose blurb is
+// the thing worth having.
+func TestVolumeWithNoCoverStillGetsItsDescription(t *testing.T) {
+	client, detailHits := detailClient(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"totalItems":1,"items":[{"id":"abc123","volumeInfo":{"title":"Coverless"}}]}`))
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"id":"abc123","volumeInfo":{"description":"<p>First.</p><p>Second.</p>"}}`))
+		})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if *detailHits != 1 {
+		t.Fatalf("detail requests = %d, want 1", *detailHits)
+	}
+	if got.Description != "First.\n\nSecond." {
+		t.Errorf("Description = %q, want the detail endpoint's rendered markup", got.Description)
+	}
+	if got.CoverURL != "" {
+		t.Errorf("CoverURL = %q, want empty", got.CoverURL)
+	}
+}
+
+// A detail body naming a different volume is refused rather than merged.
+// plausibleMatch gates the Title and Authors of the *list* response, so a
+// substituted body's description and cover would reach books unchecked.
+func TestDetailBodyNamingAnotherVolumeIsRefused(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"someOtherVolume","volumeInfo":{
+			"description":"<p>A different book entirely.</p>",
+			"imageLinks":{"large":"https://books.example/wrong.jpg"}}}`))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	assertListAnswerIntact(t, got)
+}
+
+// The description guard has its own test above; this is the cover's. A
+// detail response with no imageLinks must not blank a cover the list
+// response supplied.
+func TestDetailResponseWithoutImageLinksKeepsTheListCover(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"id":%q,"volumeInfo":{"description":"<p>Only a blurb.</p>"}}`, pairVolumeID)
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	var list volumesResponse
+	if err := json.Unmarshal(readFixture(t, "volumes_pair_list.json"), &list); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	want := strings.Replace(list.Items[0].VolumeInfo.ImageLinks.Thumbnail, "http://", "https://", 1)
+	if got.CoverURL != want {
+		t.Errorf("CoverURL = %q, want the list thumbnail %q", got.CoverURL, want)
+	}
+	if got.Description != "Only a blurb." {
+		t.Errorf("Description = %q, want the detail endpoint's", got.Description)
+	}
+}
+
+// A whitespace-only detail description must not overwrite a real one. It
+// reaches books as "" — enrich.sanitizeValue trims it and Resolve skips an
+// empty value — so the field is simply lost, and with the default provider
+// order Google is last, so nothing recovers it.
+func TestWhitespaceOnlyDetailDescriptionKeepsTheListOne(t *testing.T) {
+	for _, blank := range []string{`"   "`, `"\n"`, `"\n\n  "`, `"<br>"`, `""`} {
+		t.Run(blank, func(t *testing.T) {
+			client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"id":%q,"volumeInfo":{"description":%s}}`, pairVolumeID, blank)
+			})
+
+			got, err := client.ByISBN(context.Background(), "9780547928227")
+			if err != nil {
 				t.Fatalf("ByISBN: %v", err)
 			}
-			if *detailHits != 0 {
-				t.Errorf("detail requests = %d, want 0", *detailHits)
-			}
+			assertListAnswerIntact(t, got)
 		})
 	}
 }
@@ -1129,14 +1253,14 @@ func TestNoMatchMakesNoDetailRequest(t *testing.T) {
 // description with nothing would be a regression bought with a request.
 func TestEmptyDetailDescriptionKeepsTheListOne(t *testing.T) {
 	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"id":"LLSpngEACAAJ","volumeInfo":{"imageLinks":{"large":"https://books.example/large.jpg"}}}`))
+		fmt.Fprintf(w, `{"id":%q,"volumeInfo":{"imageLinks":{"large":"https://books.example/large.jpg"}}}`, pairVolumeID)
 	})
 
 	got, err := client.ByISBN(context.Background(), "9780547928227")
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	if !strings.Contains(got.Description, "Celebrating 75 years") {
+	if !strings.HasPrefix(got.Description, "Based on a comparison of early editions,") {
 		t.Errorf("Description = %q, want the list answer's", got.Description)
 	}
 	if got.CoverURL != "https://books.example/large.jpg" {
@@ -1147,6 +1271,7 @@ func TestEmptyDetailDescriptionKeepsTheListOne(t *testing.T) {
 // The key travels on the detail request too — it is the same API and the
 // same quota, and an unkeyed one would answer 429 for everyone.
 func TestDetailRequestCarriesTheKey(t *testing.T) {
+	detailHits := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("key"); got != "test-api-key" {
 			t.Errorf("%s: key = %q, want %q", r.URL.Path, got, "test-api-key")
@@ -1155,15 +1280,225 @@ func TestDetailRequestCarriesTheKey(t *testing.T) {
 			t.Errorf("%s: User-Agent = %q, want %q", r.URL.Path, got, userAgent)
 		}
 		if isVolumeDetailPath(r.URL.Path) {
+			detailHits++
 			w.Write(readFixture(t, "volumes_detail.json"))
 			return
 		}
-		w.Write(readFixture(t, "volumes_match.json"))
+		w.Write(readFixture(t, "volumes_pair_list.json"))
 	}))
 	t.Cleanup(server.Close)
 
 	client := &Client{baseURL: server.URL, apiKey: "test-api-key", httpClient: server.Client()}
 	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
 		t.Fatalf("ByISBN: %v", err)
+	}
+	// Without this the assertions above are vacuous: they live inside the
+	// handler, so a client that never made the second request passes.
+	if detailHits != 1 {
+		t.Errorf("detail requests = %d, want 1", detailHits)
+	}
+}
+
+// The detail path is the one where a leaked key is certain rather than
+// possible. Its error never reaches a caller — enrichVolume swallows it —
+// so slog.Debug is the only place it goes, and CLAUDE.md's invariant is
+// that the key must never reach a log line. The list path's two redaction
+// tests do not cover this one: all three redaction calls could be deleted
+// from volumeByID and the suite stayed green.
+func TestAPIKeyNeverAppearsInTheDetailPathsLogLine(t *testing.T) {
+	const key = "super-secret-key"
+
+	var logged bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isVolumeDetailPath(r.URL.Path) {
+			w.WriteHeader(http.StatusInternalServerError)
+			// Google's own error bodies do not echo the key, but a
+			// misbehaving upstream or a proxy may, and the body reaches
+			// the error text verbatim.
+			fmt.Fprintf(w, "upstream rejected key=%s", key)
+			return
+		}
+		w.Write(readFixture(t, "volumes_pair_list.json"))
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{baseURL: server.URL, apiKey: key, httpClient: server.Client()}
+	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+
+	out := logged.String()
+	if !strings.Contains(out, "volume detail lookup failed") {
+		t.Fatalf("the failure was not logged at all, so this test proves nothing: %q", out)
+	}
+	if strings.Contains(out, key) {
+		t.Errorf("the log line leaks the API key: %q", out)
+	}
+}
+
+// The same, for a transport failure — the shape that embeds the whole
+// request URL, key and all, rather than a body this package chose to read.
+func TestAPIKeyNeverAppearsInTheDetailPathsTransportErrorLog(t *testing.T) {
+	const key = "super-secret-key"
+
+	var logged bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isVolumeDetailPath(r.URL.Path) {
+			cancel()
+			<-r.Context().Done()
+			return
+		}
+		w.Write(readFixture(t, "volumes_pair_list.json"))
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{baseURL: server.URL, apiKey: key, httpClient: server.Client()}
+	if _, err := client.ByISBN(ctx, "9780547928227"); err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+
+	out := logged.String()
+	if !strings.Contains(out, "volume detail lookup failed") {
+		t.Fatalf("the failure was not logged at all, so this test proves nothing: %q", out)
+	}
+	if strings.Contains(out, key) {
+		t.Errorf("the log line leaks the API key: %q", out)
+	}
+}
+
+// Setting CheckRedirect at all replaces net/http's own hop limit, so the
+// policy has to supply both halves itself. Both are checked here because
+// each is invisible when the other works.
+func TestCheckRedirect(t *testing.T) {
+	hop := func(rawurl string) *http.Request {
+		req, err := http.NewRequest(http.MethodGet, rawurl, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		return req
+	}
+
+	if err := checkRedirect(hop("https://books.example/next"), nil); err != nil {
+		t.Errorf("first https hop: %v", err)
+	}
+	if err := checkRedirect(hop("http://books.example/next"), nil); err != nil {
+		t.Errorf("first http hop: %v", err)
+	}
+	if err := checkRedirect(hop("file:///etc/passwd"), nil); err == nil {
+		t.Error("a file:// hop was allowed")
+	}
+	via := make([]*http.Request, maxRedirects)
+	if err := checkRedirect(hop("https://books.example/next"), via); err == nil {
+		t.Errorf("hop %d was allowed; without a bound the chain runs forever", maxRedirects+1)
+	}
+}
+
+// A redirect off Google is followed by default, and on the detail path the
+// whole answer — the cover URL and the description — would come from
+// whichever host replied, with plausibleMatch none the wiser since it gates
+// the *list* response. The policy is what stops the chain; the id check
+// stops a body that arrives anyway.
+func TestDetailRequestDoesNotFollowARedirectToAnotherScheme(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "file:///etc/passwd", http.StatusFound)
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	assertListAnswerIntact(t, got)
+}
+
+// A redirect loop is bounded rather than followed until the client's own
+// timeout, which is eight seconds this lookup does not have to spend.
+//
+// The handler stops redirecting at a hard ceiling of its own rather than
+// looping forever: without one, a policy that has lost its hop limit makes
+// this test hang instead of fail, and a hang is a far worse signal than a
+// red line.
+func TestDetailRequestBoundsARedirectLoop(t *testing.T) {
+	const ceiling = maxRedirects * 4
+
+	hops := 0
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		hops++
+		if hops > ceiling {
+			w.Write([]byte(`{"id":"someOtherVolume","volumeInfo":{}}`))
+			return
+		}
+		http.Redirect(w, r, r.URL.Path, http.StatusFound)
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	// maxRedirects hops after the first request, so maxRedirects+1 in all.
+	if hops > maxRedirects+1 {
+		t.Errorf("followed %d hops, want at most %d", hops, maxRedirects+1)
+	}
+	assertListAnswerIntact(t, got)
+}
+
+// The volume id comes out of a remote response and goes straight into a
+// URL path, so it is escaped rather than concatenated. Unescaped, an id of
+// "../../../etc/passwd?key=leak&x=" turns its "?" into a real query
+// separator — appending parameters of the id's choosing after the
+// configured key — and its slashes into real path separators.
+//
+// The assertion is on the *wire* form (EscapedPath), not r.URL.Path, which
+// net/url hands back decoded: the escaping is what stops a server routing
+// the request somewhere else, and a decoded Path showing ".." is expected
+// even when it worked.
+func TestDetailRequestEscapesTheVolumeID(t *testing.T) {
+	const hostile = `../../../etc/passwd?key=leak&x=`
+
+	var gotEscapedPath, gotRawQuery string
+	reached := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/volumes" && r.URL.Query().Get("q") != "" {
+			fmt.Fprintf(w, `{"totalItems":1,"items":[{"id":%q,"volumeInfo":{"title":"T"}}]}`, hostile)
+			return
+		}
+		reached = true
+		gotEscapedPath, gotRawQuery = r.URL.EscapedPath(), r.URL.RawQuery
+		w.Write([]byte(`{"volumeInfo":{}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{baseURL: server.URL, apiKey: "configured-key", httpClient: testHTTPClient(server)}
+	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+
+	if !reached {
+		t.Fatal("the detail endpoint was never reached, so nothing was escaped")
+	}
+	// One path segment under /volumes/, whatever the id contained.
+	if strings.Count(strings.TrimPrefix(gotEscapedPath, "/volumes/"), "/") != 0 {
+		t.Errorf("escaped path %q has more than one segment under /volumes/", gotEscapedPath)
+	}
+	// The "?" in the id must not have started a query.
+	q, err := url.ParseQuery(gotRawQuery)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", gotRawQuery, err)
+	}
+	if got := q["key"]; len(got) != 1 || got[0] != "configured-key" {
+		t.Errorf("key = %v, want exactly the configured one — the id smuggled a parameter", got)
+	}
+	if len(q) != 1 {
+		t.Errorf("query = %v, want only the key — the id added parameters of its own", q)
 	}
 }
