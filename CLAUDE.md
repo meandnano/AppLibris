@@ -951,7 +951,10 @@ full design.
   with, and stripping tags from every provider's answer would mangle one
   that legitimately contains a `<`. Google Books'
   optional `apiKey` is scrubbed from every returned error's text
-  (`redactKey`/`redactKeyBytes`) since a transport error embeds the full
+  (`redactKey`/`redactKeyBytes`, in both its raw and its percent-encoded
+  form — a transport error embeds the request URL, where `url.Values.Encode`
+  has escaped it, and today's `AIza…` keys being URL-safe is a property of
+  the key format rather than of the redaction) since a transport error embeds the full
   request URL and the key must never reach a log line through one; the
   redacting error keeps an `Unwrap`, so whether `errors.Is(err,
   context.Canceled)` works doesn't depend on whether a key happens to be
@@ -971,8 +974,20 @@ full design.
   redirect off Google would otherwise make this client adopt the answering
   host's whole response, which on the list request `plausibleMatch` gates
   only by title and author — both supplied by that host — and on the
-  detail request nothing gates at all. A refused redirect is still
-  classified retryable in both clients, which
+  detail request nothing gates at all.
+  "Same host" is compared as a host and not as a string (`sameHost`):
+  case-insensitively, with the scheme's default port and an explicitly
+  written one treated alike, and a fully qualified trailing dot ignored.
+  A byte compare of `URL.Host` refuses all three, which is safe in the
+  sense that nothing wrong is admitted and unsafe in the one that matters —
+  the refusal surfaces as a *retryable* error, so a `Location` that merely
+  spells the same host differently would burn every retry attempt and
+  leave enrichment quietly answering nothing. A same-host downgrade off
+  TLS is refused separately, which reads as redundant and is not: the
+  default-port normalisation already refuses an ordinary https→http hop as
+  a port change, but a `Location` writing the port out on both sides
+  compares equal there. A refused redirect is still classified retryable
+  on both clients' lookup paths, which
   `docs/backlog/2026090611-refused-redirect-is-retried.md` records.
   `internal/openlibrary`'s two `edition_*.json` are **live captures** of
   the Read API — they are what turned up the work-versus-edition defects

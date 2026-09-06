@@ -12,8 +12,10 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"library/internal/enrich"
 )
@@ -682,7 +684,7 @@ func TestCoverURLPrefersMediumAndUpgradesToHTTPS(t *testing.T) {
 			want:  "https://books.example/large",
 		},
 		{
-			name:  "small beats thumbnail below the target",
+			name:  "small beats thumbnail when neither medium nor large is offered",
 			links: imageLinks{Small: "https://books.example/small", Thumbnail: "https://books.example/thumb"},
 			want:  "https://books.example/small",
 		},
@@ -1224,10 +1226,15 @@ func TestDetailResponseWithoutImageLinksKeepsTheListCover(t *testing.T) {
 func TestWhitespaceOnlyDetailDescriptionKeepsTheListOne(t *testing.T) {
 	blanks := []string{
 		`"   "`, `"\n"`, `"\n\n  "`, `"<br>"`, `""`,
-		`"\u00a0"`,     // a non-breaking space, which TrimSpace does handle
-		`"&#8203;"`,    // a zero-width space, which it does not
-		`"\ufeff"`,     // a byte-order mark arriving as content
-		`"&#8203; \n"`, // and mixed with ordinary whitespace
+		`"\u00a0"`,       // a non-breaking space
+		`"\u3000"`,       // the CJK ideographic space, which a cutset-based trim drops
+		`"&#12288;"`,     // the same, escaped, which is how a description carries it
+		`"\u2028"`,       // a line separator
+		`"\u205f"`,       // a medium mathematical space
+		`"&#8203;"`,      // a zero-width space, which unicode.IsSpace does not accept
+		`"\ufeff"`,       // a byte-order mark arriving as content
+		`"&#8203; \n"`,   // mixed with ordinary whitespace
+		`"\u3000\u200b"`, // and both kinds together
 	}
 	for _, blank := range blanks {
 		t.Run(blank, func(t *testing.T) {
@@ -1398,27 +1405,74 @@ func TestCheckRedirect(t *testing.T) {
 		}
 		return req
 	}
+	from := func(rawurl string) []*http.Request { return []*http.Request{hop(rawurl)} }
 
-	if err := checkRedirect(hop("https://books.example/next"), nil); err != nil {
-		t.Errorf("first https hop: %v", err)
+	const origin = "https://www.googleapis.com/books/v1/volumes?key=secret"
+
+	allowed := []struct{ name, to string }{
+		{"same host, same scheme", "https://www.googleapis.com/books/v1/volumes/abc"},
+		{"an explicit default port is the same host", "https://www.googleapis.com:443/books/v1/volumes/abc"},
+		{"case is not part of a host's identity", "https://WWW.GOOGLEAPIS.COM/books/v1/volumes/abc"},
+		{"a fully qualified trailing dot is the same host", "https://www.googleapis.com./books/v1/volumes/abc"},
 	}
-	if err := checkRedirect(hop("http://books.example/next"), nil); err != nil {
-		t.Errorf("first http hop: %v", err)
+	for _, c := range allowed {
+		t.Run(c.name, func(t *testing.T) {
+			// These are refused by a byte compare of URL.Host, and the
+			// refusal surfaces as a retryable error — so getting them
+			// wrong burns every retry attempt and leaves enrichment
+			// quietly answering nothing.
+			if err := checkRedirect(hop(c.to), from(origin)); err != nil {
+				t.Errorf("refused: %v", err)
+			}
+		})
 	}
-	if err := checkRedirect(hop("file:///etc/passwd"), nil); err == nil {
-		t.Error("a file:// hop was allowed")
+
+	refused := []struct{ name, to, why string }{
+		{"another host", "https://elsewhere.example/volumes", "net/http would send it the key in Referer"},
+		{"another host on the same suffix", "https://evil.googleapis.com.attacker.example/volumes", "a suffix is not a host"},
+		{"a non-default port", "https://www.googleapis.com:8443/books/v1/volumes/abc", "a different port is a different service"},
+		{"a downgrade off TLS", "http://www.googleapis.com/books/v1/volumes/abc", "a credential-guarding policy should not hand the request to cleartext"},
+		{"a foreign scheme", "file:///etc/passwd", "not http or https"},
 	}
-	started := []*http.Request{hop("https://www.googleapis.com/books/v1/volumes?key=secret")}
-	if err := checkRedirect(hop("https://elsewhere.example/volumes"), started); err == nil {
-		t.Error("a cross-host hop was allowed; net/http would send it the key in Referer")
+	for _, c := range refused {
+		t.Run(c.name, func(t *testing.T) {
+			if err := checkRedirect(hop(c.to), from(origin)); err == nil {
+				t.Errorf("allowed, but %s", c.why)
+			}
+		})
 	}
-	if err := checkRedirect(hop("https://www.googleapis.com/books/v1/volumes/abc"), started); err != nil {
-		t.Errorf("a same-host hop was refused: %v", err)
-	}
-	via := make([]*http.Request, maxRedirects)
-	if err := checkRedirect(hop("https://books.example/next"), via); err == nil {
-		t.Errorf("hop %d was allowed; without a bound the chain runs forever", maxRedirects+1)
-	}
+
+	t.Run("a downgrade keeping an explicit port", func(t *testing.T) {
+		// The default-port normalisation refuses an ordinary https->http
+		// hop as a port change (443 against 80), so the scheme clause
+		// looks redundant. It is not: with the port written out on both
+		// sides, the hosts compare equal and only the scheme differs.
+		if err := checkRedirect(hop("http://www.googleapis.com:8443/x"), from("https://www.googleapis.com:8443/volumes?key=secret")); err == nil {
+			t.Error("allowed a cleartext hop on the same explicit port")
+		}
+	})
+	t.Run("an http origin may stay on http", func(t *testing.T) {
+		if err := checkRedirect(hop("http://books.example/next"), from("http://books.example/first")); err != nil {
+			t.Errorf("refused: %v", err)
+		}
+	})
+	t.Run("no originating request", func(t *testing.T) {
+		// Unreachable through net/http, which always supplies via. The
+		// clause exists so the one guard protecting a credential does not
+		// fail open for a future caller.
+		if err := checkRedirect(hop("https://www.googleapis.com/x"), nil); err == nil {
+			t.Error("allowed with an empty via")
+		}
+	})
+	t.Run("the hop bound", func(t *testing.T) {
+		via := make([]*http.Request, maxRedirects)
+		for i := range via {
+			via[i] = hop(origin)
+		}
+		if err := checkRedirect(hop("https://www.googleapis.com/books/v1/volumes/abc"), via); err == nil {
+			t.Errorf("hop %d was allowed; without a bound the chain runs forever", maxRedirects+1)
+		}
+	})
 }
 
 // A redirect off Google is followed by default, and on the detail path the
@@ -1530,9 +1584,12 @@ func TestDetailRequestEscapesTheVolumeID(t *testing.T) {
 func TestARedirectOffTheAPIHostNeverCarriesTheKey(t *testing.T) {
 	const key = "SUPERSECRETKEY"
 
+	var mu sync.Mutex
 	var foreignSaw []string
 	foreign := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		foreignSaw = append(foreignSaw, r.Header.Get("Referer")+"|"+r.URL.RawQuery)
+		mu.Unlock()
 		w.Write([]byte(`{"totalItems":1,"items":[{"id":"x","volumeInfo":{"title":"Foreign","description":"A different book entirely."}}]}`))
 	}))
 	t.Cleanup(foreign.Close)
@@ -1547,14 +1604,21 @@ func TestARedirectOffTheAPIHostNeverCarriesTheKey(t *testing.T) {
 	client := &Client{baseURL: home.URL, apiKey: key, httpClient: httpClient}
 
 	got, err := client.ByISBN(context.Background(), "9780547928227")
+
+	// What the foreign host saw is reported first and with Errorf, so a
+	// regression prints the evidence rather than stopping at the verdict:
+	// a Fatal here would make the one observation this test exists to make
+	// unreachable on both paths.
+	mu.Lock()
+	saw := append([]string(nil), foreignSaw...)
+	mu.Unlock()
+	for _, s := range saw {
+		t.Errorf("the foreign host was reached, and saw Referer|query %q", s)
+	}
 	if err == nil {
-		t.Fatal("ByISBN: want an error when the lookup is redirected off its host")
-	}
-	if strings.Contains(err.Error(), key) {
+		t.Error("ByISBN: want an error when the lookup is redirected off its host")
+	} else if strings.Contains(err.Error(), key) {
 		t.Errorf("the error text leaks the API key: %v", err)
-	}
-	for _, saw := range foreignSaw {
-		t.Errorf("the foreign host was reached at all, and saw %q", saw)
 	}
 	// And nothing the foreign host said was adopted.
 	if got.Title != "" || got.Description != "" {
@@ -1608,5 +1672,83 @@ func TestListResponseIsBounded(t *testing.T) {
 
 	if _, err := client.ByISBN(context.Background(), "9780547928227"); err == nil {
 		t.Fatal("ByISBN: want an error for a response past maxResponseBytes")
+	}
+}
+
+// trimBlank must be a superset of strings.TrimSpace, never a subset. It was
+// briefly a subset — written as strings.Trim over a hand-listed cutset,
+// which silently dropped the seventeen runes unicode.IsSpace accepts and
+// the cutset did not, U+3000 (the CJK ideographic space) among them. This
+// enumerates the whole space rather than sampling it, because sampling is
+// what missed those runes the first time.
+func TestTrimBlankIsASupersetOfTrimSpace(t *testing.T) {
+	var missed []rune
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) && trimBlank(string(r)) != "" {
+			missed = append(missed, r)
+		}
+	}
+	if len(missed) > 0 {
+		t.Errorf("trimBlank leaves %d runes unicode.IsSpace accepts: %U", len(missed), missed)
+	}
+	for _, r := range zeroWidth {
+		if trimBlank(string(r)) != "" {
+			t.Errorf("trimBlank leaves the zero-width rune %U", r)
+		}
+	}
+	// And it must not eat anything that carries ink, at either edge.
+	for _, s := range []string{"a", "本", "—", "·", "9"} {
+		if got := trimBlank(s + " x " + s); got != s+" x "+s {
+			t.Errorf("trimBlank(%q) = %q", s+" x "+s, got)
+		}
+	}
+}
+
+// The key reaches an error's text through the request URL, where
+// url.Values.Encode has percent-escaped it — so a literal substring match
+// alone misses any key containing a character that needs escaping. Today's
+// Google keys are "AIza" plus URL-safe characters, which is a property of
+// the key format rather than of redactKey, and not one to rest a
+// credential on.
+func TestAPIKeyIsRedactedInItsEncodedForm(t *testing.T) {
+	const key = "weird/key+with spaces"
+
+	client, _ := testClient(t, key, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("upstream said no"))
+	})
+
+	_, err := client.ByISBN(context.Background(), "9780547928227")
+	if err == nil {
+		t.Fatal("ByISBN: want an error on 503")
+	}
+	for _, form := range []string{key, url.QueryEscape(key), url.PathEscape(key)} {
+		if strings.Contains(err.Error(), form) {
+			t.Errorf("error text leaks the key as %q: %v", form, err)
+		}
+	}
+}
+
+// The same on the transport path, which is where the full request URL —
+// and therefore the encoded key — actually ends up.
+func TestEncodedAPIKeyIsRedactedInATransportError(t *testing.T) {
+	const key = "weird/key+with spaces"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client, _ := testClient(t, key, func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		<-r.Context().Done()
+	})
+
+	_, err := client.ByISBN(ctx, "9780547928227")
+	if err == nil {
+		t.Fatal("ByISBN: want an error on a cancelled request")
+	}
+	for _, form := range []string{key, url.QueryEscape(key)} {
+		if strings.Contains(err.Error(), form) {
+			t.Errorf("error text leaks the key as %q: %v", form, err)
+		}
 	}
 }

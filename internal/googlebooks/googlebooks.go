@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"library/internal/enrich"
 )
@@ -75,7 +76,8 @@ const maxRedirects = 5
 //
 // It closes two more holes at the same time. A redirect off Google makes
 // this client adopt the answering host's entire response — and on the list
-// request enrich.plausibleMatch would gate only its title and authors,
+// request internal/enrich's plausibleMatch would gate only its title and
+// authors,
 // which that host supplies. On the detail request nothing gates it at all.
 //
 // Refusing outright costs nothing measurable: neither the Volumes API nor
@@ -89,15 +91,70 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
 		return fmt.Errorf("redirect scheme %q is not http or https", req.URL.Scheme)
 	}
+	// The credential clause refuses an empty via rather than passing it.
+	// net/http always supplies the requests already made, so this cannot
+	// happen — but it is the one clause guarding a credential, and a
+	// clause that fails open is one a future reuse can walk through.
+	if len(via) == 0 {
+		return fmt.Errorf("redirect with no originating request to compare against")
+	}
 	// Compared against via[0], the request this lookup made, rather than
 	// the previous hop. The two are equivalent — every hop is checked, so
 	// the host can never change and the previous hop's host is always the
 	// first's — but via[0] states the invariant the policy actually has:
 	// a lookup never leaves the host it started against.
-	if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+	if !sameHost(req.URL, via[0].URL) {
 		return fmt.Errorf("redirect to %q leaves the host the lookup started against", req.URL.Host)
 	}
+	// A same-host downgrade off TLS is refused too. The key does not leak
+	// on that hop — Go suppresses Referer https→http — but a policy added
+	// to protect a credential should not then hand the request itself to
+	// cleartext when refusing costs one clause.
+	//
+	// It reads as redundant and is not: the default-port normalisation
+	// above already refuses an ordinary https→http hop as a port change,
+	// 443 against 80, but a Location that writes the port out on both
+	// sides compares equal there and reaches this.
+	if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("redirect downgrades from https to %q", req.URL.Scheme)
+	}
 	return nil
+}
+
+// sameHost compares two URLs' authorities the way a host is actually the
+// same rather than the way two strings are: case-insensitively, with the
+// scheme's default port and an explicit one treated alike, and a fully
+// qualified trailing dot ignored.
+//
+// A byte compare of URL.Host would refuse every one of those, which is
+// safe in the sense that nothing is admitted wrongly and unsafe in the
+// sense that matters here: the refusal surfaces as a retryable error, so a
+// Location that merely spells the same host differently would burn every
+// retry attempt and leave enrichment quietly answering nothing.
+func sameHost(a, b *url.URL) bool {
+	return strings.EqualFold(canonicalHostname(a), canonicalHostname(b)) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+// canonicalHostname drops the trailing dot of a fully qualified name, which
+// names the same host as the form without it.
+func canonicalHostname(u *url.URL) string {
+	return strings.TrimSuffix(u.Hostname(), ".")
+}
+
+// effectivePort fills in the scheme's default, so an omitted port and an
+// explicitly written default one compare equal.
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch u.Scheme {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	}
+	return ""
 }
 
 // Client looks books up against the Google Books Volumes API.
@@ -376,15 +433,18 @@ func (c *Client) enrichVolume(ctx context.Context, id string, m *enrich.Metadata
 		return
 	}
 	// A body describing some other volume is not an answer about this
-	// book, and nothing downstream would catch it: plausibleMatch gates
-	// the Title and Authors of the *list* response, while the two fields
-	// taken here come from this one.
+	// book, and nothing downstream would catch it: internal/enrich's
+	// plausibleMatch gates the Title and Authors of the *list* response,
+	// while the two fields taken here come from this one.
 	//
 	// An absent id is refused along with a wrong one. Treating "" as a
 	// pass would let the party being checked opt out of the check by
-	// omitting the field, and the real endpoint always answers with one —
-	// every capture under testdata carries it — so requiring it costs a
-	// response shape Google does not send.
+	// omitting the field. The evidence that the real endpoint always
+	// answers with one is thinner than it sounds — testdata holds a single
+	// capture of this endpoint, volumes_detail.json, and it carries an id,
+	// as does every list capture's item — but a response shape that has
+	// never been observed is the right thing to refuse when admitting it
+	// costs the check.
 	if detail.ID != id {
 		slog.Debug("googlebooks: volume detail names a different volume", "requested", id, "answered", detail.ID)
 		return
@@ -452,7 +512,23 @@ func (c *Client) redactKey(err error) error {
 	if c.apiKey == "" || err == nil {
 		return err
 	}
-	return redactedError{err: err, text: strings.ReplaceAll(err.Error(), c.apiKey, "REDACTED")}
+	return redactedError{err: err, text: c.redactString(err.Error())}
+}
+
+// redactString removes the key in both the forms it can appear in. A
+// transport error embeds the request URL, where url.Values.Encode has
+// percent-escaped the key — so a literal substring match alone misses it
+// for any key containing a character that needs escaping. Today's Google
+// keys are "AIza" plus URL-safe characters, so the escaped form is
+// identical to the raw one and the literal match happens to work; that is
+// a property of the key format, not of this function, and it is not one to
+// rest a credential on.
+func (c *Client) redactString(s string) string {
+	s = strings.ReplaceAll(s, c.apiKey, "REDACTED")
+	if escaped := url.QueryEscape(c.apiKey); escaped != c.apiKey {
+		s = strings.ReplaceAll(s, escaped, "REDACTED")
+	}
+	return s
 }
 
 type redactedError struct {
@@ -467,7 +543,7 @@ func (c *Client) redactKeyBytes(body []byte) string {
 	if c.apiKey == "" {
 		return string(body)
 	}
-	return strings.ReplaceAll(string(body), c.apiKey, "REDACTED")
+	return c.redactString(string(body))
 }
 
 // toMetadata converts v, naming its cover's URL from the imageLinks
@@ -626,8 +702,18 @@ const zeroWidth = "\u200b\u200c\u200d\ufeff"
 // trimBlank is strings.TrimSpace widened to the zero-width characters, so
 // "blank" here means "renders as nothing" rather than "is Unicode
 // whitespace".
+//
+// Composed with unicode.IsSpace rather than written as a cutset, which is
+// the distinction that matters: strings.Trim with a hand-listed cutset is
+// not TrimSpace, and spelling out the ASCII spaces plus a couple of
+// favourites drops the other seventeen runes IsSpace accepts — U+3000, the
+// ordinary CJK ideographic space, among them. Widening a trim by narrowing
+// it is an easy trade to make by accident, and this library holds Chinese
+// and Japanese books.
 func trimBlank(s string) string {
-	return strings.Trim(s, " \t\n\v\f\r\u0085\u00a0"+zeroWidth)
+	return strings.TrimFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(zeroWidth, r)
+	})
 }
 
 // tagAt reports the index just past the tag starting at raw[i] (which the
