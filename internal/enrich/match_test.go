@@ -1,6 +1,9 @@
 package enrich
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTitlesMatch(t *testing.T) {
 	cases := []struct {
@@ -36,12 +39,32 @@ func TestTitlesMatch(t *testing.T) {
 		{"undelimited extension", "The Hobbit", "The Hobbit Companion", false},
 		{"bare article", "The", "The Hobbit", false},
 
-		// A run need not be a prefix. Google Books routinely answers with a
-		// series-prefixed title, and the run is then delimited on its left
-		// and reaches the end on its right.
-		{"delimited suffix run", "The Fellowship of the Ring", "The Lord of the Rings: The Fellowship of the Ring", true},
-		{"delimited interior run", "The Two Towers", "Tolkien: The Two Towers: A Reader's Guide", true},
-		{"undelimited suffix run", "Ring", "The Fellowship of the Ring", false},
+		// The match need not be the first segment. Google Books routinely
+		// answers with a series-prefixed title, and the book's own name is
+		// then the last segment.
+		{"series-prefixed answer", "The Fellowship of the Ring", "The Lord of the Rings: The Fellowship of the Ring", true},
+		{"undelimited suffix", "Ring", "The Fellowship of the Ring", false},
+
+		// An article is redundant at the edge of a *segment*, not only at
+		// the edge of a title — a filename-derived title routinely drops
+		// one while the answer keeps it inside a longer title.
+		{"article dropped inside a segment", "Fellowship of the Ring", "The Lord of the Rings: The Fellowship of the Ring", true},
+		{"article dropped, series-prefixed", "Two Towers", "The Lord of the Rings: The Two Towers", true},
+
+		// A contents list is not a subtitle. Each of these is a whole
+		// delimited segment of the answer, and the answer is a different
+		// book — a collected edition, whose author agrees, so the veto
+		// cannot catch it either.
+		{"omnibus, first item", "Hamlet", "Shakespeare: Hamlet, Othello, Macbeth", false},
+		{"omnibus, last item", "Macbeth", "Shakespeare: Hamlet, Othello, Macbeth", false},
+		{"omnibus, interior item", "Othello", "Shakespeare: Hamlet, Othello, Macbeth", false},
+		{"three-segment companion volume", "The Two Towers", "Tolkien: The Two Towers: A Reader's Guide", false},
+
+		// The known limit, pinned so a change to it is deliberate: a
+		// two-segment answer whose second part describes rather than names
+		// the book still matches. Telling an edition note from a companion
+		// volume needs the words' meaning, not their punctuation.
+		{"two-segment study guide — accepted, known limit", "The Hobbit", "The Hobbit: A Study Guide", true},
 
 		// Decomposed text compares equal to composed text: macOS filenames
 		// are NFD, and filenameTitle turns them into titles for exactly the
@@ -49,6 +72,18 @@ func TestTitlesMatch(t *testing.T) {
 		{"NFD against NFC", "Cafe\u0301 Society", "Café Society", true},
 		{"diacritics folded", "Cafe Society", "Café Society", true},
 		{"decomposed mid-word", "Cafe\u0301s", "Cafés", true},
+		// Word-medial, against the unaccented spelling — the case that
+		// actually pins the combining-mark strip. The cases above fold
+		// symmetrically on both sides, so they survive its removal.
+		{"mark mid-word against unaccented", "Motorhead", "Motörhead", true},
+		{"mark mid-word, accented only one side", "Naive", "Naïve", true},
+		// Case folding, not lowercasing: Greek written natively ends a word
+		// with a final sigma, which ToLower never produces.
+		{"greek final sigma", "ΟΔΟΣ", "οδός", true},
+		{"eszett folds to ss", "Strasse", "Straße", true},
+		// Indic vowel signs are spacing marks, and splitting on them would
+		// shred a title into one-letter fragments.
+		{"devanagari stays one token", "किताब", "किताब", true},
 	}
 	for _, c := range cases {
 		if got := titlesMatch(c.a, c.b); got != c.want {
@@ -144,6 +179,23 @@ func TestPlausibleMatch(t *testing.T) {
 			reason: reasonTitleMismatch,
 		},
 		{
+			// A list of unusable names is silence wearing punctuation, the
+			// same as no list at all — it must not be able to veto a title
+			// that matches.
+			name:    "book's authors all fold away — silence, not disagreement",
+			title:   "The Hobbit",
+			authors: []string{"—", "  "},
+			answer:  Metadata{Title: "The Hobbit", Authors: []string{"J.R.R. Tolkien"}},
+			want:    true,
+		},
+		{
+			name:    "answer's authors all fold away",
+			title:   "The Hobbit",
+			authors: []string{"J.R.R. Tolkien"},
+			answer:  Metadata{Title: "The Hobbit", Authors: []string{"", "  "}},
+			want:    true,
+		},
+		{
 			name:   "answer with no title at all",
 			title:  "The Hobbit",
 			answer: Metadata{Publisher: "Allen & Unwin"},
@@ -185,18 +237,44 @@ func TestMetadataIsEmpty(t *testing.T) {
 	}
 }
 
-// containsDelimitedRun's own contract, pinned where it is stated rather
-// than only through titlesMatch: an empty needle matches nothing, since
-// reporting true would make the gate pass on silence.
-func TestContainsDelimitedRunEmptyNeedle(t *testing.T) {
-	haystack := tokenize("The Hobbit")
-	if containsDelimitedRun(haystack, nil) {
-		t.Error("an empty needle matched")
+// segmentsOf's own contracts, pinned where they are stated rather than only
+// through titlesMatch: a title with no words yields no segments, and one
+// past maxTitleTokens is refused outright rather than compared.
+func TestSegmentsOfContracts(t *testing.T) {
+	if got := segmentsOf(""); got != nil {
+		t.Errorf("segmentsOf(\"\") = %v, want nil", got)
 	}
-	if containsDelimitedRun(haystack, tokenize("")) {
-		t.Error("a needle of pure punctuation matched")
+	if got := segmentsOf(" — : , "); got != nil {
+		t.Errorf("punctuation-only title yielded %v, want nil", got)
 	}
-	if containsDelimitedRun(nil, haystack) {
-		t.Error("a needle longer than the haystack matched")
+	if got := segmentsOf("The Hobbit: 75th Anniversary Edition"); len(got) != 2 {
+		t.Errorf("segments = %v, want 2", got)
+	}
+
+	// The matcher is quadratic, runs on a provider's raw title, and has no
+	// ctx to notice a shutdown — so an absurd title is refused rather than
+	// compared. A false negative on nothing that exists.
+	long := strings.Repeat("word ", maxTitleTokens+1)
+	if got := segmentsOf(long); got != nil {
+		t.Errorf("a %d-word title yielded %d segments, want nil", maxTitleTokens+1, len(got))
+	}
+	if titlesMatch(long, long) {
+		t.Error("two identical over-long titles matched; they must be refused")
+	}
+	if got := segmentsOf(strings.Repeat("word ", maxTitleTokens)); len(got) != 1 {
+		t.Errorf("a title exactly at the cap yielded %d segments, want 1", len(got))
+	}
+
+	// Spacing combining marks continue a word. Asserted on the token count
+	// rather than through titlesMatch, because a title compared against
+	// itself shreds identically on both sides and matches either way — the
+	// same symmetry that hid the combining-mark strip. What shredding
+	// actually costs is one-letter fragments colliding across unrelated
+	// titles.
+	for _, word := range []string{"किताब", "গীতাঞ্জলি", "தமிழ்"} {
+		got := segmentsOf(word)
+		if len(got) != 1 || len(got[0]) != 1 {
+			t.Errorf("segmentsOf(%q) = %v, want one segment of one word", word, got)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"unicode"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -17,36 +18,51 @@ import (
 // reads as a dash, "Twenty-One" as one compound word.
 const subtitleDelimiters = ":;,()[]{}—–/|"
 
-// leadingArticles are dropped from the front of a title before comparing,
-// so "Hobbit" and "The Hobbit" agree. One article, English only — the same
-// rule and the same reason as storage.SortTitle, which normalises the sort
-// column; duplicated rather than imported because that function returns a
-// sort key rather than tokens, and the shared thing is the rule, not the
-// code.
+// maxSegments bounds how many delimited parts an answer may have and still
+// match on one of them. Two — the title, and at most one subtitle, series
+// marker or edition note.
+//
+// It is what stops a collected edition matching any of its contents: split
+// "Shakespeare: Hamlet, Othello, Macbeth" on its delimiters and "Hamlet" is
+// a whole segment of it, so a rule that asked only for a delimited segment
+// would hand a Hamlet the omnibus's publisher, date, description and cover.
+// The author veto cannot help, for the same reason it cannot help with a
+// sequel: a collection shares its author. A contents list is not a subtitle,
+// and counting segments is what tells them apart.
+const maxSegments = 2
+
+// maxTitleTokens bounds the work one comparison can do. The matcher is
+// quadratic in token count and runs on a provider's *raw* title, before
+// sanitizeValue caps anything — a provider client bounds only the whole
+// response, at megabytes. A real title is a few dozen words, so anything
+// past this is not a title and is refused rather than compared, which costs
+// a false negative on nothing that exists.
+const maxTitleTokens = 64
+
+// leadingArticles may be dropped from the front of any segment before
+// comparing it, so "Hobbit" and "The Hobbit" agree. One article, English
+// only — the same rule and the same reason as storage.SortTitle, which
+// normalises the sort column; duplicated rather than imported because that
+// function returns a sort key rather than tokens, and the shared thing is
+// the rule, not the code.
 var leadingArticles = map[string]bool{"the": true, "a": true, "an": true}
 
-// token is one word of a title plus whether a subtitle delimiter stood
-// between it and the word before. The flag is the whole point of tokenising
-// by hand rather than calling strings.Fields: dropping punctuation throws
-// away the one signal that distinguishes a subtitle from more title.
-type token struct {
-	text string
-	// afterDelimiter reports whether a subtitle delimiter separated this
-	// token from the previous one. Always false for the first token, which
-	// has an edge in front of it rather than a separator.
-	afterDelimiter bool
-}
-
-// foldForMatch reduces a string to lowercase, diacritic-free form. It
-// normalises to NFD and drops combining marks, so decomposed text (macOS
-// filenames, which internal/scanner's filenameTitle turns into titles for
-// exactly the sparse books that reach Search) compares equal to the
-// composed text a provider returns. Folding diacritics away rather than
-// preserving them matches books_fts's own `remove_diacritics 2`, so search
-// and matching agree about what counts as the same word.
-func foldForMatch(s string) string {
+// fold reduces a string to a case- and diacritic-insensitive form.
+//
+// cases.Fold rather than strings.ToLower, because lowercasing is not
+// case-folding where it matters: ToLower maps Σ to σ unconditionally, while
+// Greek written natively ends a word with ς, so "ΟΔΟΣ" and "οδός" would
+// never agree. Folding also settles ß against ss.
+//
+// NFD then dropping combining marks makes decomposed text compare equal to
+// composed text — macOS filenames are NFD, and internal/scanner's
+// filenameTitle turns them into titles for exactly the sparse books that
+// reach the search path. It also folds diacritics away entirely, matching
+// books_fts's own remove_diacritics 2, so search and matching agree about
+// what counts as the same word.
+func fold(s string) string {
 	var b strings.Builder
-	for _, r := range norm.NFD.String(strings.ToLower(s)) {
+	for _, r := range norm.NFD.String(cases.Fold().String(s)) {
 		if unicode.Is(unicode.Mn, r) {
 			continue
 		}
@@ -64,125 +80,177 @@ func isBoundary(sep string) bool {
 	return strings.ContainsRune(sep, '-') && strings.ContainsAny(sep, " \t\n")
 }
 
-// tokenize splits a title into comparable words, recording where subtitle
-// delimiters fell. Leading articles are handled by articleVariants rather
-// than here, since which form is wanted depends on what it is compared to.
-func tokenize(s string) []token {
-	folded := foldForMatch(s)
+// isWordRune reports whether r continues a word. Marks count: Mn is already
+// gone by the time this runs, but Mc and Me — the spacing combining marks
+// Indic scripts use for vowel signs — are neither letters nor digits, and
+// treating them as separators shreds "किताब" into three one-letter tokens
+// that then collide with fragments of unrelated titles.
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.In(r, unicode.M)
+}
 
+// segmentsOf splits a title into its delimiter-separated parts, each a list
+// of comparable words. It reports nil for a title carrying no words at all,
+// and for one past maxTitleTokens — see that constant.
+func segmentsOf(s string) [][]string {
 	var (
-		tokens  []token
-		current strings.Builder
-		sep     strings.Builder
+		segments [][]string
+		current  []string
+		word     strings.Builder
+		sep      strings.Builder
+		total    int
 	)
-	flush := func() {
-		if current.Len() == 0 {
-			return
+	// flushWord ends the word in hand, starting a new segment first when the
+	// separator that preceded it was a subtitle delimiter. It reports false
+	// once the title has more words than are worth comparing.
+	flushWord := func() bool {
+		if word.Len() == 0 {
+			return true
 		}
-		tokens = append(tokens, token{
-			text:           current.String(),
-			afterDelimiter: len(tokens) > 0 && isBoundary(sep.String()),
-		})
-		current.Reset()
+		if len(current) > 0 && isBoundary(sep.String()) {
+			segments = append(segments, current)
+			current = nil
+		}
+		current = append(current, word.String())
+		total++
+		word.Reset()
 		sep.Reset()
+		return total <= maxTitleTokens
 	}
-	for _, r := range folded {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			current.WriteRune(r)
+
+	for _, r := range fold(s) {
+		if isWordRune(r) {
+			word.WriteRune(r)
 			continue
 		}
-		flush()
+		if !flushWord() {
+			return nil
+		}
 		sep.WriteRune(r)
 	}
-	flush()
-
-	return tokens
-}
-
-// articleVariants returns the forms of a title worth comparing: as written,
-// and — when it starts with an article — without it.
-//
-// Both are needed rather than just the stripped one, because an article is
-// only redundant at the *edge* of a title. "The Fellowship of the Ring"
-// appears inside "The Lord of the Rings: The Fellowship of the Ring" with
-// its article intact, so stripping only the outer title would leave the two
-// unable to line up.
-func articleVariants(tokens []token) [][]token {
-	if len(tokens) > 1 && leadingArticles[tokens[0].text] {
-		stripped := make([]token, len(tokens)-1)
-		copy(stripped, tokens[1:])
-		stripped[0].afterDelimiter = false
-		return [][]token{tokens, stripped}
+	if !flushWord() {
+		return nil
 	}
-	return [][]token{tokens}
+	if len(current) > 0 {
+		segments = append(segments, current)
+	}
+	return segments
 }
 
-func sameText(a, b []token) bool {
+func sameWords(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i].text != b[i].text {
+		if a[i] != b[i] {
 			return false
 		}
 	}
 	return true
 }
 
-// containsDelimitedRun reports whether needle appears in haystack as a
-// contiguous run of whole tokens that is *delimited* on both sides — each
-// side either reaching the end of the title or standing behind a subtitle
-// delimiter.
+// withoutArticle drops a leading article, leaving a segment that is nothing
+// but an article alone — "The" is not a title.
+func withoutArticle(seg []string) []string {
+	if len(seg) > 1 && leadingArticles[seg[0]] {
+		return seg[1:]
+	}
+	return seg
+}
+
+// segmentsMatch reports whether two segments name the same thing, allowing
+// either to carry a leading article the other does not.
 //
-// Whole tokens rather than a substring, because "it" is inside "italy" as
-// characters and is not a word of it. Delimited rather than merely
-// contiguous, because that is the difference between a subtitle and a
-// sequel: "The Hobbit" is delimited inside "The Hobbit: 75th Anniversary
-// Edition" and undelimited inside "The Hobbit Companion", and only the
-// first is the same book.
+// Per segment rather than per title, which is the part that is easy to get
+// wrong: an article is redundant at the edge of a *segment*, and a segment
+// is not always at the edge of its title. "The Fellowship of the Ring"
+// appears inside "The Lord of the Rings: The Fellowship of the Ring" with
+// its own article intact, so stripping only the outer title leaves an
+// article-less stored title — the ordinary shape when a title came from a
+// filename — unable to line up.
+func segmentsMatch(a, b []string) bool {
+	return sameWords(withoutArticle(a), withoutArticle(b))
+}
+
+// segmentMatch reports whether a one-segment title names the same book as a
+// title of at most maxSegments parts, by matching any one of them.
 //
-// An empty needle matches nothing. Reporting true would make the gate pass
-// on silence, which is the opposite of what an untitled side should buy.
-func containsDelimitedRun(haystack, needle []token) bool {
-	if len(needle) == 0 || len(needle) > len(haystack) {
+// Any one of them, rather than only the first or last, because maxSegments
+// is what does the work: with at most two parts every part already touches
+// an end, so a first-or-last test would be a branch no input could take. It
+// is the segment *count* that separates a subtitle from a contents list,
+// and stating the rule twice would leave one copy untestable.
+func segmentMatch(single, whole [][]string) bool {
+	if len(single) != 1 || len(whole) == 0 || len(whole) > maxSegments {
 		return false
 	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if !sameText(haystack[i:i+len(needle)], needle) {
-			continue
-		}
-		leftOK := i == 0 || haystack[i].afterDelimiter
-		rightOK := i+len(needle) == len(haystack) || haystack[i+len(needle)].afterDelimiter
-		if leftOK && rightOK {
+	for _, seg := range whole {
+		if segmentsMatch(single[0], seg) {
 			return true
 		}
 	}
 	return false
 }
 
-// titlesMatch reports whether two titles plausibly name the same book:
-// equal once folded and stripped of a leading article, or one a delimited
-// token run of the other.
+// titlesMatch reports whether two titles plausibly name the same book.
 //
 // The rule it must not weaken to is bare containment. "Dune" is contained
 // in "Dune Messiah", "Foundation" in "Foundation and Empire" — and the
-// author veto below cannot catch either, because a sequel shares its
-// author. One-word and series titles are common among precisely the sparse,
+// author veto cannot catch either, because a sequel shares its author.
+// One-word and series titles are common among precisely the sparse,
 // no-ISBN books that reach the search path, so a containment rule would
 // wrongly enrich exactly the population the gate was written for.
+//
+// A known limit, recorded so it is not rediscovered as a surprise: a
+// two-segment answer whose second part describes the book rather than
+// naming it still matches — "The Hobbit" accepts "The Hobbit: A Study
+// Guide", a different book with its own publisher and cover. Telling an
+// edition note from a companion volume needs to know what the words mean
+// rather than how they are punctuated, and no cheap rule reaches it.
+// Three-segment forms of the same shape ("Tolkien: The Hobbit: A Reader's
+// Guide") are refused by maxSegments.
 func titlesMatch(a, b string) bool {
-	at, bt := tokenize(a), tokenize(b)
-	if len(at) == 0 || len(bt) == 0 {
+	as, bs := segmentsOf(a), segmentsOf(b)
+	if len(as) == 0 || len(bs) == 0 {
 		return false
 	}
-	for _, x := range articleVariants(at) {
-		for _, y := range articleVariants(bt) {
-			if sameText(x, y) || containsDelimitedRun(x, y) || containsDelimitedRun(y, x) {
-				return true
+	if len(as) == len(bs) {
+		same := true
+		for i := range as {
+			if !segmentsMatch(as[i], bs[i]) {
+				same = false
+				break
 			}
 		}
+		if same {
+			return true
+		}
 	}
-	return false
+	return segmentMatch(as, bs) || segmentMatch(bs, as)
+}
+
+// nameKey folds an author's name to its comparable form, or "" when the
+// name carries no words at all.
+func nameKey(name string) string {
+	segments := segmentsOf(name)
+	words := make([]string, 0, len(segments))
+	for _, seg := range segments {
+		words = append(words, seg...)
+	}
+	return strings.Join(words, " ")
+}
+
+// usableNames counts the names carrying anything comparable. A list of
+// blanks or punctuation is silence, not a claim about authorship, and must
+// not be able to veto — see plausibleMatch.
+func usableNames(names []string) int {
+	n := 0
+	for _, name := range names {
+		if nameKey(name) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // authorsOverlap reports whether any name on one side equals a name on the
@@ -203,15 +271,6 @@ func authorsOverlap(a, b []string) bool {
 		}
 	}
 	return false
-}
-
-func nameKey(name string) string {
-	parts := tokenize(name)
-	words := make([]string, 0, len(parts))
-	for _, p := range parts {
-		words = append(words, p.text)
-	}
-	return strings.Join(words, " ")
 }
 
 // Rejection reasons, reported by plausibleMatch so the log can tell the two
@@ -237,12 +296,13 @@ const (
 // first. "Titles match or authors match" would accept any Stephen King
 // novel for any Stephen King file.
 //
-// Author overlap is required only when both sides actually have authors: a
-// book with none cannot contradict an answer, and an answer with none —
+// The veto needs *usable* names on both sides, not merely present ones: a
+// book with no authors cannot contradict an answer, an answer with none —
 // common on Open Library edition records, where authorship belongs to the
-// work — is silence rather than disagreement. Note what this means for a
-// sequel, and why titlesMatch has to carry the weight: for "Dune" against
-// "Dune Messiah" the author *agrees*, so the veto never fires.
+// work — is silence rather than disagreement, and a list that folds away to
+// nothing is the same silence wearing punctuation. Note what this means for
+// a sequel or a collected edition, and why titlesMatch has to carry the
+// weight: their author *agrees*, so the veto never fires.
 //
 // It rejects most filename-titled books, which is the intended outcome
 // rather than a shortfall. Nothing available can establish that a book
@@ -254,7 +314,8 @@ func plausibleMatch(title string, authors []string, answer Metadata) (bool, stri
 	if !titlesMatch(title, answer.Title) {
 		return false, reasonTitleMismatch
 	}
-	if len(authors) > 0 && len(answer.Authors) > 0 && !authorsOverlap(authors, answer.Authors) {
+	if usableNames(authors) > 0 && usableNames(answer.Authors) > 0 &&
+		!authorsOverlap(authors, answer.Authors) {
 		return false, reasonAuthorVeto
 	}
 	return true, ""

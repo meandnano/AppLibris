@@ -516,24 +516,63 @@ full design.
   "titles match *or* authors match" accepts any Stephen King novel for any
   Stephen King file. Overlap is only consulted when both sides have
   authors, an authorless answer being silence rather than disagreement.
-  Titles match on **delimited** contiguous whole-token runs. Whole tokens
-  rather than substrings, so "It" does not match "Italy"; *delimited*
-  because that is the only thing separating a subtitle from a sequel —
-  "The Hobbit" stands behind a `:` inside "The Hobbit: 75th Anniversary
-  Edition" and behind nothing but a space inside "The Hobbit Companion".
-  Bare containment is the rule to avoid, and the author veto cannot
-  substitute for it: a sequel shares its author, so `Dune` against `Dune
-  Messiah` clears the veto, and one-word and series titles are common in
-  exactly the sparse no-ISBN population this path serves. A run need not be
-  a prefix — a delimited suffix run is how a series-prefixed answer ("The
-  Lord of the Rings: The Fellowship of the Ring") matches. Titles are
-  folded to NFD with combining marks dropped before tokenising, so
-  decomposed text — macOS filenames, which `filenameTitle` turns into
-  titles for these very books — compares equal to the composed text a
-  provider returns; that also folds diacritics away, matching `books_fts`'s
-  own `remove_diacritics 2`. One leading English article is optional on
-  either side, compared both ways round rather than simply stripped, since
-  an article is only redundant at a title's edge.
+  Titles are compared as **delimited segments**, not as substrings and not
+  as bare token runs. A title is split at `:;,()[]{}—–/|` (and at a hyphen
+  only when the separator also has a space, so `" - "` is a dash and
+  `"Twenty-One"` a compound); two titles match when their segments agree
+  pairwise, or when a one-segment title equals a segment of a title with at
+  most **`maxSegments` (2)** parts.
+  Three rules, each of which a cheaper version gets wrong:
+  whole words rather than substrings, so "It" does not match "Italy";
+  *delimited*, because that is the only thing separating a subtitle from a
+  sequel — "The Hobbit" stands behind a `:` in "The Hobbit: 75th
+  Anniversary Edition" and behind nothing but a space in "The Hobbit
+  Companion"; and *at most two segments*, because a delimited segment alone
+  would make "Hamlet" match "Shakespeare: Hamlet, Othello, Macbeth" — a
+  contents list is not a subtitle. The author veto rescues neither case: a
+  sequel and a collected edition both share their author, which is why the
+  title rule carries the whole weight, and why one-word and series titles —
+  common in exactly the sparse no-ISBN population this path serves — are
+  the shapes to test against. The matched segment may be any of the two, so
+  a series-prefixed answer ("The Lord of the Rings: The Fellowship of the
+  Ring") matches on its last; there is deliberately no separate
+  first-or-last test, since at two segments every segment already touches
+  an end and the branch would be untestable.
+  **A known limit, recorded rather than left to be discovered:** a
+  two-segment answer whose second part *describes* the book still matches,
+  so "The Hobbit" accepts "The Hobbit: A Study Guide" — a different book
+  with its own publisher and cover. Separating an edition note from a
+  companion volume needs the words' meaning, not their punctuation. The
+  three-segment form ("Tolkien: The Hobbit: A Reader's Guide") is refused
+  by `maxSegments`.
+  Text is case-*folded* (`cases.Fold`, not `strings.ToLower`, which maps
+  `Σ`→`σ` unconditionally and would never match natively-written Greek
+  ending in `ς`), then NFD with combining marks dropped — so decomposed
+  text, which is what macOS filenames and therefore `filenameTitle` produce
+  for these very books, equals composed text, and diacritics fold away to
+  match `books_fts`'s own `remove_diacritics 2`. Spacing marks (`Mc`/`Me`)
+  *continue* a word rather than splitting it, or Indic vowel signs shred a
+  title into one-letter fragments that collide across unrelated books. One
+  leading English article is optional **per segment**, not per title: an
+  article is redundant at a segment's edge, and a segment is not always at
+  its title's edge — "The Fellowship of the Ring" sits inside "The Lord of
+  the Rings: …" with its own article intact.
+  `maxTitleTokens` (64) refuses an absurd title outright rather than
+  comparing it: the matcher is quadratic and runs on a provider's *raw*
+  title, before `sanitizeValue` caps anything, while a provider client
+  bounds only the whole response at megabytes.
+  `internal/enrich/match.go` is the one file in the package that imports
+  outside the standard library — `golang.org/x/text` for `cases.Fold` and
+  NFD. Its plan (`2026090602`) said the file would import nothing beyond
+  `strings`, `unicode` and the package's own types, and that was written
+  before the folding defects were known; the deviation is recorded here
+  because a completed plan is immutable. It adds no module to the build:
+  `golang.org/x/text` was already present at the same version as an
+  indirect dependency of `golang.org/x/image`, which `internal/cover` uses
+  directly. Neither piece can be hand-rolled — composing or decomposing
+  needs the Unicode tables, and stripping marks alone leaves NFD text
+  unable to match NFC text, since a composed `é` is a single non-mark
+  rune.
   A rejected answer is treated as a no-match, not a
   failure — the chain continues with the missing set intact, no provenance
   recorded and no cover taken, and `Failed` unchanged; the rejection is
