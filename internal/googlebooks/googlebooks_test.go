@@ -41,10 +41,23 @@ import (
 // pointing at a local httptest.Server: a fixture cannot bake in a server
 // address chosen at test run time.
 
+// testClient serves handler at the list endpoint (/volumes) and 404s the
+// single-volume one (/volumes/{id}), so a test written about a search can
+// never be handed the detail request enrichVolume makes for a matched
+// volume — which would fail its query assertions and inflate its hit
+// count. internal/openlibrary's own testClient isolates its cover host for
+// the same reason. Tests about the detail request use detailClient below.
+//
+// hits counts list requests only, for the same reason: a test asserting
+// "one request" means one lookup.
 func testClient(t *testing.T, apiKey string, handler http.HandlerFunc) (*Client, *int) {
 	t.Helper()
 	hits := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isVolumeDetailPath(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
 		hits++
 		handler(w, r)
 	}))
@@ -55,6 +68,35 @@ func testClient(t *testing.T, apiKey string, handler http.HandlerFunc) (*Client,
 		apiKey:     apiKey,
 		httpClient: server.Client(),
 	}, &hits
+}
+
+// detailClient serves list at /volumes and detail at /volumes/{id},
+// counting the detail requests — the split testClient refuses, for tests
+// that are about enrichVolume itself.
+func detailClient(t *testing.T, list, detail http.HandlerFunc) (*Client, *int) {
+	t.Helper()
+	detailHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isVolumeDetailPath(r.URL.Path) {
+			detailHits++
+			detail(w, r)
+			return
+		}
+		list(w, r)
+	}))
+	t.Cleanup(server.Close)
+
+	return &Client{
+		baseURL:    server.URL,
+		apiKey:     "",
+		httpClient: server.Client(),
+	}, &detailHits
+}
+
+// isVolumeDetailPath reports whether p addresses one volume rather than the
+// list endpoint — "/volumes/LLSpngEACAAJ" rather than "/volumes".
+func isVolumeDetailPath(p string) bool {
+	return strings.HasPrefix(p, "/volumes/")
 }
 
 func readFixture(t *testing.T, name string) []byte {
@@ -151,12 +193,11 @@ func TestSearchMatchParsesFixture(t *testing.T) {
 }
 
 // The capture is what the client's own request shape (GET /volumes?q=…)
-// really answers, and it carries only the two smallest sizes. extraLarge,
-// large, medium and small exist only on the single-volume endpoint
-// (volumes_detail.json, same volume, five sizes) — so best()'s ladder above
-// Thumbnail is unreachable from this client as written, and every
-// Google-sourced cover is the ~128x192 thumbnail. Pinned so the next change
-// to best() has to confront it rather than assume it away.
+// really answers, and it carries only the two smallest sizes. small
+// through extraLarge exist only on the single-volume endpoint
+// (volumes_detail.json, the same volume, five sizes) — which is the whole
+// reason enrichVolume makes a second request, and the reason it must not
+// be "optimised" away.
 func TestListEndpointOffersOnlyTheThumbnailSizes(t *testing.T) {
 	var parsed volumesResponse
 	if err := json.Unmarshal(readFixture(t, "volumes_match.json"), &parsed); err != nil {
@@ -166,7 +207,7 @@ func TestListEndpointOffersOnlyTheThumbnailSizes(t *testing.T) {
 	if links.Thumbnail == "" {
 		t.Fatal("the capture carries no thumbnail")
 	}
-	if links.ExtraLarge != "" || links.Large != "" || links.Medium != "" || links.Small != "" {
+	if links.Large != "" || links.Medium != "" || links.Small != "" {
 		t.Errorf("the list endpoint answered a size above thumbnail: %+v", links)
 	}
 
@@ -589,20 +630,34 @@ func TestByISBNCoverURLFromCaptureIsTheUpgradedThumbnail(t *testing.T) {
 	}
 }
 
-// thumbnail is ~128px wide, under internal/cover's 400px target, which
-// never upscales — so a larger link wins when the volume offers one. The
-// http URLs Google answers with are upgraded to https, since these bytes
-// end up served from /covers/.
-func TestCoverURLPrefersTheLargestLinkAndUpgradesToHTTPS(t *testing.T) {
+// thumbnail is ~195px on the long edge, under internal/cover's 400px
+// target, which never upscales — so a larger link wins when the volume
+// offers one. But *not* the largest available: medium and large both clear
+// the target, so the choice between them only decides how many pixels get
+// thrown away, and extraLarge (~2670px, up to 800 KB) is past
+// enrich.MaxCoverBytes, where the cover is refused outright rather than
+// downsized. The http URLs Google answers with are upgraded to https,
+// since these bytes end up served from /covers/.
+func TestCoverURLPrefersTheSmallestLinkOverTheTargetAndUpgradesToHTTPS(t *testing.T) {
 	cases := []struct {
 		name  string
 		links imageLinks
 		want  string
 	}{
 		{
-			name:  "largest wins",
-			links: imageLinks{Large: "https://books.example/large", Medium: "https://books.example/medium", Thumbnail: "https://books.example/thumb"},
+			name:  "medium beats large: both clear the 400px target, medium costs fewer bytes",
+			links: imageLinks{Large: "https://books.example/large", Medium: "https://books.example/medium", Small: "https://books.example/small", Thumbnail: "https://books.example/thumb"},
+			want:  "https://books.example/medium",
+		},
+		{
+			name:  "large when there is no medium",
+			links: imageLinks{Large: "https://books.example/large", Small: "https://books.example/small", Thumbnail: "https://books.example/thumb"},
 			want:  "https://books.example/large",
+		},
+		{
+			name:  "small beats thumbnail below the target",
+			links: imageLinks{Small: "https://books.example/small", Thumbnail: "https://books.example/thumb"},
+			want:  "https://books.example/small",
 		},
 		{
 			name:  "thumbnail is the fallback",
@@ -622,6 +677,28 @@ func TestCoverURLPrefersTheLargestLinkAndUpgradesToHTTPS(t *testing.T) {
 				t.Errorf("best() = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// extraLarge is not in imageLinks at all, so a response carrying one is
+// ignored rather than preferred. It is the only observed size past
+// enrich.MaxCoverBytes (512 KiB), and past that a cover is refused
+// outright — the failure mode this ordering exists to avoid is a *better*
+// cover becoming no cover.
+func TestExtraLargeIsIgnored(t *testing.T) {
+	body := `{"totalItems":1,"items":[{"id":"abc","volumeInfo":{"title":"T","imageLinks":{
+		"extraLarge":"https://books.example/xl","medium":"https://books.example/medium"}}}]}`
+
+	client, _ := detailClient(t,
+		func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) },
+		func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"id":"abc","volumeInfo":{}}`)) })
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if got.CoverURL != "https://books.example/medium" {
+		t.Errorf("CoverURL = %q, want the medium link — extraLarge must not win", got.CoverURL)
 	}
 }
 
@@ -786,17 +863,13 @@ func TestLiveQuotaBodyNamesItsLimitWithinTheErrorBodyCap(t *testing.T) {
 	}
 }
 
-// volumeInfo.language is a BCP-47 tag, not the ISO 639-1 code CLAUDE.md
-// claims this provider produces: a scan of 188 live volumes returned
-// pt-BR 50 times and zh-CN 32, alongside plain en/ru/ja/sv. So
-// books.language holds "pt" for a book internal/epub, internal/fb2 or
-// internal/openlibrary answered and "pt-BR" for the next one Google did —
-// the same one-column-two-vocabularies split that marcToISO639 exists in
-// internal/openlibrary to prevent.
-//
-// This pins what the code does today, not what it should do; the fix is
-// its own plan.
-func TestRegionalLanguageTagReachesMetadataUnchanged(t *testing.T) {
+// volumeInfo.language is a BCP-47 tag, not an ISO 639-1 code: a scan of
+// 188 live volumes returned pt-BR 50 times and zh-CN 32, alongside plain
+// en/ru/ja/sv. Left as answered, books.language would hold "pt" for a book
+// internal/openlibrary filled and "pt-BR" for the next one this provider
+// did — the one-column-two-vocabularies split marcToISO639 exists to
+// prevent.
+func TestRegionalLanguageTagIsReducedToItsBaseSubtag(t *testing.T) {
 	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(readFixture(t, "volumes_regional_language.json"))
 	})
@@ -805,8 +878,29 @@ func TestRegionalLanguageTagReachesMetadataUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if got.Language != "pt-BR" {
-		t.Errorf("Language = %q, want %q — the capture's own value, passed through as-is", got.Language, "pt-BR")
+	if got.Language != "pt" {
+		t.Errorf("Language = %q, want %q — the capture answers pt-BR", got.Language, "pt")
+	}
+}
+
+func TestBaseLanguage(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"pt-BR", "pt"},
+		{"zh-CN", "zh"},
+		{"en", "en"},
+		{"", ""},
+		{"PT-br", "pt"},
+		{"  en  ", "en"},
+		// A three-letter primary subtag is passed through rather than
+		// guessed at, the same choice marcToISO639 makes for a code it
+		// does not know: no observed value is one, and a wrong code reads
+		// as answered where an unfamiliar one reads as unfamiliar.
+		{"haw", "haw"},
+	}
+	for _, c := range cases {
+		if got := baseLanguage(c.in); got != c.want {
+			t.Errorf("baseLanguage(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
@@ -838,5 +932,238 @@ func TestSearchCanAnswerAMislabelledLanguage(t *testing.T) {
 	}
 	if got.Language != "en" {
 		t.Errorf("Language = %q, want %q — the capture's own value, and the point of the capture", got.Language, "en")
+	}
+}
+
+// listThenDetail serves volumes_match.json at the list endpoint and
+// volumes_detail.json at the single-volume one — the two captures of
+// different volumes, which is fine and deliberate: what these tests are
+// about is that the second response's larger cover and HTML description
+// replace the first's, not that the two describe one book.
+func listThenDetail(t *testing.T, detail http.HandlerFunc) (*Client, *int) {
+	t.Helper()
+	return detailClient(t,
+		func(w http.ResponseWriter, r *http.Request) { w.Write(readFixture(t, "volumes_match.json")) },
+		detail)
+}
+
+// The whole point of the second request: the list endpoint's thumbnail is
+// 128x192, under internal/cover's 400px target, and the sizes worth having
+// live only on /volumes/{id}.
+func TestMatchedVolumePrefersTheDetailEndpointsLargerCover(t *testing.T) {
+	client, detailHits := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/volumes/LLSpngEACAAJ" {
+			t.Errorf("detail path = %q, want the matched volume's id", r.URL.Path)
+		}
+		w.Write(readFixture(t, "volumes_detail.json"))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if *detailHits != 1 {
+		t.Fatalf("detail requests = %d, want 1", *detailHits)
+	}
+
+	var detail volume
+	if err := json.Unmarshal(readFixture(t, "volumes_detail.json"), &detail); err != nil {
+		t.Fatalf("unmarshal detail fixture: %v", err)
+	}
+	// medium, not large: both clear cover.Store's 400px target, so the
+	// smaller one is chosen. The https upgrade applies to the detail
+	// endpoint's links too — the capture answers them as plain http,
+	// exactly as the list one does.
+	if !strings.HasPrefix(detail.VolumeInfo.ImageLinks.Medium, "http://") {
+		t.Error("volumes_detail.json no longer answers http, so this test no longer checks the upgrade")
+	}
+	want := strings.Replace(detail.VolumeInfo.ImageLinks.Medium, "http://", "https://", 1)
+	if want == "" {
+		t.Fatal("volumes_detail.json carries no medium link")
+	}
+	if got.CoverURL != want {
+		t.Errorf("CoverURL = %q, want the detail endpoint's medium link %q", got.CoverURL, want)
+	}
+	if strings.Contains(got.CoverURL, "zoom=1") {
+		t.Error("CoverURL is still the 128px list thumbnail")
+	}
+}
+
+// The detail endpoint's description is the documented HTML one, so
+// plainText renders it and the paragraph breaks the list endpoint flattens
+// to spaces come back.
+func TestMatchedVolumePrefersTheDetailEndpointsDescription(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "volumes_detail.json"))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if !strings.Contains(got.Description, "\n\n") {
+		t.Errorf("Description carries no paragraph break, so the detail endpoint's markup was not used: %q", got.Description)
+	}
+	if strings.ContainsAny(got.Description, "<>") {
+		t.Errorf("Description still carries markup: %q", got.Description)
+	}
+	if strings.Contains(got.Description, "Celebrating 75 years") {
+		t.Error("Description is still the list endpoint's")
+	}
+}
+
+// A bigger cover and a paragraph break are niceties. Six good text fields
+// are the answer, and no failure of the second request may cost them.
+func TestDetailRequestFailureKeepsTheListAnswer(t *testing.T) {
+	slow := func(w http.ResponseWriter, r *http.Request) { time.Sleep(50 * time.Millisecond) }
+	tests := []struct {
+		name   string
+		detail http.HandlerFunc
+		ctx    func(t *testing.T) context.Context
+	}{
+		{
+			name:   "server error",
+			detail: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) },
+		},
+		{
+			name:   "not found",
+			detail: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) },
+		},
+		{
+			name:   "malformed body",
+			detail: func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{not valid json")) },
+		},
+		{
+			name:   "timeout",
+			detail: slow,
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := listThenDetail(t, tt.detail)
+			ctx := context.Background()
+			if tt.ctx != nil {
+				ctx = tt.ctx(t)
+			}
+
+			got, err := client.ByISBN(ctx, "9780547928227")
+			if err != nil {
+				t.Fatalf("ByISBN: want nil error — a lost cover must not fail a lookup that has its text fields; got %v", err)
+			}
+			if got.Title != "The Hobbit, Or, There and Back Again" {
+				t.Errorf("Title = %q, want the list answer intact", got.Title)
+			}
+			if got.Publisher != "Mariner Books" || got.ISBN != "9780547928227" || got.Language != "en" {
+				t.Errorf("the list answer's fields did not survive: %+v", got)
+			}
+			want := "https://books.google.com/books/content?id=LLSpngEACAAJ&printsec=frontcover&img=1&zoom=1&source=gbs_api"
+			if got.CoverURL != want {
+				t.Errorf("CoverURL = %q, want the list thumbnail %q", got.CoverURL, want)
+			}
+			if !strings.Contains(got.Description, "Celebrating 75 years") {
+				t.Errorf("Description = %q, want the list answer's", got.Description)
+			}
+		})
+	}
+}
+
+// The two conditions that make the second request pointless before it is
+// made: nothing to address, or nothing to improve on.
+func TestDetailRequestIsSkippedWhenItCouldNotHelp(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "no volume id to address",
+			body: `{"totalItems":1,"items":[{"volumeInfo":{"title":"No id here","imageLinks":{"thumbnail":"http://books.example/t.jpg"}}}]}`,
+		},
+		{
+			// A volume with no cover at all has no larger one either.
+			name: "no cover to improve on",
+			body: `{"totalItems":1,"items":[{"id":"abc123","volumeInfo":{"title":"No cover here"}}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, detailHits := detailClient(t,
+				func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(tt.body)) },
+				func(w http.ResponseWriter, r *http.Request) {
+					t.Error("the detail endpoint was called")
+					w.Write(readFixture(t, "volumes_detail.json"))
+				})
+
+			if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
+				t.Fatalf("ByISBN: %v", err)
+			}
+			if *detailHits != 0 {
+				t.Errorf("detail requests = %d, want 0", *detailHits)
+			}
+		})
+	}
+}
+
+// A no-match costs one request, not two: there is no volume to ask about.
+func TestNoMatchMakesNoDetailRequest(t *testing.T) {
+	client, detailHits := detailClient(t,
+		func(w http.ResponseWriter, r *http.Request) { w.Write(readFixture(t, "volumes_no_match.json")) },
+		func(w http.ResponseWriter, r *http.Request) { t.Error("the detail endpoint was called for a no-match") })
+
+	if _, err := client.ByISBN(context.Background(), "9999999999999"); err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if *detailHits != 0 {
+		t.Errorf("detail requests = %d, want 0", *detailHits)
+	}
+}
+
+// An empty detail description leaves the list one alone — the detail
+// endpoint answers "" for plenty of volumes, and replacing a real
+// description with nothing would be a regression bought with a request.
+func TestEmptyDetailDescriptionKeepsTheListOne(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"LLSpngEACAAJ","volumeInfo":{"imageLinks":{"large":"https://books.example/large.jpg"}}}`))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if !strings.Contains(got.Description, "Celebrating 75 years") {
+		t.Errorf("Description = %q, want the list answer's", got.Description)
+	}
+	if got.CoverURL != "https://books.example/large.jpg" {
+		t.Errorf("CoverURL = %q, want the detail endpoint's only link", got.CoverURL)
+	}
+}
+
+// The key travels on the detail request too — it is the same API and the
+// same quota, and an unkeyed one would answer 429 for everyone.
+func TestDetailRequestCarriesTheKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("key"); got != "test-api-key" {
+			t.Errorf("%s: key = %q, want %q", r.URL.Path, got, "test-api-key")
+		}
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Errorf("%s: User-Agent = %q, want %q", r.URL.Path, got, userAgent)
+		}
+		if isVolumeDetailPath(r.URL.Path) {
+			w.Write(readFixture(t, "volumes_detail.json"))
+			return
+		}
+		w.Write(readFixture(t, "volumes_match.json"))
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{baseURL: server.URL, apiKey: "test-api-key", httpClient: server.Client()}
+	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
+		t.Fatalf("ByISBN: %v", err)
 	}
 }
