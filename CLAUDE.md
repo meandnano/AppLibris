@@ -871,31 +871,113 @@ full design.
   for the retry decorator and the resolver's skip-and-continue to see as
   such. A matched result's cover — Open Library's separate
   `covers.openlibrary.org` host by numeric `cover_i` id, Google's
-  `imageLinks` already in the same response, largest size first and
-  upgraded to `https` — is **named, not downloaded**: it comes back as
-  `Metadata.CoverURL`, and the fetch is `internal/enrich`'s Worker's. That
+  `imageLinks`, upgraded to `https` — is **named, not downloaded**: it
+  comes back as `Metadata.CoverURL`, and the fetch is `internal/enrich`'s Worker's. That
   split is the point. Fetching inside the provider spends a round trip and
   up to `MaxCoverBytes` on every lookup, including the common case of a
   book that already has an embedded cover and whose answer `Resolve` then
   discards — and it puts image bytes into `WithCache`'s bounded map, where
   512 entries times two providers is hundreds of megabytes held for the
   process's lifetime. A `Metadata` of nothing but strings is what keeps
-  that cache kilobytes. Both clients classify their failures for the retry
+  that cache kilobytes.
+  Google's cover costs a **second request**, and the reason is easy to
+  mistake for an inefficiency: `GET /volumes?q=` names only
+  `smallThumbnail` and `thumbnail` however large the volume's art is —
+  measured across 188 volumes, and against the same volume id fetched
+  both ways — and `thumbnail` is ~195px on the long edge, under
+  `internal/cover`'s 400px target, which never upscales. `small` through
+  `extraLarge` exist only on `GET /volumes/{id}`, so `enrichVolume` asks
+  it for any volume that matched and named an id, and refuses a reply whose
+  own `id` is not that one — an absent `id` included, since letting `""`
+  pass would leave the check opt-out by the party being checked, and every
+  capture shows the real endpoint always sends one. Any volume, not only one
+  that has a cover: skipping a coverless one would be free on the cover
+  half and would silently drop the description half. It takes the detail
+  response's description while it is there. That description is often
+  different, fuller text rather than the same text differently punctuated;
+  its paragraph breaks reach the column but **not the page**, since
+  `.detail__description` sets no `white-space`, which
+  `docs/backlog/2026090610-description-paragraphs-do-not-render.md`
+  records. It **fails silently**:
+  any non-200, malformed body or transport failure leaves the list
+  answer's thumbnail and description exactly as they were, logged at
+  Debug, since a lookup holding six good text fields must not fail over a
+  nicety.
+  Two costs are priced in rather than overlooked: the request is made for a
+  `Search` answer *before* `plausibleMatch` sees it, so a hit the gate then
+  rejects has already paid for it; and it is made whether or not the
+  resolver needs a cover or a description, since a provider has no view of
+  the missing set. Both are one request against a background job.
+  `WithRateLimit` also gates the `Provider` *method*, not the HTTP call, so
+  one token now covers two requests — with the ISBN→`Search` fallback, the
+  worst case for one book is three requests on two tokens, times
+  `DefaultRetryAttempts` on a 429.
+  Which size it then picks is **not the largest**, and that is the part
+  that reads as a bug until the numbers are in front of you: `best()`
+  prefers `medium`, then `large`, then `small`, then `thumbnail`, and
+  `extraLarge` is absent from the struct entirely. Every size from
+  `medium` (~880px long edge) up already clears the 400px target, so
+  choosing a bigger one only decides how many pixels `cover.Store` throws
+  away — while `extraLarge` runs ~350–800 KB against
+  `enrich.MaxCoverBytes`' 512 KiB ceiling, where a cover past the cap is
+  refused outright rather than downsized. Taking the largest link turns a
+  good cover into **no cover**, which was measured by writing it that way
+  first: three of three test volumes fetched fine at `medium` and one
+  failed at `extraLarge`.
+  The other shortcut to avoid is rewriting the thumbnail URL's own
+  `zoom=1` parameter: it does return a larger image, but for a size a
+  volume lacks Google answers `200 image/jpeg` with an "image not
+  available" placeholder, which nothing in `FetchCover` or `cover.Store`
+  could tell from a cover. Only a URL Google itself named is safe to
+  fetch. Both clients classify their failures for the retry
   decorator: a 429, a 5xx and a transport failure wrap
-  `enrich.ErrRetryable`, while a 400, a 403 (Google's over-quota and
-  rejected-key answer) and a malformed body do not, since another attempt
-  answers those identically. Both set a descriptive `User-Agent` — Open
+  `enrich.ErrRetryable`, while a 400, a 403 and a malformed body do
+  not, since another attempt answers those identically. Which status
+  Google uses for what was measured, not read — the comment there once
+  had every clause of it backwards: a **rejected key is 400**
+  (`API_KEY_INVALID`), an **exhausted quota is 429** on both the per-day
+  and the per-minute limit, and **403 is the service not being enabled**
+  for the project (`SERVICE_DISABLED`). The classification was right
+  anyway, since 400 and 403 are both configuration. A per-day 429 is
+  therefore retried three times over a quota that will not clear for
+  hours; Google names which limit was hit in the body (`quota_limit` is
+  `defaultPerDayPerProject`) and sends no `Retry-After`, so telling the
+  two apart is possible and is left to whatever revisits `WithRetry` —
+  `docs/backlog/` has neither, deliberately, since it is a retry-policy
+  decision rather than a fidelity one. Both set a descriptive `User-Agent` — Open
   Library's terms ask for one and throttle the generic Go default, and a
   block there would be indistinguishable from any other transient failure,
   so the resolver would silently skip the provider for every book. Open
-  Library's MARC three-letter language codes are mapped to the ISO 639-1
-  form `internal/epub`, `internal/fb2` and Google Books all produce, so the
-  column doesn't hold `eng` for one book and `en` for the next. Google's
+  Library's MARC three-letter language codes are mapped to ISO 639-1
+  (`marcToISO639`) and Google's BCP-47 tags are cut back to their primary
+  subtag (`baseLanguage` — the Volumes API answers `pt-BR` and `zh-CN`,
+  82 times in a 188-volume scan), so the column doesn't hold `eng` for one
+  book and `en` for the next. The two providers agree *as far as they
+  can*: `marcToISO639` lists only the languages this library plausibly
+  contains and passes anything else through unchanged, so an unmapped MARC
+  code is still answered as itself. A subtag
+  cut rather than a second table, since Google's primary subtag is
+  already ISO 639-1 in every observed value. This does **not** make the
+  column consistent on its own, and the sentence here used to claim it
+  did: `internal/epub` and `internal/fb2` both pass their file's own value
+  straight through, and EPUB's `dc:language` is BCP-47 by specification,
+  so a subtagged value can still arrive from a file. `baseLanguage` also
+  drops script and variant, not only region — `zh-Hant` and `zh-Hans` both
+  become `zh` — which is a real loss where `pt-BR` against `pt-PT` is a
+  mild one, accepted because the column is one short code that three other
+  writers fill without any subtag at all. Closing that means one
+  derivation shared by all four writers,
+  placed the way `SortTitle` is; nobody has yet seen a regional tag come
+  out of a file here, so it is unwritten rather than planned. Google's
   `intitle:`/`inauthor:` values are quoted, which is load-bearing: the
   Volumes API binds the qualifier to the single token after it, so an
   unquoted multi-word title constrains only its first word. Google's
-  `description` is documented as *HTML-formatted* and is rendered to plain
-  text (`plainText`) before it leaves the package — block tags become line
+  `description` is documented as *HTML-formatted* — true of the
+  single-volume endpoint, which `enrichVolume` reads; the list endpoint's
+  own answer arrives with its markup already flattened, paragraph breaks
+  and all, which is why the detail one is preferred when it is
+  non-empty — and it is rendered to plain text (`plainText`) before it
+  leaves the package — block tags become line
   breaks, inline ones are dropped, and entities are unescaped only
   afterwards, so text that was itself escaped markup (`&lt;b&gt;`)
   survives as the characters an author wrote rather than being stripped as
@@ -908,20 +990,54 @@ full design.
   with, and stripping tags from every provider's answer would mangle one
   that legitimately contains a `<`. Google Books'
   optional `apiKey` is scrubbed from every returned error's text
-  (`redactKey`/`redactKeyBytes`) since a transport error embeds the full
+  (`redactKey`/`redactKeyBytes`, in both its raw and its percent-encoded
+  form — a transport error embeds the request URL, where `url.Values.Encode`
+  has escaped it, and today's `AIza…` keys being URL-safe is a property of
+  the key format rather than of the redaction) since a transport error embeds the full
   request URL and the key must never reach a log line through one; the
   redacting error keeps an `Unwrap`, so whether `errors.Is(err,
   context.Canceled)` works doesn't depend on whether a key happens to be
   configured. Both packages are tested against
   `httptest.Server` with fixtures under `testdata`, and those fixtures
   have two provenances worth telling apart when reading a failure.
+  `internal/googlebooks` also refuses a redirect that **leaves the host the
+  lookup started against**, which `internal/openlibrary`'s otherwise
+  identical `checkRedirect` does not have. The reason is a credential, not
+  a hop count: this client carries its key in the query string, and
+  net/http sets `Referer` on every hop from the previous request's full
+  URL — suppressing it only on https→http, so an ordinary https→https
+  redirect hands `?key=…` to whichever host answered, in a header. That is
+  worse than the log-line leak `redactKey` exists to prevent, and moving
+  the key to a header would not substitute for it, since Go forwards
+  non-sensitive headers across hosts. The same check closes two more: a
+  redirect off Google would otherwise make this client adopt the answering
+  host's whole response, which on the list request `plausibleMatch` gates
+  only by title and author — both supplied by that host — and on the
+  detail request nothing gates at all.
+  "Same host" is compared as a host and not as a string (`sameHost`):
+  case-insensitively, with the scheme's default port and an explicitly
+  written one treated alike, and a fully qualified trailing dot ignored.
+  A byte compare of `URL.Host` refuses all three, which is safe in the
+  sense that nothing wrong is admitted and unsafe in the one that matters —
+  the refusal surfaces as a *retryable* error, so a `Location` that merely
+  spells the same host differently would burn every retry attempt and
+  leave enrichment quietly answering nothing. A same-host downgrade off
+  TLS is refused separately, which reads as redundant and is not: the
+  default-port normalisation already refuses an ordinary https→http hop as
+  a port change, but a `Location` writing the port out on both sides
+  compares equal there. A refused redirect is still classified retryable
+  on both clients' lookup paths, which
+  `docs/backlog/2026090611-refused-redirect-is-retried.md` records.
   `internal/openlibrary`'s two `edition_*.json` are **live captures** of
   the Read API — they are what turned up the work-versus-edition defects
   `ByISBN` moved endpoint to fix, and the bare-`[]` no-match, neither of
-  which a hand-written fixture would have shown. The rest are shaped after
-  each API's stable, publicly documented response format instead, from
-  when those packages were written with no outbound network access
-  available. Each `_test.go` names which of its own fixtures is which at
+  which a hand-written fixture would have shown. **Every**
+  `internal/googlebooks` fixture is a live capture too, including the
+  three error bodies that settled the classification above and the two
+  captures of the same volume from both endpoints. Only
+  `internal/openlibrary`'s `search_*.json` are still shaped after the
+  documented response format, from when that package was written with no
+  outbound network access available. Each `_test.go` names which of its own fixtures is which at
   the top. Nothing here is hand-edited to fit a change: a fixture adjusted
   until the code passes tests the parser against its author's
   expectations rather than against the API — which is exactly how an ISBN
@@ -1713,7 +1829,12 @@ full design.
   yet", but a misspelled provider name means "asked for something
   specific and didn't get it", the kind of silent shortfall nobody
   notices for months. `GOOGLE_BOOKS_API_KEY` is optional and only `Warn`s
-  when absent (Google's own anonymous quota still works); its value never
+  when absent, though "optional" overstates it: the anonymous quota is
+  shared across every keyless caller of the API and has been observed
+  exhausted on every attempt, so a keyless deployment should expect this
+  provider to answer 429 and be skipped. A Warn rather than a startup
+  failure all the same, since browsing and Open Library both work without
+  it. Its value never
   reaches a log line, in `cmd/server` or inside `internal/googlebooks`
   itself.
   `enrichEnabled` — whether any provider resolved — is what the *UI* gets,
@@ -1769,6 +1890,19 @@ Plans in `docs/plans/completed/` are immutable: never edit one after it's
 moved there, even to fix a mistake found later. If a problem is discovered
 in a completed plan, write a new plan for the fix instead of rewriting the
 old one.
+
+The one edit a plan may take on its way *into* `completed/` is a
+**correction found while implementing it**, in the same commit as the
+move — because a plan whose instruction the implementation had to
+contradict is misleading to anyone who later reads the two side by side.
+Such an edit must **append**, never rewrite: leave the wrong instruction
+standing, and add a block below it saying what was tried and what refuted
+it. Rewriting it silently produces a plan that appears to have been right
+all along, which git cannot distinguish from the honest version — the
+rename shows as one similarity score either way, so the discipline is the
+only thing separating them.
+`docs/plans/completed/2026090608-googlebooks-live-fidelity.md`'s cover-size
+block is the worked example.
 
 ## Backlog
 

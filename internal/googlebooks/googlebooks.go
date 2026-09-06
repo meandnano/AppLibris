@@ -1,7 +1,9 @@
 // Package googlebooks is an enrich.Provider backed by the Google Books
 // Volumes API (https://www.googleapis.com/books/v1/volumes), per DESIGN.md's
-// provider choices for the metadata chain. Anonymous use is allowed at a low
-// quota; an optional API key raises it.
+// provider choices for the metadata chain. An API key is nominally
+// optional, but in practice required: unauthenticated requests are billed
+// to one Google-wide project whose daily quota was found already exhausted
+// on every attempt, days apart, answering 429 rather than results.
 package googlebooks
 
 import (
@@ -10,17 +12,28 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"library/internal/enrich"
 )
 
-// Timeout bounds one lookup end to end, mirroring internal/openlibrary's
-// Timeout — enrichment is a background nicety, not something a person is
-// waiting on, so a slow provider is skipped rather than waited out.
+// Timeout is http.Client.Timeout, so it bounds one *request* rather than
+// one lookup: a matched lookup issues two (see enrichVolume), and Resolve
+// may follow a no-match ByISBN with a Search, each of them retried by
+// enrich.WithRetry. Nothing here caps the total, and internal/enrich's
+// worker sets no per-job deadline either, so one book against this
+// provider can occupy the queue for several multiples of this.
+//
+// Left as a per-request bound rather than tightened, because the worker is
+// single and the queue has nothing waiting behind it that a whole-lookup
+// deadline would rescue. Sized short for the same reason
+// internal/openlibrary's is: enrichment is a background nicety, not
+// something a person is waiting on.
 const Timeout = 8 * time.Second
 
 const baseURL = "https://www.googleapis.com/books/v1"
@@ -44,6 +57,106 @@ const maxErrorBodyBytes = 512
 // response nothing here should be parsing anyway.
 const maxResponseBytes = 4 * 1024 * 1024
 
+// maxRedirects bounds how many hops a lookup follows. Setting CheckRedirect
+// at all replaces net/http's own default limit, so a policy that only
+// checked the scheme would follow a redirect chain forever.
+const maxRedirects = 5
+
+// checkRedirect bounds a lookup's hops and refuses one that leaves the host
+// the lookup started against. It is internal/openlibrary's policy of the
+// same name plus the host check, which that one does not have.
+//
+// The host check is the load-bearing half, and the reason is a credential
+// rather than a hop count. This client carries its API key in the query
+// string, and net/http sets Referer on every hop from the previous
+// request's full URL — suppressing it only on https→http, so an ordinary
+// https→https redirect hands "?key=…" to whatever host answered, in a
+// header. That is worse than the log-line leak the whole redactKey
+// apparatus exists to prevent: a key in a log stays on the box.
+//
+// It closes two more holes at the same time. A redirect off Google makes
+// this client adopt the answering host's entire response — and on the list
+// request internal/enrich's plausibleMatch would gate only its title and
+// authors,
+// which that host supplies. On the detail request nothing gates it at all.
+//
+// Refusing outright costs nothing measurable: neither the Volumes API nor
+// Google's cover host was observed to redirect cross-host. Moving the key
+// to a header would not substitute for this, since Go forwards
+// non-sensitive headers across hosts.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return fmt.Errorf("redirect scheme %q is not http or https", req.URL.Scheme)
+	}
+	// The credential clause refuses an empty via rather than passing it.
+	// net/http always supplies the requests already made, so this cannot
+	// happen — but it is the one clause guarding a credential, and a
+	// clause that fails open is one a future reuse can walk through.
+	if len(via) == 0 {
+		return fmt.Errorf("redirect with no originating request to compare against")
+	}
+	// Compared against via[0], the request this lookup made, rather than
+	// the previous hop. The two are equivalent — every hop is checked, so
+	// the host can never change and the previous hop's host is always the
+	// first's — but via[0] states the invariant the policy actually has:
+	// a lookup never leaves the host it started against.
+	if !sameHost(req.URL, via[0].URL) {
+		return fmt.Errorf("redirect to %q leaves the host the lookup started against", req.URL.Host)
+	}
+	// A same-host downgrade off TLS is refused too. The key does not leak
+	// on that hop — Go suppresses Referer https→http — but a policy added
+	// to protect a credential should not then hand the request itself to
+	// cleartext when refusing costs one clause.
+	//
+	// It reads as redundant and is not: the default-port normalisation
+	// above already refuses an ordinary https→http hop as a port change,
+	// 443 against 80, but a Location that writes the port out on both
+	// sides compares equal there and reaches this.
+	if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("redirect downgrades from https to %q", req.URL.Scheme)
+	}
+	return nil
+}
+
+// sameHost compares two URLs' authorities the way a host is actually the
+// same rather than the way two strings are: case-insensitively, with the
+// scheme's default port and an explicit one treated alike, and a fully
+// qualified trailing dot ignored.
+//
+// A byte compare of URL.Host would refuse every one of those, which is
+// safe in the sense that nothing is admitted wrongly and unsafe in the
+// sense that matters here: the refusal surfaces as a retryable error, so a
+// Location that merely spells the same host differently would burn every
+// retry attempt and leave enrichment quietly answering nothing.
+func sameHost(a, b *url.URL) bool {
+	return strings.EqualFold(canonicalHostname(a), canonicalHostname(b)) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+// canonicalHostname drops the trailing dot of a fully qualified name, which
+// names the same host as the form without it.
+func canonicalHostname(u *url.URL) string {
+	return strings.TrimSuffix(u.Hostname(), ".")
+}
+
+// effectivePort fills in the scheme's default, so an omitted port and an
+// explicitly written default one compare equal.
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch u.Scheme {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	}
+	return ""
+}
+
 // Client looks books up against the Google Books Volumes API.
 type Client struct {
 	baseURL    string
@@ -53,13 +166,14 @@ type Client struct {
 
 // New returns a Client with Timeout set on its own *http.Client, per
 // internal/resend's precedent of never relying on http.DefaultClient, which
-// has none at all. apiKey is optional — an empty string makes every request
-// anonymous, at Google's lower unauthenticated quota.
+// has none at all. apiKey is optional in the sense that an empty string
+// still builds a working client, not in the sense that it works: see the
+// package comment on the shared anonymous project's exhausted quota.
 func New(apiKey string) *Client {
 	return &Client{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: Timeout},
+		httpClient: &http.Client{Timeout: Timeout, CheckRedirect: checkRedirect},
 	}
 }
 
@@ -117,6 +231,9 @@ type volumesResponse struct {
 }
 
 type volume struct {
+	// ID names the volume on the single-volume endpoint, which is the only
+	// place the cover sizes above thumbnail exist — see enrichVolume.
+	ID         string     `json:"id"`
 	VolumeInfo volumeInfo `json:"volumeInfo"`
 }
 
@@ -136,25 +253,63 @@ type industryIdentifier struct {
 	Identifier string `json:"identifier"`
 }
 
-// imageLinks is the Volumes API's cover URLs, largest first. thumbnail is
-// the only one present on every volume that has a cover at all, but it is
-// roughly 128px wide — well under internal/cover's 400px target, which
-// never upscales — so the larger sizes are preferred when the volume
-// carries them and a Google-sourced cover is not needlessly blurry.
+// imageLinks is the Volumes API's cover URLs. thumbnail is the only one
+// present on every volume that has a cover at all, but it is roughly 128px
+// wide — a long edge under internal/cover's 400px target, which never
+// upscales — so a larger size is preferred when the volume carries one.
+//
+// extraLarge is deliberately absent, and it is the one a reader will want
+// to add back. Measured against three digitised volumes:
+//
+//	              long edge   bytes
+//	thumbnail       ~195       ~6-18 KB
+//	small           ~460      ~12-41 KB
+//	medium          ~880      ~30-124 KB
+//	large          ~1225      ~48-205 KB
+//	extraLarge     ~2670     ~350-800 KB
+//
+// enrich.MaxCoverBytes is 512 KiB and a cover past it is refused outright,
+// so extraLarge is the only size that can turn a good cover into *no*
+// cover — and it buys nothing, since cover.Store resizes to 400px on the
+// long edge and every size from medium up already clears that. Adding it
+// back trades a certain cover for a bigger one nobody sees.
 type imageLinks struct {
-	ExtraLarge string `json:"extraLarge"`
-	Large      string `json:"large"`
-	Medium     string `json:"medium"`
-	Small      string `json:"small"`
-	Thumbnail  string `json:"thumbnail"`
+	Large     string `json:"large"`
+	Medium    string `json:"medium"`
+	Small     string `json:"small"`
+	Thumbnail string `json:"thumbnail"`
 }
 
-// best picks the largest cover URL the volume offers, upgrading it to
-// https: Google answers these as plain http, and cover bytes that end up
-// served from /covers/ should not arrive over cleartext from a host that
-// serves TLS on the same name.
+// best picks the cover URL worth fetching — not the largest the volume
+// offers — upgrading it to https: Google answers these as plain http, and cover
+// bytes that end up served from /covers/ should not arrive over cleartext
+// from a host that serves TLS on the same name.
+//
+// Every candidate above Thumbnail comes from the single-volume endpoint;
+// the list endpoint names only smallThumbnail and thumbnail, whatever the
+// volume. That is what enrichVolume's second request is for.
+//
+// The shortcut to avoid: a thumbnail URL carries a zoom=1 parameter, and
+// rewriting it to zoom=2 or higher does return a larger JPEG. But for a
+// size a volume does not have, Google answers 200 image/jpeg with an
+// "image not available" placeholder — verified by fetching one. Nothing in
+// enrich.FetchCover or cover.Store can tell that from a cover, so the
+// covers directory would fill with grey placeholders that read as
+// successfully enriched. Only a URL Google itself named is safe to fetch.
 func (l imageLinks) best() string {
-	for _, candidate := range []string{l.ExtraLarge, l.Large, l.Medium, l.Small, l.Thumbnail} {
+	// medium first, not small, even though small's ~460px average also
+	// clears cover.Store's 400px long edge: that is an average over three
+	// volumes and an individual small can fall under it, where medium
+	// (~880px) never did. medium is the safe floor, so above it the order
+	// is smallest-first — large only throws away more pixels for more
+	// bytes — and below it, largest-first among the fallbacks.
+	//
+	// The sample is three volumes. best() returns one URL and
+	// enrich.FetchCover refuses a body over MaxCoverBytes outright rather
+	// than stepping down, so a medium past 512 KiB loses the cover with
+	// small and thumbnail unused in the same response. Not observed; the
+	// conclusion is only as good as the sample.
+	for _, candidate := range []string{l.Medium, l.Large, l.Small, l.Thumbnail} {
 		if candidate == "" {
 			continue
 		}
@@ -169,8 +324,9 @@ func (l imageLinks) best() string {
 	return ""
 }
 
-// search issues one GET against /volumes with q and turns the response into
-// Metadata, implementing the four network cases DESIGN.md draws a hard line
+// search issues a GET against /volumes with q and turns the response into
+// Metadata — plus, for a matched volume, the second request enrichVolume
+// makes. It implements the four network cases DESIGN.md draws a hard line
 // around: a 200 with no items and a defensive 404 are both "no match", nil
 // error; a 429, any 5xx, or a transport/timeout failure are errors the retry
 // decorator (internal/enrich) and the resolver's skip-and-continue both
@@ -202,9 +358,21 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		// A 403 is Google's over-quota and rejected-key answer as well as
-		// its forbidden one, and none of the three is helped by asking
-		// twice — only 429 and 5xx are.
+		// Measured against the live API rather than read off the docs: a
+		// rejected key is
+		// 400 (API_KEY_INVALID), an exhausted quota is 429 on both the
+		// per-day and the per-minute limit, and 403 is the service not
+		// being enabled for the project (SERVICE_DISABLED). So only the
+		// 429 and the 5xx are worth asking twice; 400 and 403 are
+		// configuration, and answer identically however often they are
+		// asked.
+		//
+		// The 429 is retried even when it is the per-day quota, which
+		// will not clear for hours. Google names which limit was hit in
+		// the body — quota_limit is defaultPerDayPerProject for the
+		// daily one — and sends no Retry-After at all, so telling them
+		// apart is possible but is a retry-policy decision rather than
+		// this classification's.
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			return enrich.Metadata{}, fmt.Errorf("googlebooks: unexpected status %d: %s: %w", resp.StatusCode, c.redactKeyBytes(body), enrich.ErrRetryable)
 		}
@@ -219,7 +387,116 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 		return enrich.Metadata{}, nil
 	}
 
-	return c.toMetadata(parsed.Items[0]), nil
+	matched := parsed.Items[0]
+	m := c.toMetadata(matched)
+	c.enrichVolume(ctx, matched.ID, &m)
+	return m, nil
+}
+
+// enrichVolume fills in what the list endpoint cannot answer, from the
+// single-volume endpoint for the same volume.
+//
+// Two fields differ between the two, and both were measured rather than
+// read: the list endpoint names only smallThumbnail and thumbnail — so
+// every cover from it is ~128px wide, whose long edge is under
+// internal/cover's 400px target, which never upscales — while the
+// single-volume endpoint carries small through extraLarge for a volume
+// Google has digitised. And the list endpoint's description arrives with
+// its markup already flattened, paragraph breaks included, where the
+// documented HTML form is the single-volume endpoint's — often different,
+// fuller text rather than the same text differently punctuated.
+//
+// The paragraph breaks reach books.description but not the page:
+// .detail__description sets no white-space, so HTML collapses them in the
+// read view and they are visible only in the edit textarea. Recorded in
+// docs/backlog/2026090610-description-paragraphs-do-not-render.md.
+//
+// The request is made for any matched volume that named an id, not only
+// one that also has a cover. Skipping a coverless volume would be free on
+// the cover half and would silently drop the description half, which is
+// the payoff for a book whose blurb is the thing worth having.
+//
+// It fails silently on purpose. A larger cover and a paragraph break are
+// niceties; the six text fields already in hand are the answer, and losing
+// them because a second request timed out would be the wrong trade. So
+// every failure leaves m exactly as the list response built it and is
+// logged at Debug — this runs once per matched volume, and a Warn per
+// enriched book teaches people to ignore Warns.
+func (c *Client) enrichVolume(ctx context.Context, id string, m *enrich.Metadata) {
+	if id == "" {
+		return
+	}
+
+	detail, err := c.volumeByID(ctx, id)
+	if err != nil {
+		slog.Debug("googlebooks: volume detail lookup failed", "volume_id", id, "error", err)
+		return
+	}
+	// A body describing some other volume is not an answer about this
+	// book, and nothing downstream would catch it: internal/enrich's
+	// plausibleMatch gates the Title and Authors of the *list* response,
+	// while the two fields taken here come from this one.
+	//
+	// An absent id is refused along with a wrong one. Treating "" as a
+	// pass would let the party being checked opt out of the check by
+	// omitting the field. The evidence that the real endpoint always
+	// answers with one is thinner than it sounds — testdata holds a single
+	// capture of this endpoint, volumes_detail.json, and it carries an id,
+	// as does every list capture's item — but a response shape that has
+	// never been observed is the right thing to refuse when admitting it
+	// costs the check.
+	if detail.ID != id {
+		slog.Debug("googlebooks: volume detail names a different volume", "requested", id, "answered", detail.ID)
+		return
+	}
+
+	// Each field is replaced only by a present answer, never by an absent
+	// one — this endpoint returns "" for a description plenty of volumes
+	// have on the list one. Present, not better: neither check compares
+	// sizes or quality, so if the list endpoint ever named a size above
+	// thumbnail, a detail response naming only thumbnail would replace it
+	// with the smaller one. Unreachable today, and stated rather than
+	// guarded because guarding it would be code with no way to test it
+	// against the real API.
+	if cover := detail.VolumeInfo.ImageLinks.best(); cover != "" {
+		m.CoverURL = cover
+	}
+	if description := plainText(detail.VolumeInfo.Description); description != "" {
+		m.Description = description
+	}
+}
+
+// volumeByID reads one volume from /volumes/{id}. The endpoint answers a
+// bare volume object — the same shape the list response nests — so it
+// decodes into the same type.
+func (c *Client) volumeByID(ctx context.Context, id string) (volume, error) {
+	reqURL := c.baseURL + "/volumes/" + url.PathEscape(id)
+	if c.apiKey != "" {
+		reqURL += "?" + url.Values{"key": {c.apiKey}}.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return volume{}, fmt.Errorf("build request: %w", c.redactKey(err))
+	}
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return volume{}, fmt.Errorf("request failed: %w", c.redactKey(err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		return volume{}, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, c.redactKeyBytes(body))
+	}
+
+	var parsed volume
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&parsed); err != nil {
+		return volume{}, fmt.Errorf("parse response: %w", err)
+	}
+	return parsed, nil
 }
 
 // redactKey scrubs a configured API key out of an error's text — request
@@ -235,7 +512,23 @@ func (c *Client) redactKey(err error) error {
 	if c.apiKey == "" || err == nil {
 		return err
 	}
-	return redactedError{err: err, text: strings.ReplaceAll(err.Error(), c.apiKey, "REDACTED")}
+	return redactedError{err: err, text: c.redactString(err.Error())}
+}
+
+// redactString removes the key in both the forms it can appear in. A
+// transport error embeds the request URL, where url.Values.Encode has
+// percent-escaped the key — so a literal substring match alone misses it
+// for any key containing a character that needs escaping. Today's Google
+// keys are "AIza" plus URL-safe characters, so the escaped form is
+// identical to the raw one and the literal match happens to work; that is
+// a property of the key format, not of this function, and it is not one to
+// rest a credential on.
+func (c *Client) redactString(s string) string {
+	s = strings.ReplaceAll(s, c.apiKey, "REDACTED")
+	if escaped := url.QueryEscape(c.apiKey); escaped != c.apiKey {
+		s = strings.ReplaceAll(s, escaped, "REDACTED")
+	}
+	return s
 }
 
 type redactedError struct {
@@ -250,7 +543,7 @@ func (c *Client) redactKeyBytes(body []byte) string {
 	if c.apiKey == "" {
 		return string(body)
 	}
-	return strings.ReplaceAll(string(body), c.apiKey, "REDACTED")
+	return c.redactString(string(body))
 }
 
 // toMetadata converts v, naming its cover's URL from the imageLinks
@@ -265,12 +558,42 @@ func (c *Client) toMetadata(v volume) enrich.Metadata {
 		Authors:       info.Authors,
 		Publisher:     info.Publisher,
 		PublishedDate: info.PublishedDate,
-		Language:      info.Language,
+		Language:      baseLanguage(info.Language),
 		ISBN:          bestISBN(info.IndustryIdentifiers),
 		Description:   plainText(info.Description),
 	}
 	m.CoverURL = info.ImageLinks.best()
 	return m
+}
+
+// baseLanguage reduces a language tag to its primary subtag, so
+// books.language holds one vocabulary. volumeInfo.language is BCP-47, not the ISO 639-1 code
+// internal/openlibrary's marcToISO639 produces: a scan of 188 live volumes
+// answered pt-BR 50 times and zh-CN 32, alongside plain en, ru, ja and sv.
+// Left alone, the column reads "pt" for a book Open Library answered and
+// "pt-BR" for the next one this provider did.
+//
+// A subtag cut rather than a mapping table, because Google's primary
+// subtag is already ISO 639-1 in every value observed — there is nothing
+// to translate, only a region to drop, and a table would be a second thing
+// to maintain that agreed with the identity function.
+//
+// It drops more than the region: zh-Hant and zh-Hans both become zh,
+// losing Traditional against Simplified, which is a real loss where
+// pt-BR against pt-PT is a mild one. Accepted for the same reason — the
+// column is one short code that three other writers fill without any
+// subtag at all, so keeping one here would make its meaning depend on
+// which source filled it.
+//
+// This does not make the column consistent on its own. internal/epub and
+// internal/fb2 pass their file's own value straight through, and EPUB's
+// dc:language is BCP-47 by specification, so a subtag can still arrive
+// from a file. Fixing that means one derivation shared by every writer,
+// which is a different change; see
+// docs/plans/completed/2026090608-googlebooks-live-fidelity.md.
+func baseLanguage(tag string) string {
+	base, _, _ := strings.Cut(strings.TrimSpace(tag), "-")
+	return strings.ToLower(base)
 }
 
 // bestISBN prefers the volume's ISBN-13 identifier, falling back to its
@@ -333,7 +656,13 @@ var blockTags = map[string]bool{
 // an author wrote rather than being stripped as a tag.
 func plainText(raw string) string {
 	if !strings.ContainsAny(raw, "<&") {
-		return raw
+		// Trimmed even on the fast path, so every return from this
+		// function is trimmed. A caller testing the result against "" to
+		// decide whether a provider said anything — enrichVolume does —
+		// would otherwise read a description of "   " as an answer and
+		// overwrite a real one with whitespace that sanitizeValue then
+		// trims to nothing, losing the field outright.
+		return trimBlank(raw)
 	}
 
 	var b strings.Builder
@@ -359,7 +688,32 @@ func plainText(raw string) string {
 	}
 
 	text := html.UnescapeString(b.String())
-	return strings.TrimSpace(collapseBlankLines(text))
+	return trimBlank(collapseBlankLines(text))
+}
+
+// zeroWidth are the characters that carry no ink and that unicode.IsSpace
+// does not call space, so strings.TrimSpace leaves them behind. A
+// description of nothing but one of them — "&#8203;" unescapes to exactly
+// that — would otherwise read as an answer to every "is this empty" test
+// between here and the column, and overwrite a real description with a
+// value that renders as nothing.
+const zeroWidth = "\u200b\u200c\u200d\ufeff"
+
+// trimBlank is strings.TrimSpace widened to the zero-width characters, so
+// "blank" here means "renders as nothing" rather than "is Unicode
+// whitespace".
+//
+// Composed with unicode.IsSpace rather than written as a cutset, which is
+// the distinction that matters: strings.Trim with a hand-listed cutset is
+// not TrimSpace, and spelling out the ASCII spaces plus a couple of
+// favourites drops the other seventeen runes IsSpace accepts — U+3000, the
+// ordinary CJK ideographic space, among them. Widening a trim by narrowing
+// it is an easy trade to make by accident, and this library holds Chinese
+// and Japanese books.
+func trimBlank(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(zeroWidth, r)
+	})
 }
 
 // tagAt reports the index just past the tag starting at raw[i] (which the

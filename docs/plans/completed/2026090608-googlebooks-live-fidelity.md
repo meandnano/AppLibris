@@ -345,7 +345,19 @@ comparison:
   `User-Agent`, same `maxResponseBytes` cap), decoded into that same
   `volume` type — the detail endpoint answers one volume object, the
   identical shape the list nests, so no second type is needed.
-- On success, `best()` over the detail response's `imageLinks`. On
+- On success, `best()` over the detail response's `imageLinks`.
+
+  **Correction found while implementing this, recorded here because the
+  instruction above is wrong as written.** `best()` must *not* prefer the
+  largest link. `extraLarge` runs ~350–800 KB, against
+  `enrich.MaxCoverBytes`' 512 KiB ceiling — and a cover past that cap is
+  refused outright, not downsized, so preferring it turns a good cover
+  into **no** cover. Written largest-first first, then measured: one of
+  three test volumes lost its cover entirely that way. Every size from
+  `medium` (~880px long edge) up already clears `cover.Store`'s 400px
+  target, so the order is `medium → large → small → thumbnail` and
+  `extraLarge` is dropped from the struct, the way `smallThumbnail`
+  already is. On
   anything else — non-200, malformed body, transport failure — **keep the
   list response's `thumbnail` and return no error.** A bigger cover is a
   nicety; a lookup that already has six good text fields must not fail

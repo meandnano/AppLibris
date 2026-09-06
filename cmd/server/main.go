@@ -75,7 +75,12 @@ func run(ctx context.Context) error {
 
 	googleBooksAPIKey := os.Getenv("GOOGLE_BOOKS_API_KEY")
 	if googleBooksAPIKey == "" && slices.Contains(metadataProviderNames, "googlebooks") {
-		slog.Warn("GOOGLE_BOOKS_API_KEY is not set: Google Books enrichment will use anonymous access at a low quota")
+		// The anonymous quota is shared across every keyless caller of
+		// this API and has been observed exhausted on every attempt, so
+		// the warning has to say the provider will most likely answer
+		// nothing rather than merely answer less. A Warn and not a startup
+		// failure: browsing and the other provider both work without it.
+		slog.Warn("GOOGLE_BOOKS_API_KEY is not set: Google Books enrichment will use the shared anonymous quota, which is routinely exhausted and answers 429")
 	}
 
 	// An unknown name fails startup outright (unlike a missing

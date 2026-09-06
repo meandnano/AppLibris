@@ -96,5 +96,10 @@ metadata" puts it back.
 providers to use and in what order. Set it to an empty value
 (`METADATA_PROVIDERS=`) to disable enrichment outright and make no
 outbound requests at all — the setting for a fully offline or LAN-only
-deployment. Google Books works anonymously at a low quota;
-`GOOGLE_BOOKS_API_KEY` is optional and raises that quota when set.
+deployment. Google Books nominally works anonymously at a low
+quota, but in practice expect to need `GOOGLE_BOOKS_API_KEY`: unauthenticated
+requests share one Google-wide project whose daily quota was found exhausted
+on every attempt, days apart, answering `429` rather than results. Enrichment
+degrades quietly when that happens — the provider is skipped and the other
+one still answers — so a keyless setup looks like it works and simply finds
+less.
