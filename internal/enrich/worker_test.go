@@ -248,7 +248,7 @@ func TestWorkerAllProvidersFailedMarksJobFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status != string(storage.EnrichmentFailed) {
-		t.Errorf("status = %q, want failed — no provider was reached, so nothing was learned about the book", status)
+		t.Errorf("status = %q, want failed — no provider answered, so nothing was learned about the book", status)
 	}
 	if reason != allProvidersFailedReason {
 		t.Errorf("failure_reason = %q, want %q", reason, allProvidersFailedReason)
@@ -764,5 +764,74 @@ func TestWorkerRecordsNoFieldsWhenNothingWasMissing(t *testing.T) {
 	}
 	if job.UpdatedFields != "" {
 		t.Errorf("UpdatedFields = %q, want empty", job.UpdatedFields)
+	}
+}
+
+// The outer ctx.Err() guard's own claim, which no other test makes: a run
+// abandoned by a shutdown must not have its snapshot recorded as the
+// verdict.
+//
+// The shape matters and is not the obvious one. Provider A answers
+// cleanly with nothing and provider B is still blocked when the shutdown
+// lands, so the run ends with an empty Values, Failed == 1 and Asked == 2:
+// the classification branch declines it (not every provider failed), and
+// with nothing to write there is no ApplyEnrichedFields call to fail on
+// the cancelled context either. Only this guard stands between that and
+// w.done — whose write deliberately outlives cancellation — marking an
+// abandoned run "done" with an empty result, which the page then renders
+// as "Nothing to add".
+//
+// A variant where A answers a real field looks like the sharper test and
+// is not: a non-empty Values reaches ApplyEnrichedFields, which fails on
+// the cancelled context and returns before any verdict is written, so it
+// passes with this guard deleted.
+func TestWorkerCancellationIsNotRecordedAsAVerdict(t *testing.T) {
+	db := openTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-7", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	entered := make(chan struct{})
+	a := &fakeProvider{name: "provider-a", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{}, nil
+	}}
+	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		close(entered)
+		<-ctx.Done()
+		return Metadata{}, ctx.Err()
+	}}
+	w := newTestWorker(t, db, []Provider{a, b})
+
+	done := make(chan struct{})
+	go func() {
+		w.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider-b was never called")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of cancellation")
+	}
+
+	var status string
+	if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(storage.EnrichmentRunning) {
+		t.Fatalf("status = %q, want running — an abandoned run is not a verdict", status)
 	}
 }

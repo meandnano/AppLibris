@@ -3,10 +3,13 @@
 ## Position in the sequence
 
 **Third of the enrichment trio**, and independent of the other two — it
-touches `internal/scanner` and `internal/storage`, not the resolver. It is
-placed last of the three because it is the least visible: reaching it takes
-a provider-supplied cover *and* a lost `COVERS_DIR`, where steps 01 and 02
-are wrong on the first press of the button.
+touches `internal/scanner`, `internal/storage` and, for Decision 3 alone,
+`internal/enrich`'s worker. It never touches the resolver. It is placed
+last of the three because its main subject is the least visible: reaching
+the dangling cover takes a provider-supplied cover *and* a lost
+`COVERS_DIR`, where steps 01 and 02 are wrong on the first press of the
+button. Decision 3, added later, is visible on the first press — but it
+belongs to this step's subject rather than to either of theirs.
 
 ## Context
 
@@ -183,6 +186,18 @@ Worth stating because it is the trap this plan exists to avoid twice over:
 a run where a provider offered **no** cover and nothing else was missing is
 still an honest "Nothing to add", and must not be swept into this.
 
+Two hand-offs for whoever implements it, both implied above and easy to get
+wrong:
+
+- **The condition is evaluated after the `storeCover` block, not before.**
+  A *successful* store adds `FieldCover` to `Values`, so checking earlier
+  would see an empty map for a run that is about to succeed.
+- **The mixed shape is caught too, and should be.** One provider fails,
+  another answers with nothing but a cover, and the store then fails: the
+  run wrote nothing and lost a cover it found, so it is `failed` for this
+  reason rather than step 01's — a provider did answer. Stating it so the
+  overlap reads as intended rather than as an accident.
+
 ## Storage
 
 One new method in `internal/storage/metadata.go`, beside the other
@@ -293,6 +308,15 @@ row-existence predicate, since the "a row exists, not a row naming a
 provider" rule is exactly what a later reader would try to tidy into a
 string comparison. `internal/storage`'s `field_sources` paragraph gains
 `ClearProviderCover` as a second reader-and-writer of the `cover` row.
+
+`internal/enrich`'s paragraph needs Decision 3, and specifically needs one
+existing sentence corrected rather than extended: it currently says a cover
+fetch or `Store` failure "is logged and the field is left out of `Values`,
+the same tolerance the scanner gives a cover that fails to store, since it
+must not fail a job whose text fields already resolved." After Decision 3
+that holds only when text fields *did* resolve — which is the whole
+distinction, and leaving the sentence unqualified would document the
+behaviour the step removes.
 
 ## DESIGN.md (on `init`)
 

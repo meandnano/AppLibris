@@ -45,11 +45,12 @@ const applyFailedReason = "could not save enriched metadata"
 // a done job with an empty result: that row is indistinguishable from an
 // honest "this book is in neither catalogue", and internal/web renders it
 // in the success treatment as "Nothing to add", telling a person there is
-// nothing left to find on a day nobody was reachable.
+// nothing left to find on a day nobody would answer.
 //
 // failed rather than a fourth terminal state because it is the job going
 // wrong in the same sense the other three reasons are — the job's whole
-// purpose is to ask providers, and a run that reached none did not do it —
+// purpose is to get an answer out of a provider, and a run that got none
+// did not do it —
 // and because failed already renders with a Retry button, which is the one
 // thing a person can usefully do about it.
 const allProvidersFailedReason = "no metadata provider could answer — try again"
@@ -209,7 +210,7 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		return
 	}
 
-	// A run that reached nobody is not a run that found nothing, and the
+	// A run nobody answered is not a run that found nothing, and the
 	// difference is the whole question the control exists to answer — see
 	// allProvidersFailedReason. Failed == Asked rather than Failed > 0: if
 	// one provider was throttled and another answered cleanly and had
@@ -234,7 +235,7 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		// reaches from a snapshot must not be recorded once ctx is
 		// already cancelled — during a shutdown every provider "fails",
 		// which is indistinguishable here from every provider being
-		// unreachable, and a permanent failed row would deny the job the
+		// unable to answer, and a permanent failed row would deny the job the
 		// retry RequeueInterruptedEnrichment exists to give it.
 		if ctx.Err() != nil {
 			return

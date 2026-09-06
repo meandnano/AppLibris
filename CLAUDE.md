@@ -298,8 +298,8 @@ full design.
   the opposite of `internal/sender`'s "retry is a new row" rule. And a
   vanished book *is* a `failed` job, not a `done` one with nothing to
   enrich — `failed` is reserved for the job itself going wrong (the book
-  gone, a write failed, or **every provider the run asked being
-  unreachable**), the same way it would be a bug for `internal/sender`
+  gone, a write failed, or **no provider the run asked being able to
+  answer**), the same way it would be a bug for `internal/sender`
   to call a send "delivered" because there was nothing left to send. The
   cascade normally removes a claimed job's row along with its book before
   this can be observed; it exists for the narrow claim-then-delete race.
@@ -565,7 +565,7 @@ full design.
   The job itself failing (the book vanished between
   enqueue and claim, a write failed) is a `failed` job; a provider having
   nothing to say — the ordinary case for most books against most
-  providers — is not, and a job that reached at least one provider still
+  providers — is not, and a job **at least one provider answered** still
   finishes `done`. A job in which **every provider it asked** failed is
   `failed` too, with `allProvidersFailedReason`: `Resolve` returns a
   `Resolution` carrying `Asked` (providers actually called — not
@@ -588,7 +588,7 @@ full design.
   rather than leaning on the post-`Resolve` guard above it, matching
   every other terminal write in `process`: during a shutdown every
   provider "fails" for exactly the reason above, which is
-  indistinguishable here from every provider being unreachable, and a
+  indistinguishable here from every provider being unable to answer, and a
   permanent `failed` row would deny the job the retry
   `RequeueInterruptedEnrichment` exists to give it. The earlier guard is
   still needed for its own reason — it stops a *partial* result being
