@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +59,9 @@ func TestSanitizeFTSQueryNeverProducesAnInvalidExpression(t *testing.T) {
 		"hel\x00lo",
 		"\x00\x00\x00",
 		"\x01\x02\x1f",
+		"-",
+		"--",
+		"978-0-",
 	}
 	for _, in := range inputs {
 		t.Run(in, func(t *testing.T) {
@@ -117,6 +121,13 @@ func TestSanitizeFTSQueryNormalizesISBNShapedInput(t *testing.T) {
 		{"0-306-40615-2", `"0306406152"*`},
 		{"030640615X", `"030640615X"*`},
 		{"0-306-40615-x", `"030640615X"*`}, // lower-case check character upper-cased
+
+		// Partway through typing a hyphenated one: two hyphens is the point
+		// from which the ISBN path takes over, so that the results don't go
+		// empty between the first character and the last.
+		{"978-0-85705", `"978085705"*`},
+		{"978-0-8", `"97808"*`},
+		{"978-0-", `"9780"*`}, // a trailing hyphen is what is on screen between two groups
 	}
 	for _, c := range cases {
 		if got := SanitizeFTSQuery(c.in); got != c.want {
@@ -126,17 +137,53 @@ func TestSanitizeFTSQueryNormalizesISBNShapedInput(t *testing.T) {
 }
 
 func TestSanitizeFTSQueryDoesNotTreatOrdinaryNumbersAsISBNs(t *testing.T) {
-	// Too short/long to be ISBN-10 or ISBN-13, so these fall through to the
-	// ordinary per-word path rather than the ISBN one.
+	// None of these is a complete ISBN or a hyphenated one being typed, so
+	// they fall through to the ordinary per-word path.
 	cases := []struct {
 		in, want string
 	}{
 		{"1984", `"1984"*`},
 		{"12345678901234", `"12345678901234"*`},
+		{"1984-2001", `"1984-2001"*`},                             // a date range, kept a title query by the two-hyphen rule
+		{"978085", `"978085"*`},                                   // an unpunctuated partial already prefix-matches as one token
+		{"Twenty-One Balloons", `"Twenty-One"* "Balloons"*`},      // a hyphenated title
+		{"978-0-85705-998-5-1-2-3", `"978-0-85705-998-5-1-2-3"*`}, // fourteen digits, over the cap
+		{"ISBN-978-0", `"ISBN-978-0"*`},                           // letters, so not digits and hyphens
 	}
 	for _, c := range cases {
 		if got := SanitizeFTSQuery(c.in); got != c.want {
 			t.Errorf("SanitizeFTSQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestSanitizeFTSQueryMatchesEveryStateOfATypedHyphenatedISBN asserts the
+// sequence rather than any one input: the defect this covers was that the
+// results went empty partway through typing and filled back in on the last
+// character, which no single query can show.
+func TestSanitizeFTSQueryMatchesEveryStateOfATypedHyphenatedISBN(t *testing.T) {
+	const (
+		typed   = "978-0-85705-998-5"
+		indexed = "9780857059985"
+	)
+	// From the second hyphen onward — before that the query is one or two
+	// groups, which stays a per-word query on purpose.
+	for i := len("978-0-"); i <= len(typed); i++ {
+		prefix := typed[:i]
+		digits := strings.Map(func(r rune) rune {
+			if r == '-' {
+				return -1
+			}
+			return r
+		}, prefix)
+
+		got := SanitizeFTSQuery(prefix)
+		want := `"` + digits + `"*`
+		if got != want {
+			t.Errorf("SanitizeFTSQuery(%q) = %q, want %q", prefix, got, want)
+		}
+		if !strings.HasPrefix(indexed, digits) {
+			t.Errorf("typing %q yielded %q, which is not a prefix of the indexed token %q", prefix, digits, indexed)
 		}
 	}
 }

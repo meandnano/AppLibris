@@ -158,7 +158,24 @@ full design.
   `MATCH` expression; `SanitizeFTSQuery` (also `internal/storage`, no DB
   access) is the one place raw user input becomes one, by quoting and
   prefix-terming every whitespace-separated token so no input, however
-  adversarial, can reach `MATCH` unescaped.
+  adversarial, can reach `MATCH` unescaped. Two query shapes skip that
+  per-word path and are normalised to bare digits instead, matching the
+  index's own `replace(replace(b.isbn, '-', ''), ' ', '')`: a **complete**
+  ISBN however punctuated (10 or 13 characters once hyphens and spaces are
+  stripped, a trailing `X` permitted — what a paste produces), and a
+  **partial hyphenated** one still being typed (digits and hyphens only, at
+  least two hyphens, at most thirteen digits). Both numbers are
+  load-bearing rather than round: a hyphenated ISBN has at least four
+  groups, so requiring two hyphens is what keeps `1984-2001` a title query
+  — under one hyphen it would become `"19842001"*` and match nothing, where
+  today it is the phrase `1984 2001` and finds *Collected Essays
+  1984–2001*. The partial shape accepts **hyphens but not spaces**, where
+  the complete one strips both: a space is the token separator for the
+  whole rest of the search box, and reading `1984 2001` as one number would
+  break a real two-term query to serve an input nobody types, since a
+  person entering an ISBN by hand types the hyphens printed on the book. An
+  unpunctuated partial (`978085`) needs neither shape — it is one digit
+  token, so the per-word path already produces the identical prefix term.
 - Single-book lookups, for the detail page: `FindBookByID` (nil, nil on an
   unknown id, same contract as `FindBookByContentHash`); `ListBookFiles`
   (a book's own locations, ordered by `file_path`, `missing_since`
