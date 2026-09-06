@@ -173,17 +173,22 @@ full design.
   for another" this step exists to avoid. Four digits is the same rule one
   group further along, where the hyphen count alone stops helping: it keeps
   `9-1-1` and `1-2-3` — both of which title books — title queries, and
-  costs the ISBN path nothing, since `978-0-` already carries four and no
-  shorter prefix filters a library down to anything. The **cost that
-  remains, recorded rather than left to be discovered**: a three-group
-  number past that floor is read as an ISBN, so an ISO-style date
-  (`2026-09-06`) no longer finds a title carrying it — separating the two
-  needs the number's meaning rather than its punctuation. The thirteen-digit
+  costs an ISBN-13 nothing, since `978-0-` already carries four digits.
+  **Two costs it does have, recorded rather than left to be discovered**,
+  both asserted: a three-group number past the floor is read as an ISBN, so
+  an ISO-style date (`2026-09-06`) no longer finds a title carrying it; and
+  an ISBN-10 whose registrant is two digits (`0-19-` OUP, `0-14-` Penguin)
+  reaches its second hyphen only three digits in, so it waits one keystroke
+  longer than an ISBN-13 before matching. No threshold separates either
+  from `9-1-1`, which is the same three digits and two hyphens — the trade
+  was decided on which recovers: the ISBN-10 matches on the very next
+  character, where `9-1-1` typed in full never would. The thirteen-digit
   cap is the one bound observable in a single direction only: every
   13-digit query of digits and hyphens strips to a complete ISBN, so the
-  complete shape takes it first and the partial one is never offered more
-  than twelve — lowering the cap changes no behaviour, raising it admits a
-  fourteen-digit query, and only that half can be tested. Plan
+  complete shape takes it first and **exactly thirteen never reaches the
+  partial one** — which is why lowering the cap to twelve changes no
+  behaviour, while raising it admits a fourteen-digit query and deleting it
+  as unreachable breaks a test. Plan
   `2026090604` specifies the hyphen count and the cap alone; the four-digit
   floor came out of review afterwards, and since a completed plan is
   immutable this is the only record of it. The partial shape
@@ -1370,7 +1375,8 @@ full design.
   and disables the whole control — with nothing indexed there is nothing to
   search. Its "Scan library" button and library path are the one part of
   that plate not built, planned in
-  `docs/plans/2026090605-empty-library-scan-action.md`. With JavaScript
+  `2026090605-empty-library-scan-action` (a path that moves once it
+  ships, so the id is what to search for). With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
   drift out of sync. A `q` that sanitizes to nothing is "not

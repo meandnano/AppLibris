@@ -22,9 +22,16 @@ const (
 
 	// minPartialISBNDigits keeps a short three-group number — "9-1-1",
 	// "1-2-3", both of which title books — a title query, which the hyphen
-	// count alone does not. It costs the ISBN path nothing: four digits is
-	// what "978-0-" already carries, and no shorter prefix filters a
-	// library down to anything worth looking at.
+	// count alone does not. No threshold separates those from a real ISBN
+	// prefix of the same length, since "0-19-" is three digits and two
+	// hyphens too, so the trade is decided by which recovers: an ISBN-10
+	// from a two-digit-registrant publisher (0-19 OUP, 0-14 Penguin) waits
+	// one more keystroke, where "9-1-1" typed in full would never match its
+	// book at all.
+	//
+	// So it costs an ISBN-13 nothing — "978-0-" already carries four digits
+	// — and costs those ISBN-10s exactly one dead keystroke at their second
+	// hyphen.
 	minPartialISBNDigits = 4
 )
 
@@ -96,6 +103,13 @@ func SanitizeFTSQuery(input string) string {
 // accepts a trailing X, a space-separated ISBN, and one written with fewer
 // hyphens than a partial needs ("978085705-9985").
 func normalizeIfISBNShaped(input string) (string, bool) {
+	// Trimmed once here rather than in each shape, so the two cannot drift
+	// apart on what they consider surrounding whitespace. It is redundant
+	// for neither: the partial shape rejects a space outright, and the
+	// complete shape's own Replacer only strips the ASCII one, leaving a
+	// wrapping U+00A0 to make a whole ISBN two characters too long.
+	input = strings.TrimSpace(input)
+
 	if isbn, ok := completeISBNShaped(input); ok {
 		return isbn, true
 	}
@@ -107,7 +121,7 @@ func normalizeIfISBNShaped(input string) (string, bool) {
 // are stripped — the same shape internal/epub's own bare-ISBN detection
 // accepts — returned stripped and upper-cased.
 func completeISBNShaped(input string) (string, bool) {
-	stripped := strings.NewReplacer("-", "", " ", "").Replace(strings.TrimSpace(input))
+	stripped := strings.NewReplacer("-", "", " ", "").Replace(input)
 	if len(stripped) != isbn10Length && len(stripped) != isbn13Length {
 		return "", false
 	}
@@ -124,7 +138,9 @@ func completeISBNShaped(input string) (string, bool) {
 }
 
 // partialISBNShaped accepts a hyphenated ISBN still being typed, so that the
-// results stop going empty from the second hyphen onward. Digits and
+// results stop going empty once the second hyphen and the fourth digit are
+// both on screen — which is the same keystroke for an ISBN-13 and the one
+// after it for an ISBN-10 whose registrant is two digits. Digits and
 // hyphens only, within the bounds the constants above set: no more digits
 // than a whole ISBN-13 has, and enough hyphens and digits that the query is
 // an identifier rather than a number a title happens to contain. A trailing
@@ -144,7 +160,7 @@ func completeISBNShaped(input string) (string, bool) {
 func partialISBNShaped(input string) (string, bool) {
 	var digits strings.Builder
 	hyphens := 0
-	for _, r := range strings.TrimSpace(input) {
+	for _, r := range input {
 		switch {
 		case r >= '0' && r <= '9':
 			digits.WriteRune(r)
@@ -157,10 +173,11 @@ func partialISBNShaped(input string) (string, bool) {
 	if hyphens < minPartialISBNHyphens {
 		return "", false
 	}
-	// The cap only ever refuses fourteen digits and up: a 13-digit query of
-	// digits and hyphens strips to a complete ISBN, so completeISBNShaped
-	// has already taken it and nothing reaching here carries more than
-	// twelve.
+	// The cap refuses fourteen digits and up, and never exactly thirteen: a
+	// 13-digit query of digits and hyphens strips to a complete ISBN, so
+	// completeISBNShaped has already taken it. That is why lowering the cap
+	// to twelve would change no behaviour — and why raising it, or deleting
+	// it as unreachable, changes plenty.
 	if digits.Len() < minPartialISBNDigits || digits.Len() > isbn13Length {
 		return "", false
 	}

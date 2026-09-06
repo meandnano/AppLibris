@@ -128,12 +128,19 @@ func TestSanitizeFTSQueryNormalizesISBNShapedInput(t *testing.T) {
 		{"978-0-8", `"97808"*`},
 		{"978-0-", `"9780"*`},                      // a trailing hyphen is what is on screen between two groups
 		{"978-0-85705-998-5-", `"9780857059985"*`}, // thirteen digits: the complete shape takes it, hyphens and all
+		{"0-19-8", `"0198"*`},                      // the keystroke that recovers a two-digit-registrant ISBN-10
 
 		// An accepted cost, recorded rather than discovered: a three-group
 		// number past the digit floor reads as an ISBN prefix, so a title
 		// carrying an ISO-style date stops being findable by it. Separating
 		// the two needs the number's meaning, not its punctuation.
 		{"2026-09-06", `"20260906"*`},
+
+		// Whitespace around either shape is trimmed before anything else,
+		// including the U+00A0 the complete shape's own Replacer would
+		// leave in place.
+		{" 978-0-85705 ", `"978085705"*`},
+		{"\u00a09780857059985\u00a0", `"9780857059985"*`},
 	}
 	for _, c := range cases {
 		if got := SanitizeFTSQuery(c.in); got != c.want {
@@ -163,6 +170,16 @@ func TestSanitizeFTSQueryDoesNotTreatOrdinaryNumbersAsISBNs(t *testing.T) {
 		{"---", `"---"*`},                            // and no number of hyphens changes that
 		{"978-0-85705 998", `"978-0-85705"* "998"*`}, // a space still separates tokens, hyphens either side of it or not
 		{"1984-85 2000-01", `"1984-85"* "2000-01"*`}, // the pair of ranges the no-space rule exists for
+
+		// The digit floor's own cost, on the population this feature
+		// serves: an ISBN-10 whose registrant is two digits (0-19 OUP, 0-14
+		// Penguin) reaches its second hyphen three digits in, so it waits
+		// one keystroke longer than an ISBN-13 does. No threshold separates
+		// it from "9-1-1" above, which is the same three digits and two
+		// hyphens — but that one would never match its book, where this one
+		// matches on the very next character (see the ISBN table).
+		{"0-19-", `"0-19-"*`},
+		{"0-14-", `"0-14-"*`},
 	}
 	for _, c := range cases {
 		if got := SanitizeFTSQuery(c.in); got != c.want {
@@ -196,7 +213,7 @@ func TestSanitizeFTSQueryMatchesEveryStateOfATypedHyphenatedISBN(t *testing.T) {
 		}
 
 		term := strings.TrimSuffix(strings.TrimPrefix(got, `"`), `"*`)
-		if term == got {
+		if term == got || term == "" {
 			t.Errorf("SanitizeFTSQuery(%q) = %q, want a single quoted prefix term", prefix, got)
 			continue
 		}
