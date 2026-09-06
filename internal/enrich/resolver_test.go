@@ -76,10 +76,10 @@ func TestResolveAsksForEmptyEmbeddedField(t *testing.T) {
 		t.Fatalf("provider calls = %d, want 1", p.calls)
 	}
 	if res.Values[storage.FieldPublisher] != "Ace Books" {
-		t.Errorf("res.Values[publisher] = %q, want %q", res.Values[storage.FieldPublisher], "Ace Books")
+		t.Errorf("values[publisher] = %q, want %q", res.Values[storage.FieldPublisher], "Ace Books")
 	}
 	if res.SourceName[storage.FieldPublisher] != "fake" {
-		t.Errorf("res.SourceName[publisher] = %q, want fake", res.SourceName[storage.FieldPublisher])
+		t.Errorf("sourceName[publisher] = %q, want fake", res.SourceName[storage.FieldPublisher])
 	}
 }
 
@@ -108,7 +108,7 @@ func TestResolveDoesNotAskForManuallyClearedField(t *testing.T) {
 		t.Errorf("sourceName contains publisher, want it absent")
 	}
 	if res.Values[storage.FieldDescription] != "A description" {
-		t.Errorf("res.Values[description] = %q, want %q (this field genuinely was missing)", res.Values[storage.FieldDescription], "A description")
+		t.Errorf("values[description] = %q, want %q (this field genuinely was missing)", res.Values[storage.FieldDescription], "A description")
 	}
 }
 
@@ -129,7 +129,7 @@ func TestResolveNeverOverwritesAPresentValue(t *testing.T) {
 		t.Errorf("values contains publisher = %q, want it absent — publisher already had a value", res.Values[storage.FieldPublisher])
 	}
 	if res.Values[storage.FieldDescription] != "New description" {
-		t.Errorf("res.Values[description] = %q, want %q", res.Values[storage.FieldDescription], "New description")
+		t.Errorf("values[description] = %q, want %q", res.Values[storage.FieldDescription], "New description")
 	}
 }
 
@@ -311,7 +311,7 @@ func TestResolveDiscardsAnswersForFieldsNotMissing(t *testing.T) {
 		t.Errorf("values contains publisher = %q, want it discarded", res.Values[storage.FieldPublisher])
 	}
 	if res.Values[storage.FieldDescription] != "A description" {
-		t.Errorf("res.Values[description] = %q, want %q", res.Values[storage.FieldDescription], "A description")
+		t.Errorf("values[description] = %q, want %q", res.Values[storage.FieldDescription], "A description")
 	}
 }
 
@@ -330,10 +330,10 @@ func TestResolveHandlesAuthorsAsAMissingField(t *testing.T) {
 	}
 	want := "First Author\nSecond Author"
 	if res.Values[storage.FieldAuthors] != want {
-		t.Errorf("res.Values[authors] = %q, want %q", res.Values[storage.FieldAuthors], want)
+		t.Errorf("values[authors] = %q, want %q", res.Values[storage.FieldAuthors], want)
 	}
 	if res.SourceName[storage.FieldAuthors] != "fake" {
-		t.Errorf("res.SourceName[authors] = %q, want fake", res.SourceName[storage.FieldAuthors])
+		t.Errorf("sourceName[authors] = %q, want fake", res.SourceName[storage.FieldAuthors])
 	}
 }
 
@@ -354,8 +354,8 @@ func TestResolveDoesNotAskForPresentAuthors(t *testing.T) {
 }
 
 // A cover is missing exactly like any other empty field, and a provider's
-// answer for it comes back through Resolve's separate res.CoverURL/res.CoverSource
-// return values rather than the values map — see Resolve's doc comment for
+// answer for it comes back through Resolution's separate CoverURL and
+// CoverSource rather than the values map — see Resolve's doc comment for
 // why.
 func TestResolveAsksForCoverWhenMissing(t *testing.T) {
 	book := storage.Book{ID: 1, Title: "Book", ISBN: "9780000000001"}
@@ -370,15 +370,15 @@ func TestResolveAsksForCoverWhenMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.CoverURL != wantCover {
-		t.Errorf("res.CoverURL = %q, want %q", res.CoverURL, wantCover)
+		t.Errorf("coverURL = %q, want %q", res.CoverURL, wantCover)
 	}
 	if res.CoverSource != "fake" {
-		t.Errorf("res.CoverSource = %q, want fake", res.CoverSource)
+		t.Errorf("coverSource = %q, want fake", res.CoverSource)
 	}
 	// The URL must never travel in values, which goes straight into
 	// columns — cover_path holds a stored file's path, never a remote URL.
 	if got, ok := res.Values[storage.FieldCover]; ok {
-		t.Errorf("res.Values[cover] = %q, want it absent — only the worker may put a path there", got)
+		t.Errorf("values[cover] = %q, want it absent — only the worker may put a path there", got)
 	}
 }
 
@@ -400,13 +400,13 @@ func TestResolveDoesNotAskForCoverWhenPresent(t *testing.T) {
 	// Empty here is what stops the worker downloading an image the book has
 	// no use for — the whole reason Metadata carries a URL, not bytes.
 	if res.CoverURL != "" {
-		t.Errorf("res.CoverURL = %q, want empty — the book already has a cover", res.CoverURL)
+		t.Errorf("coverURL = %q, want empty — the book already has a cover", res.CoverURL)
 	}
 	if res.CoverSource != "" {
-		t.Errorf("res.CoverSource = %q, want empty", res.CoverSource)
+		t.Errorf("coverSource = %q, want empty", res.CoverSource)
 	}
 	if res.Values[storage.FieldDescription] != "A description" {
-		t.Errorf("res.Values[description] = %q, want %q (this field genuinely was missing)", res.Values[storage.FieldDescription], "A description")
+		t.Errorf("values[description] = %q, want %q (this field genuinely was missing)", res.Values[storage.FieldDescription], "A description")
 	}
 }
 
@@ -437,10 +437,10 @@ func TestResolveKeepsFirstProvidersCoverAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.CoverURL != "https://covers.example/from-a.jpg" {
-		t.Errorf("res.CoverURL = %q, want provider-a's", res.CoverURL)
+		t.Errorf("coverURL = %q, want provider-a's", res.CoverURL)
 	}
 	if res.CoverSource != "provider-a" {
-		t.Errorf("res.CoverSource = %q, want provider-a", res.CoverSource)
+		t.Errorf("coverSource = %q, want provider-a", res.CoverSource)
 	}
 }
 

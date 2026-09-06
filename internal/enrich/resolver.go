@@ -175,25 +175,14 @@ func metadataValues(m Metadata) map[storage.MetadataField]string {
 	return values
 }
 
-// Resolution is everything one Resolve call learned. Values, SourceName,
-// CoverURL and CoverSource are what it found; Asked and Failed are what it
-// cost, which is what lets the caller tell an empty result meaning "this
-// book is in neither catalogue" from one meaning "neither catalogue
-// answered". Without that distinction the two are byte-identical in
-// enrichment_jobs, and the UI renders both as "Nothing to add" in the
-// success treatment — telling a person there is nothing left to find on a
-// day nobody was reachable.
+// Resolution is everything one Resolve call learned: Values, SourceName,
+// CoverURL and CoverSource are what it found — see Resolve's own comment
+// for how each is filled — while Asked and Failed are what it cost, which
+// is what lets the caller tell an empty result meaning "this book is in
+// neither catalogue" from one meaning "neither catalogue answered".
 type Resolution struct {
-	// Values holds each resolved field's value, and SourceName the name of
-	// whichever provider answered it — a job can legitimately pull fields
-	// from more than one, so the two are parallel maps rather than one
-	// shared source.
-	Values     map[storage.MetadataField]string
-	SourceName map[storage.MetadataField]string
-
-	// CoverURL and CoverSource are kept out of Values because a cover's
-	// stored path does not exist until the image has been downloaded — see
-	// Resolve's own comment on why that I/O is the caller's.
+	Values      map[storage.MetadataField]string
+	SourceName  map[storage.MetadataField]string
 	CoverURL    string
 	CoverSource string
 

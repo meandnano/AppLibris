@@ -203,11 +203,6 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 		// running rather than recording that partial result as the
 		// answer; RequeueInterruptedEnrichment picks it up at next
 		// startup and Resolve runs again from scratch.
-		//
-		// This check has to stay ahead of the classification below: during
-		// a shutdown every provider "fails" for exactly the reason above,
-		// so classifying first would write a permanent failed row for a
-		// job that recovery should have retried.
 		return
 	}
 
@@ -219,9 +214,28 @@ func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
 	// would hide a real answer behind a flaky neighbour and invite a retry
 	// that cannot improve on it. Asked > 0 keeps the two legitimate
 	// zero-provider cases — nothing missing, and METADATA_PROVIDERS= —
-	// honest successes. The Values check should be implied by the clause
-	// before it, and is written anyway for the day it stops being.
-	if res.Asked > 0 && res.Failed == res.Asked && len(res.Values) == 0 {
+	// honest successes.
+	//
+	// The last two clauses say "and produced nothing at all", which is
+	// implied by Failed == Asked today: a provider that errored is skipped
+	// before its answer is read, so it contributes neither a value nor a
+	// cover URL. They are written for the day that stops holding, and the
+	// cover half is the one easy to leave out — a cover-only answer has an
+	// empty Values and lives entirely in CoverURL, so a check that
+	// inspected Values alone would discard exactly the partial result this
+	// is meant to protect.
+	if res.Asked > 0 && res.Failed == res.Asked && len(res.Values) == 0 && res.CoverURL == "" {
+		// Guarded here rather than relying on the ctx.Err() check above
+		// staying immediately above: every other terminal write in process
+		// pairs its own guard with the write, and a verdict this one
+		// reaches from a snapshot must not be recorded once ctx is
+		// already cancelled — during a shutdown every provider "fails",
+		// which is indistinguishable here from every provider being
+		// unreachable, and a permanent failed row would deny the job the
+		// retry RequeueInterruptedEnrichment exists to give it.
+		if ctx.Err() != nil {
+			return
+		}
 		w.fail(ctx, job.ID, allProvidersFailedReason)
 		return
 	}

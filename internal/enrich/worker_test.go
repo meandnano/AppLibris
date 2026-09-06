@@ -97,11 +97,9 @@ func TestWorkerAppliesResolvedFieldsAndMarksDone(t *testing.T) {
 
 // With no providers configured, every job still resolves cleanly to done
 // having called nothing and changed nothing — the wiring stays exercised
-// which is what METADATA_PROVIDERS= configures.
-// METADATA_PROVIDERS= is a supported configuration, not a broken one, so a
-// job that asked nobody because there was nobody to ask is a success. It
-// is also what pins the Asked > 0 half of the worker's failure rule: with
-// Asked and Failed both zero, Failed == Asked holds vacuously.
+// which is what METADATA_PROVIDERS= configures. It also pins the Asked > 0
+// half of the worker's failure rule: at zero, Failed == Asked holds
+// vacuously.
 func TestWorkerWithNoProvidersResolvesDoneAndTouchesNothing(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -260,10 +258,7 @@ func TestWorkerAllProvidersFailedMarksJobFailed(t *testing.T) {
 	}
 }
 
-// Failed == Asked, not Failed > 0. One provider throttled while another
-// answers cleanly and has nothing is still a run that learned something
-// about the book, and failing it would hide a real answer behind a flaky
-// neighbour and invite a retry that cannot improve on it.
+// Pins Failed == Asked rather than Failed > 0; see process's comment for why.
 func TestWorkerOneProviderFailedOneAnsweredNothingMarksJobDone(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -285,8 +280,8 @@ func TestWorkerOneProviderFailedOneAnsweredNothingMarksJobDone(t *testing.T) {
 	w := newTestWorker(t, db, []Provider{a, b})
 	w.drain(ctx)
 
-	var status, reason string
-	if err := db.Read().QueryRow(`SELECT status, failure_reason FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status, &reason); err != nil {
+	var status, reason, fields string
+	if err := db.Read().QueryRow(`SELECT status, failure_reason, updated_fields FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status, &reason, &fields); err != nil {
 		t.Fatal(err)
 	}
 	if status != string(storage.EnrichmentDone) {
@@ -294,6 +289,9 @@ func TestWorkerOneProviderFailedOneAnsweredNothingMarksJobDone(t *testing.T) {
 	}
 	if reason != "" {
 		t.Errorf("failure_reason = %q, want empty", reason)
+	}
+	if fields != "" {
+		t.Errorf("updated_fields = %q, want empty", fields)
 	}
 }
 
@@ -348,13 +346,10 @@ func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
 // opposite of internal/sender, because Resolve is deterministic and safe
 // to re-run: see storage.RequeueInterruptedEnrichment's doc comment.
 //
-// It also guards the ordering of the two checks after Resolve. The fake
-// below returns ctx.Err(), which Resolve counts as a provider failure like
-// any other, so this run reaches process's failure classification with
-// Failed == Asked and no values — and must still be turned away by the
-// ctx.Err() check standing ahead of it. Swapping the two makes this test
-// fail with status "failed", which is the permanent row recovery should
-// have retried.
+// The fake below returns ctx.Err(), which Resolve counts as an ordinary
+// provider failure, so this run also reaches process's failure
+// classification with Failed == Asked and nothing found — the one path
+// that could turn a shutdown into a permanent failed row.
 func TestWorkerCancellationLeavesJobRunningForRecovery(t *testing.T) {
 	db := openTestDB(t)
 	ctx, cancel := context.WithCancel(context.Background())

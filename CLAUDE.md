@@ -331,7 +331,7 @@ full design.
   unexported helpers (`updateBookColumnTx`, `updateBookAuthorsTx`) that
   take a `source` parameter, with the public methods passing `"manual"`
   and `ApplyEnrichedFields` taking a `sourceName map[MetadataField]string`
-  instead of one shared `source` — `Resolve`'s own return value, passed
+  instead of one shared `source` — `Resolve`'s `SourceName`, passed
   straight through, so a job that pulled fields from more than one
   provider still records each field under whichever one actually answered
   it, all in the one transaction `ApplyEnrichedFields` runs as. Before
@@ -504,10 +504,10 @@ full design.
   representation `ApplyEnrichedFields` (`internal/storage`) and the web
   layer's author textarea already use, so the join-table write on the way
   in is `storage.ApplyEnrichedFields`'s job, not this package's. The
-  worker passes `Resolve`'s `values` and `sourceName` straight through to
+  worker passes `Resolution`'s `Values` and `SourceName` straight through to
   one `ApplyEnrichedFields` call — DESIGN.md's field-level merge means a
   single job can legitimately resolve fields from more than one provider,
-  and `sourceName` already carries each field's own answerer, so there is
+  and `SourceName` already carries each field's own answerer, so there is
   no grouping to do here; keeping every resolved field in one call is also
   what lets `ApplyEnrichedFields` apply (or skip, per its own re-check)
   the whole set as one transaction.
@@ -529,7 +529,7 @@ full design.
   list into one name; the list is cut at 100 for the same reason each name
   is capped.
   A cover is resolved the same way but kept out of that map: `Resolve`
-  returns it separately, as `coverURL`/`coverSource`, since `values` only
+  returns it separately, as `CoverURL`/`CoverSource`, since `Values` only
   carries strings that go straight into a column and a cover's path does
   not exist until the image has been downloaded and passed through
   `internal/cover.Store` — I/O `Resolve` deliberately never performs
@@ -557,33 +557,45 @@ full design.
   silently unstored, nothing naming the cause. It then
   converts it exactly like the scanner converts an embedded one
   (`cover.Store`, resized, JPEG, named by the book's content hash — never
-  the remote URL) before folding the resulting path into `values` under
+  the remote URL) before folding the resulting path into `Values` under
   `storage.FieldCover`; a fetch or `Store` failure only loses the cover —
   it is logged and the field is left out of
-  `values`, the same tolerance the scanner gives a cover that fails to
+  `Values`, the same tolerance the scanner gives a cover that fails to
   store, since it must not fail a job whose text fields already resolved.
   The job itself failing (the book vanished between
   enqueue and claim, a write failed) is a `failed` job; a provider having
   nothing to say — the ordinary case for most books against most
   providers — is not, and a job that reached at least one provider still
-  finishes `done`. A job that reached **none** of them is `failed` too,
-  with `allProvidersFailedReason`: `Resolve` returns a `Resolution`
-  carrying `Asked` (providers actually called — not configured, since the
-  early stop routinely skips some) and `Failed`, and the worker's rule is
-  `Asked > 0 && Failed == Asked`. `Failed == Asked` rather than
-  `Failed > 0` because one throttled provider beside one that answered
-  cleanly and had nothing is still a run that learned something, and
-  failing it would hide a real answer behind a flaky neighbour;
-  `Asked > 0` keeps the two honest zero-provider successes (nothing
-  missing, and `METADATA_PROVIDERS=`) out of it. Without this a run in
-  which every provider 429'd was stored byte-identically to an honest
-  no-match and rendered as "Nothing to add" in the *success* treatment —
-  a false statement to the one person who asked. The check's **position**
-  is load-bearing and is what the cancellation test pins: it must stay
-  *after* the post-`Resolve` `ctx.Err()` guard, because a shutdown makes
-  every provider "fail" for exactly the reason above, and classifying
-  first writes a permanent `failed` row for a job
-  `RequeueInterruptedEnrichment` should have retried. `enrichment_jobs.book_id` cascades on delete (unlike
+  finishes `done`. A job in which **every provider it asked** failed is
+  `failed` too, with `allProvidersFailedReason`: `Resolve` returns a
+  `Resolution` carrying `Asked` (providers actually called — not
+  configured, since the early stop routinely skips some) and `Failed`,
+  and the worker's rule is `Asked > 0 && Failed == Asked`, beside a
+  `len(Values) == 0 && CoverURL == ""` pair that is unreachable by
+  construction today (a provider that errored is skipped before its
+  answer is read, so it contributes neither) and kept for the day it
+  stops being — the cover half is the one easy to omit, since a
+  cover-only answer has an empty `Values` and lives entirely in
+  `CoverURL`. `Failed == Asked` rather than `Failed > 0` because one
+  throttled provider beside one that answered cleanly and had nothing is
+  still a run that learned something, and failing it would hide a real
+  answer behind a flaky neighbour; `Asked > 0` keeps the two honest
+  zero-provider successes (nothing missing, and `METADATA_PROVIDERS=`)
+  out of it. Without this a run in which every provider 429'd was stored
+  byte-identically to an honest no-match and rendered as "Nothing to add"
+  in the *success* treatment — a false statement to the one person who
+  asked. That branch **guards itself** with its own `ctx.Err()` check
+  rather than leaning on the post-`Resolve` guard above it, matching
+  every other terminal write in `process`: during a shutdown every
+  provider "fails" for exactly the reason above, which is
+  indistinguishable here from every provider being unreachable, and a
+  permanent `failed` row would deny the job the retry
+  `RequeueInterruptedEnrichment` exists to give it. The earlier guard is
+  still needed for its own reason — it stops a *partial* result being
+  recorded as the answer — but the classification no longer depends on
+  standing after it.
+
+  `enrichment_jobs.book_id` cascades on delete (unlike
   `send_log.book_id`, which must survive its book to keep the record a
   send happened): a queued or running enrichment job is a pending
   intention about a book, and once the book is gone the intention is
