@@ -38,7 +38,7 @@ func TestSearchBooksFindsByEachIndexedField(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			books, err := db.SearchBooks(ctx, SanitizeFTSQuery(c.query))
+			books, err := db.SearchBooks(ctx, SanitizeFTSQuery(c.query), BookPage{})
 			if err != nil {
 				t.Fatalf("SearchBooks(%q): %v", c.query, err)
 			}
@@ -62,7 +62,7 @@ func TestSearchBooksIsDiacriticInsensitive(t *testing.T) {
 		t.Fatalf("CreateBook García: %v", err)
 	}
 
-	books, err := db.SearchBooks(ctx, SanitizeFTSQuery("tokarczúk"))
+	books, err := db.SearchBooks(ctx, SanitizeFTSQuery("tokarczúk"), BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks accented query for unaccented stored name: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestSearchBooksIsDiacriticInsensitive(t *testing.T) {
 		t.Errorf("SearchBooks(tokarczúk) = %+v, want [%d]", books, tokarczukID)
 	}
 
-	books, err = db.SearchBooks(ctx, SanitizeFTSQuery("garcia"))
+	books, err = db.SearchBooks(ctx, SanitizeFTSQuery("garcia"), BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks unaccented query for accented stored name: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSearchBooksAndsTokensAcrossColumns(t *testing.T) {
 		t.Fatalf("CreateBook: %v", err)
 	}
 
-	matching, err := db.SearchBooks(ctx, SanitizeFTSQuery("Piranesi Clarke"))
+	matching, err := db.SearchBooks(ctx, SanitizeFTSQuery("Piranesi Clarke"), BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks title+author: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestSearchBooksAndsTokensAcrossColumns(t *testing.T) {
 		t.Errorf("SearchBooks(Piranesi Clarke) = %+v, want exactly the one book", matching)
 	}
 
-	notMatching, err := db.SearchBooks(ctx, SanitizeFTSQuery("Piranesi Tokarczuk"))
+	notMatching, err := db.SearchBooks(ctx, SanitizeFTSQuery("Piranesi Tokarczuk"), BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks title+wrong-author: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestSearchBooksOrdersBySortTitleNotInsertionOrder(t *testing.T) {
 		}
 	}
 
-	books, err := db.SearchBooks(ctx, SanitizeFTSQuery("Handbook"))
+	books, err := db.SearchBooks(ctx, SanitizeFTSQuery("Handbook"), BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestDeletingBookViaOrphanPruneRemovesFTSRow(t *testing.T) {
 
 	assertFTSCount(t, db, 1)
 
-	books, err := db.SearchBooks(ctx, SanitizeFTSQuery("Old Content"))
+	books, err := db.SearchBooks(ctx, SanitizeFTSQuery("Old Content"), BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestSearchBooksHandlesNULDerivedQueries(t *testing.T) {
 	// intercept) — this only pins that a *sanitized* embedded-NUL query,
 	// the shape that would actually reach here, doesn't error.
 	q := SanitizeFTSQuery("hel\x00lo world")
-	books, err := db.SearchBooks(ctx, q)
+	books, err := db.SearchBooks(ctx, q, BookPage{})
 	if err != nil {
 		t.Fatalf("SearchBooks(%q): %v — a NUL-derived query must never reach MATCH invalidly", q, err)
 	}
@@ -249,7 +249,7 @@ func TestSearchBooksFindsISBNRegardlessOfSourceFormat(t *testing.T) {
 
 	for _, query := range []string{"9780857059985", "978-0-85705-998-5"} {
 		t.Run(query, func(t *testing.T) {
-			books, err := db.SearchBooks(ctx, SanitizeFTSQuery(query))
+			books, err := db.SearchBooks(ctx, SanitizeFTSQuery(query), BookPage{})
 			if err != nil {
 				t.Fatalf("SearchBooks(%q): %v", query, err)
 			}

@@ -28,6 +28,16 @@ with the results already filtered server-side, using the exact same
 `?q=` URL the live version keeps in the address bar. That URL is
 shareable and bookmarkable either way.
 
+## Paging
+
+The library grid loads 48 books at a time and appends the next batch as
+you scroll. The count under the grid says how many are left.
+
+With JavaScript disabled the same element is an ordinary link: following
+it loads the next page as a whole page, and a "first page" link appears
+beside the search box to get back. Each page's URL carries its own
+position, so it can be bookmarked or shared like any other.
+
 ## Live updates
 
 A book dropped into the library directory normally appears within a few
@@ -58,8 +68,11 @@ quiet before a rescan runs.
 The server can fill in missing book metadata and fetch a cover, from Open
 Library and Google Books, for whichever fields a book's own file didn't
 provide — never overwriting an embedded value or one edited by hand.
-There's no UI to trigger it yet, so this only configures what a future
-enrichment run is allowed to do.
+Each book's detail page has a "Fetch metadata" button that queues the
+work and reports what it filled in; a field a provider supplied is marked
+with its source, so you can tell a guess from what the file itself said.
+Nothing is enriched automatically — a run is always something you asked
+for, on a book you chose.
 
 `METADATA_PROVIDERS` (default `openlibrary,googlebooks`) lists which
 providers to use and in what order. Set it to an empty value

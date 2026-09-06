@@ -1105,7 +1105,7 @@ func TestScanDerivesSortTitle(t *testing.T) {
 		t.Fatalf("Scan: %v", err)
 	}
 
-	books, err := db.ListBooks(ctx)
+	books, err := db.ListBooks(ctx, storage.BookPage{})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}
