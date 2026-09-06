@@ -374,6 +374,49 @@ throttled provider beside one that answered cleanly is still a run that
 learned something, and failing it would hide a real answer behind a flaky
 neighbour.
 
+A fifth case belongs in prose rather than in the table, because it is not
+something a provider reports: an answer the resolver judges **implausible**
+is treated as case one — an answer, not a failure. The title/author search
+returns whatever a remote ranking put first, and the books that reach it
+are the ones with least to match on: a book with no ISBN is the
+sparse-metadata case, and such a book's stored title is frequently the
+filename. So a `Search`-sourced answer must clear a similarity test before
+any of it is merged, while a `ByISBN` answer never faces one — an ISBN
+names one edition, so that answer is about this book by construction.
+
+The rule is **title match required, author overlap a veto and never a
+pass.** Both providers bind the author into the query, so an author match
+only confirms they honoured a constraint the resolver supplied; it says
+nothing about which of that author's books came back first. Reading it as
+an alternative — "titles match *or* authors match" — accepts any Stephen
+King novel for any Stephen King file, which is worse than having no test.
+
+It follows that most filename-titled books now resolve to nothing, and that
+is the intended outcome. Nothing available can establish that a file called
+`01 - Fellowship` is *The Fellowship of the Ring*. An empty field is
+recoverable — a person can fill it, a later run can try again — while a
+plausible wrong answer is written, provenanced under the provider's name,
+and by the `isMissing` rule above never reconsidered. Empty is recoverable;
+wrong is not.
+
+One field is withheld even from an answer that passes: a `Search`-sourced
+answer never supplies an **ISBN**. Every other field is a description that
+is roughly right or roughly wrong, but an ISBN is an identifier that either
+names this book or names a different one, and it is the lookup key every
+later run would use — so a wrong one compounds instead of sitting still.
+The consequence, worth stating because it reads as an oversight otherwise:
+enrichment no longer writes `isbn` at all. The field is only ever missing
+for a book that has none, such a book can only reach a provider by search,
+and there it is withheld — while a book that has one does not need it.
+
+The search path is also reached more often than before. An ISBN lookup that
+comes back a clean no-match means that catalogue lacks the edition, so the
+same provider is then asked by title; an ISBN lookup that *errors* is not
+followed up, since a 5xx says nothing about whether the ISBN is right and
+searching on it would accept a fuzzy answer because a host was briefly
+unreachable. Widening that path is exactly why the test above had to come
+with it.
+
 ### Provider interface
 
 Deliberately tiny:
@@ -401,8 +444,9 @@ paced only by their own backoff — sending a provider that had just
 answered 429 three requests inside one token, which is exactly when it
 must not.
 
-Two things the live APIs taught that this interface cannot express, both
-found by asking them rather than reading their docs:
+Three things the live APIs taught that this interface cannot express. The
+first two were found by asking them rather than reading their docs; the
+third by reading what the answer is actually worth:
 
 - Open Library's search endpoint answers about a **work**, not the
   edition an ISBN names. Its `language` field lists every language any
@@ -423,6 +467,15 @@ found by asking them rather than reading their docs:
   position Open Library was in when the above turned up. Tracked in
   `docs/backlog/2026090403-googlebooks-has-no-live-verification.md`
   rather than pretended away.
+- **A search endpoint answers with a ranking, and a ranking is not an
+  identification.** Both providers return their top hit for a title/author
+  query, which is the right shape for them — deciding whether that hit is
+  the book in hand needs the book, and only the resolver has it. So the
+  similarity test lives there rather than in either client, which also
+  keeps it testable against fakes exactly as this section asks. This is
+  the same lesson as the work-versus-edition one arrived at from the other
+  side: an ISBN identifies, a title merely describes, and the two deserve
+  different amounts of trust.
 
 ### Registration
 
