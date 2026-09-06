@@ -2011,10 +2011,11 @@ func TestScanLeavesTheCoverAloneWhenProvenanceIsUnreadable(t *testing.T) {
 	//
 	// And asserted on the *attempt*, not the outcome. "provider cover
 	// forgotten" only fires on the success path, which is exactly the path a
-	// rolled-back clear skips — so it too would pass under the bug. The
-	// substring below catches both that line and "clear provider cover
-	// failed", which is what makes the claim hold however a future clear is
-	// written.
+	// rolled-back clear skips — so asserting its absence would pass under
+	// the bug. "clear provider cover" matches the failure line the rollback
+	// does emit, which is what catches the attempt however a future clear is
+	// written. (It does not also match "provider cover forgotten"; that
+	// outcome is covered by the CoverPath assertion below.)
 	if got := logs.String(); !strings.Contains(got, "read cover provenance failed") {
 		t.Errorf("sweep did not log the provenance failure:\n%s", got)
 	}
@@ -2099,10 +2100,16 @@ func TestScanKeepsAHealthyProviderCover(t *testing.T) {
 }
 
 // The guard against an invariant this package cannot enforce: cover_retry
-// set beside a provider row. maybeRegenerateCover skips its stat entirely
-// when the marker is set, so without confirming the file is actually
-// unusable, a present and perfectly good provider cover would be thrown
-// away on the strength of the marker alone.
+// set beside a provider row, for a book whose file holds no embedded cover.
+// maybeRegenerateCover skips its stat entirely when the marker is set, so
+// without confirming the file is actually unusable, a present and perfectly
+// good provider cover would be thrown away on the strength of the marker
+// alone.
+//
+// Only that half. A book in the same state whose file *does* hold an
+// embedded cover never reaches the guard — it re-extracts and overwrites
+// the path instead. See forgetUnregenerableCover for why that is left
+// alone.
 //
 // The state should not arise — updateBookColumnTx clears the marker in the
 // same statement that writes a path — but that invariant lives in another
@@ -2405,5 +2412,73 @@ func TestScanForgetsOrphanedProviderProvenance(t *testing.T) {
 	}
 	if after.CoverRetry {
 		t.Error("CoverRetry still set; the next sweep would come straight back")
+	}
+}
+
+// Decision 1's discriminator, from the other side: a book with **no**
+// provenance row must be warned about, never forgotten. Forgetting is
+// reserved for a provider's cover, and this one is the scanner's own.
+//
+// The existing regeneration tests do not cover this. Their books have an
+// embedded cover, so they re-extract and return long before reaching the
+// branch — satisfying the plan's "the existing re-extract path still runs"
+// sentence without guarding the line it is about. Dropping `fromProvider`
+// left all fourteen packages green until this existed.
+func TestScanNeverForgetsAScannerCover(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	bookPath := filepath.Join(libDir, "book.epub")
+	writeTestEPUB(t, bookPath, "Book One", "Author A", testCoverImage(t))
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	sources, err := db.FieldSourcesForBook(ctx, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sources[storage.FieldCover]; ok {
+		t.Fatal("fixture is wrong: a scanner-extracted cover must carry no provenance row")
+	}
+
+	// The thumbnail goes, and the book is replaced — at identical size and
+	// mtime, so the cheap check still skips re-indexing — with one holding
+	// no embedded cover. The read then succeeds and returns nothing, which
+	// is what routes this book to the branch at all.
+	if err := os.Remove(book.CoverPath); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(bookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestEPUB(t, bookPath, "Book One", "Author A", nil)
+	if err := os.Truncate(bookPath, info.Size()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(bookPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureLogs(t)
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+
+	after, err := db.FindBookByID(ctx, book.ID)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath == "" {
+		t.Error("cover_path was cleared for a book with no provenance row")
+	}
+	if got := logs.String(); strings.Contains(got, "provider cover forgotten") {
+		t.Errorf("forgot a scanner cover:\n%s", got)
+	}
+	if got := logs.String(); !strings.Contains(got, "regenerate cover failed") {
+		t.Errorf("the sweep should have warned instead:\n%s", got)
 	}
 }

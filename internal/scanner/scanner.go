@@ -419,13 +419,22 @@ func forgetUnregenerableCover(ctx context.Context, db *storage.DB, book *storage
 	}
 	_, fromProvider := sources[storage.FieldCover]
 
-	// Confirmed unusable before clearing, not assumed. The stat above is
-	// skipped entirely when cover_retry is set, so without this a book
-	// carrying that marker beside a provider row would have a present,
-	// perfectly good cover thrown away. That pairing should not occur —
-	// updateBookColumnTx clears the marker whenever it writes a path — but
-	// the invariant lives in another package and nothing here would notice
-	// it breaking.
+	// Confirmed unusable before clearing, not assumed. The stat in
+	// maybeRegenerateCover is skipped entirely when cover_retry is set, so
+	// without this a book carrying that marker beside a provider row could
+	// have a present, perfectly good cover thrown away.
+	//
+	// It covers the books that reach here, which is not every book in that
+	// state: one whose file *does* still hold an embedded cover never
+	// arrives, because re-extraction succeeds and UpdateBookCoverPath
+	// overwrites the path — orphaning the provider's file rather than
+	// forgetting it. That overwrite predates this branch and is at least
+	// self-consistent now that the same write drops the provenance row, so
+	// it is left alone rather than half-fixed here.
+	//
+	// The pairing should not occur at all — updateBookColumnTx clears the
+	// marker whenever it writes a path — but the invariant lives in another
+	// package and nothing here would notice it breaking.
 	if fromProvider && coverFileDefinitelyGone(book.CoverPath) {
 		// The observed path is passed through so the write can refuse a
 		// cover that arrived while this sweep was parsing.
@@ -436,6 +445,11 @@ func forgetUnregenerableCover(ctx context.Context, db *storage.DB, book *storage
 		}
 		if cleared {
 			slog.Info("provider cover forgotten", "book_id", book.ID, "cover_path", book.CoverPath)
+		} else {
+			// Refused because the path moved under this sweep — correct, and
+			// a no-op, but an operator asking why an eligible-looking book
+			// was left alone has nothing to read otherwise.
+			slog.Debug("provider cover unchanged", "book_id", book.ID, "observed_path", book.CoverPath)
 		}
 		return
 	}
@@ -462,14 +476,17 @@ func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Boo
 
 	coverBytes, err := readEmbeddedCover(sourcePath, matchedSuffix(sourcePath))
 	if err != nil || len(coverBytes) == 0 {
-		// Nothing to re-extract. That is established here rather than
-		// inferred from provenance, because the inference does not hold: a
-		// book can carry an embedded cover *and* a provider row, if
-		// cover.Store failed when the book was first seen (leaving
+		// Re-extraction produced nothing usable, by one of two routes the
+		// callee separates: the file holds no cover (len == 0), or the
+		// question was never answered (err). Only the first can justify
+		// forgetting anything.
+		//
+		// It is tried before provenance is consulted at all, because "there
+		// is a provider row" never implied "there is nothing to
+		// re-extract": a book can carry an embedded cover *and* a provider
+		// row, if cover.Store failed when it was first seen (leaving
 		// cover_retry set and no cover row, since setEmbeddedFieldSourcesTx
-		// never writes one) and enrichment then supplied a cover of its
-		// own. Clearing such a book on the strength of the row alone would
-		// discard a cover that really was regenerable.
+		// never writes one) and enrichment then supplied a cover of its own.
 		forgetUnregenerableCover(ctx, db, book, sourcePath, err)
 		return
 	}

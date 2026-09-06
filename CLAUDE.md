@@ -109,8 +109,8 @@ full design.
   render an empty field fragment pointing at `/books/0/metadata/`, where
   a name nobody may edit should simply 404. `UpdateBookField` still
   refuses `FieldCover` outright alongside `authors` as a second guard, and
-  `ApplyEnrichedFields` is the only writer that *creates* one
-  (`ClearProviderCover`, below, is the only one that removes it), storing
+  `ApplyEnrichedFields` is the only writer that *creates* one — two remove
+  it, `ClearProviderCover` and `UpdateBookCoverPath`, both below — storing
   a fetched cover's
   on-disk path (never a remote URL) under the answering provider's name
   through the same `updateBookColumnTx`/`fieldIsStillMissingTx` path every
@@ -334,11 +334,23 @@ full design.
   introduced with inline editing — a field absent from the returned map
   (never embedded, never edited) reads back as an empty source, which the
   resolver's missing-field rule already treats as not-`manual`.
-  `ClearProviderCover` is the `cover` row's only other writer beside
-  `ApplyEnrichedFields`, and the only one that removes it: it empties
-  `cover_path`, clears `cover_retry` and deletes that one row, in one
-  transaction, so a provider-fetched cover whose stored file has gone reads
-  as no cover at all. `cover_retry` goes with it because the marker means
+  `ClearProviderCover` is one of two writers that *remove* the `cover` row
+  (`UpdateBookCoverPath` is the other, for the scanner's own re-extraction —
+  see `internal/scanner` below): it empties `cover_path`, clears
+  `cover_retry` and deletes that one row, in one transaction, so a
+  provider-fetched cover whose stored file has gone reads as no cover at
+  all.
+  It takes the **path the caller observed** and refuses to blank anything
+  else, which is the part of the signature that surprises: the scanner
+  decides from a snapshot and then stats, parses a whole book file and
+  reads provenance before the write lands, and an enrichment run finishing
+  inside that window would otherwise have its fresh cover thrown away. It
+  is the staleness `fieldIsStillMissingTx` closes for every other field.
+  The returned bool therefore means *cleared*, not *exists* — an unknown
+  book and a moved path give the same "nothing to do here" answer. Plan
+  `2026090603` specifies `ClearProviderCover(ctx, bookID, at)`; the guard
+  came out of review afterwards, and since a completed plan is immutable
+  this is the only record of the divergence. `cover_retry` goes with it because the marker means
   "retry the extraction" and there is nothing to extract — the same pairing
   `UpdateBookCoverPath` makes in the other direction — and the row goes
   because a provider's name beside an empty `cover_path` is a claim about a
