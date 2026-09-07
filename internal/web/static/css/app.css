@@ -712,12 +712,13 @@ a.masthead__link:hover {
   opacity: 0.85;
 }
 
-/* Both buttons are disabled for exactly one reason — their own job is in
-   flight — and they dim by different amounts while it is. Neither value was
-   ever chosen against the other, so this is a difference to leave alone
-   rather than a distinction to read anything into; collapsing the two is a
-   restyle, not a tidy-up. Same specificity as the rule above and later in
-   the file, so it wins. */
+/* The enrichment button — this intent's only user — dims to 0.55 where the
+   send button dims to 0.85, both disabled for the one reason, their own job
+   being in flight. Neither number was chosen against the other, so matching
+   them is a restyle rather than a tidy-up; the flip side is that a later
+   control reaching for --tertiary inherits a value that was only ever about
+   enrichment. Same specificity as the rule above and later in the file, so
+   it wins. */
 .button--tertiary:disabled {
   opacity: 0.55;
 }

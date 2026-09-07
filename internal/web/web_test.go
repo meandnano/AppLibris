@@ -1045,7 +1045,12 @@ func TestButtonClassesInMarkupHaveRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read app.css: %v", err)
 	}
-	named := regexp.MustCompile(`\b(?:button|spinner)(?:--[a-z]+)?\b`)
+	// The modifier has to admit digits and further hyphens, or a name like
+	// button--icon-only is captured short and reported missing, while a
+	// mistyped spinner--sm2 backtracks to bare spinner and passes — the
+	// guard blocking a real class and waving through the failure it exists
+	// to catch.
+	named := regexp.MustCompile(`\b(?:button|spinner)(?:--[a-z][a-z0-9-]*)?\b`)
 	seen := make(map[string]bool)
 	for _, path := range embeddedFiles(t, templateFS, "templates") {
 		b, err := fs.ReadFile(templateFS, path)
