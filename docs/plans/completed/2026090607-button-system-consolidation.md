@@ -113,6 +113,23 @@ its `:disabled` rule (`opacity: 0.55`) survive, since the disabled
 treatment is what "no provider configured" renders and it is more subdued
 than `.send__button:disabled`'s `0.85` on purpose.
 
+**Correction, found while implementing.** The clause above starting "since
+the disabled treatment" is wrong, and the reason for keeping `0.55` is not
+the reason given. "No provider configured" renders
+`<p class="enrich__disabled">` and no button at all — the whole `<form>` is
+in the `{{else}}` branch. The enrichment button carries `disabled` only
+under `{{if .EnrichPending}}`, and `EnrichPending` is set for `queued` and
+`running` alone, which is exactly the shape `SendPending` has for `queued`
+and `sending`. So both buttons are disabled for one reason each, the same
+reason — their own job is in flight — and `0.55` against `0.85` is an
+unexamined divergence between two controls rather than a considered
+contrast between a standing condition and a wait.
+
+The instruction survives its own justification: both values are still kept,
+because picking one would be a restyle and this step is pixel-identical
+except for the primary foreground. Only the stated reason changes, and the
+CSS comment states the corrected one.
+
 ## Decision 2: `.spinner` with a size modifier
 
 `.send__spinner` and `.enrich__spinner` collapse to `.spinner` plus

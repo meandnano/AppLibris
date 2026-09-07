@@ -642,6 +642,101 @@ a.masthead__link:hover {
   font-style: italic;
 }
 
+/* ---------- buttons ---------- */
+
+/* One button system for the send control, the enrichment control and the
+   inline metadata editors — one system rather than one per control, so the
+   next control has no arbitrary choice to make. Cancel is an <a>, so the
+   base rule has to undo link decoration.
+
+   --primary's foreground is var(--bg-raised) and must stay a token: #fff
+   reads as the obvious literal because it is what --bg-raised resolves to
+   in light theme, but --accent is a light tan in dark theme, where white
+   on it falls to 2.9:1 — under even the 3:1 large-text floor. The token
+   tracks the theme, holding 5.8:1 light and 6.1:1 dark. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 8px 14px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+/* --md and --lg size themselves by padding alone, so the base's minimum is
+   cleared rather than allowed to round either of them up. */
+.button--md {
+  min-height: 0;
+  padding: 9px 16px;
+}
+
+.button--lg {
+  min-height: 0;
+  padding: 11px 20px;
+}
+
+.button--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg-raised);
+}
+
+.button--secondary {
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--fg-muted);
+}
+
+.button--tertiary {
+  border-color: var(--rule);
+  background: var(--bg-raised);
+  color: var(--fg);
+}
+
+.button--tertiary:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.button:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+/* The enrichment button — this intent's only user — dims to 0.55 where the
+   send button dims to 0.85, both disabled for the one reason, their own job
+   being in flight. Neither number was chosen against the other, so matching
+   them is a restyle rather than a tidy-up; the flip side is that a later
+   control reaching for --tertiary inherits a value that was only ever about
+   enrichment. Same specificity as the rule above and later in the file, so
+   it wins. */
+.button--tertiary:disabled {
+  opacity: 0.55;
+}
+
+.spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--accent-soft);
+  border-top-color: currentcolor;
+  border-radius: 50%;
+  animation: search-spin 0.7s linear infinite;
+}
+
+.spinner--sm {
+  width: 10px;
+  height: 10px;
+}
+
 /* ---------- send control (plate 06) ---------- */
 
 /* One block, min-height held constant so the page never jumps as it
@@ -690,44 +785,6 @@ a.masthead__link:hover {
 
 .send__picker:disabled {
   opacity: 0.5;
-}
-
-.send__button {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 11px 20px;
-  border: 1px solid var(--accent);
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  cursor: pointer;
-}
-
-.send__button--primary {
-  background: var(--accent);
-  color: #fff;
-}
-
-.send__button--secondary {
-  background: transparent;
-  border-color: var(--rule);
-  color: var(--fg-muted);
-}
-
-.send__button:disabled {
-  cursor: default;
-  opacity: 0.85;
-}
-
-.send__spinner {
-  width: 11px;
-  height: 11px;
-  border: 1.5px solid var(--accent-soft);
-  border-top-color: currentcolor;
-  border-radius: 50%;
-  animation: search-spin 0.7s linear infinite;
 }
 
 .send__hint {
@@ -1050,41 +1107,6 @@ a.masthead__link:hover {
   }
 }
 
-/* The editable fields' Save/Cancel pair. Deliberately separate from
-   .send__button, which is the same idea at a different size and is left
-   alone here rather than refactored underneath a just-shipped control —
-   see docs/backlog for folding the two together. Cancel is an <a>, so the
-   base rule has to undo link decoration. */
-.button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  min-height: 34px;
-  padding: 8px 14px;
-  border: 1px solid var(--rule);
-  background: transparent;
-  color: var(--fg-muted);
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.button--primary {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--bg-raised);
-}
-
-.button--secondary {
-  border-color: var(--rule);
-  background: transparent;
-  color: var(--fg-muted);
-}
-
 .editable__read {
   display: inline-flex;
   align-items: baseline;
@@ -1270,40 +1292,6 @@ a.masthead__link:hover {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-}
-
-.enrich__button {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 9px 16px;
-  border: 1px solid var(--rule);
-  background: var(--bg-raised);
-  color: var(--fg);
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  cursor: pointer;
-}
-
-.enrich__button:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.enrich__button:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.enrich__spinner {
-  width: 10px;
-  height: 10px;
-  border: 1.5px solid var(--accent-soft);
-  border-top-color: currentcolor;
-  border-radius: 50%;
-  animation: search-spin 0.7s linear infinite;
 }
 
 .enrich__hint {

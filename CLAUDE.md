@@ -1452,6 +1452,35 @@ full design.
   for the one case that needs a rendered body and a non-200 together: a
   rejected edit answering 422 with the editor and its message, where an
   `http.Error` would swap the editor away and lose what was typed.
+- There is **one** button system in `app.css` — `.button` with `--md`/`--lg`
+  sizes and `--primary`/`--secondary`/`--tertiary` intents, plus `.spinner`
+  and `.spinner--sm` — shared by the send control, the enrichment control
+  and the inline metadata editors, each of which grew its own near-identical
+  copy before this absorbed all three. Two neighbours stay outside it and
+  are not oversights: `.search__spinner` is toggled by `htmx-request` and
+  coloured against the input, sharing only the `search-spin` keyframes, and
+  `.send__remove` is a borderless text affordance rather than a button.
+  `--primary`'s foreground is `var(--bg-raised)` and **must stay a token**:
+  `#fff` is what that token resolves to in light theme and so reads as the
+  obvious simplification, but `--accent` is a light tan in dark theme,
+  where white on it measures 2.9:1 — under even the 3:1 large-text floor,
+  on the primary action of the whole application. The token holds 5.8:1 in
+  light and 6.1:1 in dark. The block comment above `.button` carries the
+  argument; this is the pointer to it.
+  Two things there are load-bearing and read as tidy-ups: `--md`/`--lg`
+  reset the base's `min-height`, without which the enrichment button gains
+  a pixel, and `.button--tertiary:disabled` beats `.button:disabled` on
+  source order alone, so grouping the `--tertiary` rules together silently
+  reverts it. The plan's contrast table reads ~7.0:1 for its two
+  light-theme cells where the measured figure is 5.8:1, and its Decision 1
+  attributes the enrichment button's dimmer `:disabled` to the
+  "no provider configured" state, which renders no button at all — the
+  plan carries an appended correction for the second; both leave its
+  conclusions standing. Two tests guard the rename in each direction: no
+  retired class name survives in any template or stylesheet, and every
+  button or spinner class the markup names has a rule — a mistyped modifier
+  otherwise renders as a bare `.button`, losing a control's size, ground
+  and disabled treatment with every handler test still green.
 - Search-as-you-type is `GET /{$}` extended, not a separate route: a `q`
   parameter narrows the grid, and htmx (vendored at
   `internal/web/static/js/htmx.min.js`, version pinned in a comment at the

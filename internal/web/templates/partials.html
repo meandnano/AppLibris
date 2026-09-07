@@ -200,8 +200,8 @@
         {{end}}
       </select>
       {{end}}
-      <button class="send__button {{if .SendButtonPrimary}}send__button--primary{{else}}send__button--secondary{{end}}" type="submit"{{if .SendPending}} disabled{{end}}>
-        {{if .SendPending}}<span class="send__spinner" aria-hidden="true"></span>{{end}}
+      <button class="button button--lg {{if .SendButtonPrimary}}button--primary{{else}}button--secondary{{end}}" type="submit"{{if .SendPending}} disabled{{end}}>
+        {{if .SendPending}}<span class="spinner" aria-hidden="true"></span>{{end}}
         {{.SendButtonLabel}}
       </button>
     </div>
@@ -286,8 +286,8 @@
   <p class="enrich__disabled">Metadata providers are not configured</p>
   {{else}}
   <form class="enrich__form" method="post" action="/books/{{.ID}}/enrich" hx-post="/books/{{.ID}}/enrich" hx-target="#enrich" hx-swap="outerHTML">
-    <button class="enrich__button" type="submit"{{if .EnrichPending}} disabled{{end}}>
-      {{if .EnrichPending}}<span class="enrich__spinner" aria-hidden="true"></span>{{end}}
+    <button class="button button--md button--tertiary" type="submit"{{if .EnrichPending}} disabled{{end}}>
+      {{if .EnrichPending}}<span class="spinner spinner--sm" aria-hidden="true"></span>{{end}}
       {{.EnrichButtonLabel}}
     </button>
     {{if not .Enrichment}}
