@@ -70,6 +70,10 @@ func run(ctx context.Context) error {
 	if watchSettle < 0 {
 		return fmt.Errorf("parse WATCH_SETTLE: must not be negative: %s", watchSettle)
 	}
+	requireFetchMetadata, err := strconv.ParseBool(envOrDefault("REQUIRE_FETCH_METADATA", "true"))
+	if err != nil {
+		return fmt.Errorf("parse REQUIRE_FETCH_METADATA: %w", err)
+	}
 
 	metadataProviderNames := metadataProviderNames(os.LookupEnv)
 
@@ -148,7 +152,20 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
-	mux.Handle("/", web.Routes(svc, coversDir, sendEnabled, enrichEnabled))
+	// The UI's cross-site guard reads Sec-Fetch-Site, which browsers send
+	// only to an HTTPS or localhost origin, so the service is documented as
+	// requiring an HTTPS gateway in front with this listener reachable only
+	// through it. Failing closed by default is what makes a deployment that
+	// breaks the requirement show up in the log instead of silently running
+	// without the guard; the opt-out keeps a one-line tripwire.
+	routes := web.Routes(svc, coversDir, sendEnabled, enrichEnabled)
+	if requireFetchMetadata {
+		routes = web.RequireFetchMetadata(routes)
+	} else {
+		slog.Warn("REQUIRE_FETCH_METADATA=false: state-changing requests without fetch metadata are admitted, so cross-site protection depends on the listener being unreachable from any browser except through an HTTPS gateway")
+		routes = web.WarnMissingFetchMetadata(routes)
+	}
+	mux.Handle("/", routes)
 
 	srv := &http.Server{
 		Addr:    addr,

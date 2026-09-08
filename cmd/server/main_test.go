@@ -151,6 +151,7 @@ func TestRunRejectsBadWatchConfiguration(t *testing.T) {
 		{"negative settle", "WATCH_SETTLE", "-5s"},
 		{"unparseable settle", "WATCH_SETTLE", "soon"},
 		{"unparseable enabled", "WATCH_ENABLED", "sometimes"},
+		{"unparseable fetch metadata requirement", "REQUIRE_FETCH_METADATA", "maybe"},
 		{"unknown metadata provider", "METADATA_PROVIDERS", "bogus"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

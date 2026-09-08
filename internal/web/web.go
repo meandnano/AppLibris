@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"library/internal/service"
 	"library/internal/storage"
@@ -45,19 +46,6 @@ func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled b
 	return mux
 }
 
-// sameSiteOnly rejects a state-changing request the browser itself reports
-// as cross-site. The library has no login, so a request's network position
-// is the only thing between the collection and everyone else: a page on any
-// origin can reach a LAN or localhost server its author cannot, and a
-// form-encoded POST gets there with no CORS preflight to stop it. Sending a
-// book is exactly the action worth stealing that way — the attachment goes
-// to an address in the request body.
-//
-// Sec-Fetch-Site is what separates the two cases, and a page cannot forge
-// it: the browser sets it. A request carrying no fetch metadata is allowed
-// through, since a client that sends none (curl, a script, a browser older
-// than the header) is not the ambient-authority vector this guards, and
-// failing closed there would cost the UI for no security gain.
 // isHTMXFragment reports whether r wants a fragment rather than a whole
 // page. htmx sets HX-Request on every request it issues, including the one
 // it makes restoring a history entry that has fallen out of its cache —
@@ -69,6 +57,23 @@ func isHTMXFragment(r *http.Request) bool {
 	return r.Header.Get("HX-Request") != "" && r.Header.Get("HX-History-Restore-Request") == ""
 }
 
+// sameSiteOnly rejects a state-changing request the browser itself reports
+// as cross-site. The library has no login, so a request's network position
+// is the only thing between the collection and everyone else: a page on any
+// origin can reach a LAN or localhost server its author cannot, and a
+// form-encoded POST gets there with no CORS preflight to stop it. Sending a
+// book is exactly the action worth stealing that way — the attachment goes
+// to an address in the request body.
+//
+// Sec-Fetch-Site is what separates the two cases, and a page cannot forge
+// it: the browser sets it. It sets it only for a potentially trustworthy
+// origin — HTTPS, or localhost — so over plain HTTP on a LAN address the
+// header is absent from every request, cross-site ones included. This
+// wrapper therefore answers only the question it can: a request that says
+// "cross-site" is refused, and one that says nothing is passed on. Whether
+// saying nothing is acceptable is a property of the deployment, decided by
+// RequireFetchMetadata or WarnMissingFetchMetadata, one of which cmd/server
+// wraps around the whole handler.
 func sameSiteOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get("Sec-Fetch-Site") {
@@ -78,6 +83,71 @@ func sameSiteOnly(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "cross-site request", http.StatusForbidden)
 		}
 	}
+}
+
+// RequireFetchMetadata refuses, with a 403, a state-changing request that
+// carries no fetch metadata at all. sameSiteOnly cannot tell a cross-site
+// request from a same-origin one when the browser sends no Sec-Fetch-Site,
+// and browsers send none to a plain-HTTP origin — so the service requires
+// an HTTPS gateway in front of it, with the plain listener reachable only
+// by that gateway, and this wrapper is what makes a deployment that
+// violates the requirement visible. Every browser released since 2023
+// sends the header over HTTPS, so a mutation arriving without it is either
+// a script or a listener exposed over plain HTTP.
+//
+// Each rejection is logged at Warn rather than once: a person whose edit
+// or send was refused needs the log to say why, and a flood here is the
+// symptom of exactly the exposure the wrapper exists to surface.
+//
+// REQUIRE_FETCH_METADATA=false in cmd/server swaps this for
+// WarnMissingFetchMetadata. Reads pass through both untouched.
+func RequireFetchMetadata(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isStateChanging(r) && !hasFetchMetadata(r) {
+			slog.Warn("refused a state-changing request carrying no fetch metadata: the service is being reached over plain HTTP or by a script, and cross-site protection needs an HTTPS gateway in front — REQUIRE_FETCH_METADATA=false admits such requests anyway",
+				"method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			http.Error(w, "request carries no fetch metadata", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// WarnMissingFetchMetadata is RequireFetchMetadata's opt-out: it admits
+// every request and logs one Warn, the first time a state-changing request
+// arrives with no fetch metadata, so the log carries a single line saying
+// cross-site protection is not in force for requests reaching the service
+// that way. Once per wrapper rather than per request, because here the
+// requests are admitted and a script posting routinely would otherwise
+// write the same line forever.
+func WarnMissingFetchMetadata(next http.Handler) http.Handler {
+	var once sync.Once
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isStateChanging(r) && !hasFetchMetadata(r) {
+			once.Do(func() {
+				slog.Warn("admitted a state-changing request carrying no fetch metadata: cross-site protection is not in force for requests reaching the service this way (REQUIRE_FETCH_METADATA=false)",
+					"method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			})
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isStateChanging reports whether r's method can change state. The safe
+// methods are exempt because fetch metadata guards ambient-authority
+// writes: a cross-site GET's response is one the browser already refuses
+// to hand to the page that made it.
+func isStateChanging(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
+}
+
+func hasFetchMetadata(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Site") != ""
 }
 
 // bookCard is one library-grid entry shaped for the template: a

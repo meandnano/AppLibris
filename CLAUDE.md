@@ -1685,11 +1685,39 @@ full design.
   the collection and everyone else: any page in the user's browser can
   reach a LAN or localhost server its author cannot, and a form-encoded
   POST needs no CORS preflight to do it — with the attachment's
-  destination address sitting in the request body. A request carrying no
-  fetch metadata at all is allowed through, since a client that sends
-  none (curl, a script, a browser predating the header) isn't the
-  ambient-authority vector this guards, and failing closed there would
-  cost the UI for no security gain.
+  destination address sitting in the request body.
+  **That header is only sent to a potentially trustworthy origin** — HTTPS,
+  or localhost — so over plain HTTP on a LAN or tailnet address it is absent
+  from every request, cross-site ones included, and `sameSiteOnly` on its
+  own admits everything. The service therefore has a **deployment
+  requirement**, in two parts that only work together: an HTTPS gateway in
+  front (Tailscale Serve, or any TLS-terminating reverse proxy; the app's
+  redirects are relative paths, so it is agnostic to the scheme it is
+  fronted by), and the plain listener bound so that nothing but that
+  gateway can reach it — `ADDR=127.0.0.1:8080` when the proxy runs on the
+  host, an unpublished container port on a shared Docker network when it
+  runs as a sidecar. A listener published on the LAN beside an HTTPS front
+  is the requirement half-met, which is the same as unmet.
+  Two wrappers in `web.go`, one of which `cmd/server` puts around the whole
+  handler, are what make a violated requirement visible rather than silent.
+  `RequireFetchMetadata` (the default, `REQUIRE_FETCH_METADATA=true`)
+  refuses any non-GET/HEAD/OPTIONS request with no `Sec-Fetch-Site` at all
+  with a 403, logging each refusal at Warn — every browser released since
+  2023 sends the header over HTTPS, so a mutation without it is a script or
+  an exposed plain listener, and a person whose edit was refused needs the
+  log to say so. `WarnMissingFetchMetadata` (`REQUIRE_FETCH_METADATA=false`)
+  admits everything and logs one Warn per process on the first such
+  request, a tripwire rather than a guard. `sameSiteOnly` itself still
+  passes an empty header through, deliberately: it answers only the question
+  it can ("the browser said cross-site"), and the opt-out mode depends on
+  that. The two `sameSiteOnly` reasons a deployment might opt out — a
+  browser older than the header, a scripted client — are real and rare, and
+  neither is the ambient-authority vector the guard exists for.
+  The HTTPS requirement also closes DNS rebinding against the unchecked
+  `Host` header, which a review item once tracked: a rebound hostname
+  fails certificate validation against an HTTPS origin, and the plain
+  listener is not reachable from a browser at all. That is why there is no
+  `Host` allowlist and no backlog item asking for one.
 - Enrichment's surface is three affordances and no more, because this is
   the one step in the sequence with **no mockup** — the handoff's seven
   plates never cover it and DESIGN.md designs the mechanism without a
@@ -1830,7 +1858,12 @@ full design.
   so the directory has one shape regardless of which side produced a
   thumbnail) runs in the background alongside the `SCAN_INTERVAL`-timed (default
   `15m`) periodic rescan, with missing-file grace period `MISSING_GRACE`
-  (default `24h`). `WATCH_ENABLED` (default `true`) and `WATCH_SETTLE`
+  (default `24h`). `REQUIRE_FETCH_METADATA` (default `true`, rejected as
+  unparseable like `WATCH_ENABLED`) picks which of `internal/web`'s two
+  fetch-metadata wrappers goes around the UI handler — see the deployment
+  requirement under `internal/web`; `false` also logs a startup Warn, since
+  a deployment that opts out has taken on the responsibility the wrapper
+  would otherwise enforce. `WATCH_ENABLED` (default `true`) and `WATCH_SETTLE`
   (default `5s`, rejected as negative like `MISSING_GRACE`) configure the
   watcher; disabling it leaves exactly the pre-watcher behaviour, which is
   what a mount whose delivery probe reports silence wants. `periodicScan`

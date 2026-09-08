@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1071,4 +1072,107 @@ func TestButtonClassesInMarkupHaveRules(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The two fetch-metadata wrappers are what turn the deployment requirement
+// (an HTTPS gateway in front, the plain listener unreachable otherwise)
+// into something the log can report as violated. Both are tested against a
+// stub next handler rather than Routes, since what they decide is
+// independent of any route and Routes itself must keep admitting an empty
+// header for the opt-out mode to mean anything.
+func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		method    string
+		fetchSite string
+		wantCode  int
+		wantNext  bool
+	}{
+		{"POST with no header", http.MethodPost, "", http.StatusForbidden, false},
+		{"POST same-origin", http.MethodPost, "same-origin", http.StatusOK, true},
+		{"POST none", http.MethodPost, "none", http.StatusOK, true},
+		// Refusing cross-site is sameSiteOnly's job, not this wrapper's;
+		// it must pass the request on so that guard still gets to answer.
+		{"POST cross-site", http.MethodPost, "cross-site", http.StatusOK, true},
+		{"GET with no header", http.MethodGet, "", http.StatusOK, true},
+		{"HEAD with no header", http.MethodHead, "", http.StatusOK, true},
+		{"OPTIONS with no header", http.MethodOptions, "", http.StatusOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			handler := RequireFetchMetadata(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+			}))
+
+			req := httptest.NewRequest(tc.method, "/books/1/enrich", nil)
+			if tc.fetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if called != tc.wantNext {
+				t.Errorf("next called = %v, want %v", called, tc.wantNext)
+			}
+		})
+	}
+}
+
+func TestRequireFetchMetadataLogsEveryRefusal(t *testing.T) {
+	logged := captureLog(t)
+	handler := RequireFetchMetadata(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	for range 2 {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/books/1/send", nil))
+	}
+
+	if got := strings.Count(logged.String(), "REQUIRE_FETCH_METADATA"); got != 2 {
+		t.Errorf("logged %d refusals naming the env var, want 2:\n%s", got, logged.String())
+	}
+}
+
+func TestWarnMissingFetchMetadataAdmitsAndWarnsOnce(t *testing.T) {
+	logged := captureLog(t)
+	calls := 0
+	handler := WarnMissingFetchMetadata(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+	}))
+
+	// A request that does carry metadata is not what the tripwire is for
+	// and must not be the one that trips it.
+	withMetadata := httptest.NewRequest(http.MethodPost, "/books/1/send", nil)
+	withMetadata.Header.Set("Sec-Fetch-Site", "same-origin")
+	handler.ServeHTTP(httptest.NewRecorder(), withMetadata)
+	if logged.Len() != 0 {
+		t.Fatalf("a same-origin POST tripped the warning:\n%s", logged.String())
+	}
+
+	for range 3 {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/books/1/send", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200: this wrapper admits everything", rec.Code)
+		}
+	}
+
+	if calls != 4 {
+		t.Errorf("next called %d times, want 4", calls)
+	}
+	if got := strings.Count(logged.String(), "REQUIRE_FETCH_METADATA=false"); got != 1 {
+		t.Errorf("warned %d times, want exactly once:\n%s", got, logged.String())
+	}
+}
+
+// captureLog routes the default slog logger into a buffer for the rest of
+// the test, restoring the previous logger on cleanup.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+	return &buf
 }
