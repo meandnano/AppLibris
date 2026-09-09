@@ -64,6 +64,91 @@ func TestOpenBoundsReadPool(t *testing.T) {
 	}
 }
 
+// The driver applies a busy timeout only when the DSN names one, and its
+// pragma syntax has changed before — a misspelt name is applied silently
+// as nothing rather than rejected, so this reads it back on a connection
+// from each pool instead of trusting the DSN string.
+func TestOpenSetsBusyTimeoutOnBothPools(t *testing.T) {
+	db := openTestDB(t)
+
+	var readTimeout, writeTimeout int
+	if err := db.read.QueryRow(`PRAGMA busy_timeout`).Scan(&readTimeout); err != nil {
+		t.Fatalf("read busy_timeout: %v", err)
+	}
+	if err := db.write.QueryRow(`PRAGMA busy_timeout`).Scan(&writeTimeout); err != nil {
+		t.Fatalf("write busy_timeout: %v", err)
+	}
+	if readTimeout != 5000 {
+		t.Errorf("read pool busy_timeout = %d, want 5000", readTimeout)
+	}
+	if writeTimeout != 5000 {
+		t.Errorf("write pool busy_timeout = %d, want 5000", writeTimeout)
+	}
+}
+
+// Without a busy timeout, a writer opened on a second *DB against the same
+// file fails immediately with "database is locked" while another
+// connection holds the write lock. With one, it waits and succeeds. The
+// process's own write pool is a single connection that database/sql
+// already queues behind, so reaching SQLite's actual lock — rather than
+// Go's pool queuing — needs a second *DB opened on the same file, as a
+// second process (a backup tool, the sqlite3 CLI) would appear to SQLite.
+func TestWriteWaitsForAnExternalLockInsteadOfFailing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "library.db")
+
+	db1, err := Open(path)
+	if err != nil {
+		t.Fatalf("open first DB: %v", err)
+	}
+	defer db1.Close()
+
+	db2, err := Open(path)
+	if err != nil {
+		t.Fatalf("open second DB: %v", err)
+	}
+	defer db2.Close()
+
+	holderStarted := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderErr := make(chan error, 1)
+
+	go func() {
+		holderErr <- db1.Write(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO authors (name) VALUES ('lock holder')`); err != nil {
+				return err
+			}
+			close(holderStarted)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderStarted
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		close(releaseHolder)
+	}()
+
+	start := time.Now()
+	err = db2.Write(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO authors (name) VALUES ('second writer')`)
+		return err
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("second Write on a lock held by another connection: %v (waited %s)", err, elapsed)
+	}
+	if elapsed < 400*time.Millisecond {
+		t.Errorf("second Write returned after %s, want it to have waited for the ~500ms lock", elapsed)
+	}
+
+	if err := <-holderErr; err != nil {
+		t.Fatalf("first Write: %v", err)
+	}
+}
+
 func TestOpenIsIdempotent(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "library.db")
 

@@ -48,7 +48,17 @@ func Open(path string) (*DB, error) {
 		}
 	}
 
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+	// busy_timeout(5000): modernc.org/sqlite applies a busy timeout only
+	// when the DSN names one, and defaults to zero — any lock contention
+	// then fails instantly with "database is locked" rather than waiting.
+	// In-process contention is not the target (the write pool's single
+	// connection and WAL's reader/writer separation already avoid it); an
+	// external locker is — a backup tool's shared lock, someone opening the
+	// file in the sqlite3 CLI, or WAL recovery after a crash holding a
+	// brief exclusive lock. Five seconds is SQLite's own conventional
+	// value and covers all three while still failing a genuinely
+	// long-running external reader rather than hanging a request on it.
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)"
 
 	read, err := sql.Open("sqlite", dsn)
 	if err != nil {
