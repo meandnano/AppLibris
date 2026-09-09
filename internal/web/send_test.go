@@ -81,6 +81,44 @@ func TestSendHandlerEnqueuesAndReturnsSendingFragment(t *testing.T) {
 	}
 }
 
+// A double click, or two open tabs, means two POSTs land before the first
+// response's swap can disable the button — the no-JS path never disables
+// it at all. Both must render the one pending send, not a fresh one each.
+func TestSendHandlerDoublePostRendersTheSamePendingSend(t *testing.T) {
+	db := newSendTestDB(t)
+	id := createSendTestBook(t, db)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
+
+	first := postSendForm(handler, id, url.Values{"recipient": {"reader@kindle.com"}}, true)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first POST send status = %d, want 200; body = %s", first.Code, first.Body.String())
+	}
+	second := postSendForm(handler, id, url.Values{"recipient": {"reader@kindle.com"}}, true)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second POST send status = %d, want 200; body = %s", second.Code, second.Body.String())
+	}
+
+	send, err := db.LatestSendForBook(context.Background(), id)
+	if err != nil || send == nil {
+		t.Fatalf("LatestSendForBook: %+v, %v", send, err)
+	}
+	pollPath := "/books/" + itoa(id) + "/sends/" + itoa(send.ID)
+	if !strings.Contains(first.Body.String(), `hx-get="`+pollPath+`"`) {
+		t.Errorf("first response poll URL missing %q; body = %q", pollPath, first.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), `hx-get="`+pollPath+`"`) {
+		t.Errorf("second response poll URL missing %q; body = %q", pollPath, second.Body.String())
+	}
+
+	var count int
+	if err := db.Read().QueryRow(`SELECT count(*) FROM send_log WHERE book_id = ?`, id).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("send_log rows for book = %d, want 1", count)
+	}
+}
+
 // The status box's own hx-get (and its load-delay trigger) is what makes
 // polling automatic; once a send is terminal that element is replaced by
 // the plain delivered/failed block, so nothing re-arms another request.
@@ -92,7 +130,7 @@ func TestSendStatusHandlerTerminalFragmentDoesNotRepoll(t *testing.T) {
 	ctx := context.Background()
 	id := createSendTestBook(t, db)
 
-	sendID, err := db.EnqueueSend(ctx, id, "Piranesi", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, id, "Piranesi", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -127,7 +165,7 @@ func TestSendStatusHandlerMismatchedBookReturns404(t *testing.T) {
 	bookID := createSendTestBook(t, db)
 	otherBookID := createSendTestBook(t, db) // a second book, distinct id
 
-	sendID, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -199,7 +237,7 @@ func TestSendStatusHandlerEscapesFailureReason(t *testing.T) {
 	ctx := context.Background()
 	id := createSendTestBook(t, db)
 
-	sendID, err := db.EnqueueSend(ctx, id, "Piranesi", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, id, "Piranesi", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -459,7 +497,7 @@ func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) 
 
 	// A send that has already finished, so the control is showing a
 	// result the rejected address must not retract.
-	sendID, err := db.EnqueueSend(ctx, id, "Piranesi", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, id, "Piranesi", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -530,7 +568,7 @@ func TestSendControlWithholdsTheButtonForAnUnsendableFormat(t *testing.T) {
 	// A send made before the format was refused is history: the poll
 	// route still shows its status box, beside the note and without a
 	// form.
-	sendID, err := db.EnqueueSend(ctx, fb2, "Piranesi", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, fb2, "Piranesi", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}

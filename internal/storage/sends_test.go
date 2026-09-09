@@ -17,7 +17,7 @@ func TestEnqueueAndClaimSend(t *testing.T) {
 	}
 
 	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	sendID, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", queuedAt)
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", queuedAt)
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -52,6 +52,132 @@ func TestEnqueueAndClaimSend(t *testing.T) {
 	}
 }
 
+func TestEnqueueSendIsIdempotentForTheSamePendingBookAndAddress(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+
+	first := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", first); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+	firstID, inserted, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", first)
+	if err != nil || !inserted {
+		t.Fatalf("first EnqueueSend = %d, %v, %v; want inserted", firstID, inserted, err)
+	}
+
+	// A second submission for the same book and address while the first is
+	// still pending — the double-click or double-tab case — must not queue
+	// a second row.
+	second := first.Add(time.Minute)
+	secondID, inserted, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", second)
+	if err != nil || inserted {
+		t.Fatalf("second EnqueueSend = %d, %v, %v; want not inserted", secondID, inserted, err)
+	}
+	if secondID != firstID {
+		t.Errorf("second EnqueueSend id = %d, want the pending row's id %d", secondID, firstID)
+	}
+
+	var count int
+	if err := db.Read().QueryRow(`SELECT count(*) FROM send_log WHERE book_id = ? AND recipient_address = ?`,
+		bookID, "reader@kindle.com").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("send_log rows for book+address = %d, want 1", count)
+	}
+
+	// The address was chosen again on the second call, so last_used_at
+	// still moves even though nothing was queued.
+	recipients, err := db.ListRecipients(ctx)
+	if err != nil {
+		t.Fatalf("ListRecipients: %v", err)
+	}
+	if len(recipients) != 1 || !recipients[0].LastUsedAt.Valid || !recipients[0].LastUsedAt.Time.Equal(second) {
+		t.Errorf("recipients = %+v, want last_used_at = %v", recipients, second)
+	}
+}
+
+func TestEnqueueSendAllowsTheSameBookToDifferentAddresses(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	if _, inserted, err := db.EnqueueSend(ctx, bookID, "Piranesi", "one@kindle.com", now); err != nil || !inserted {
+		t.Fatalf("EnqueueSend one: inserted=%v, err=%v", inserted, err)
+	}
+	if _, inserted, err := db.EnqueueSend(ctx, bookID, "Piranesi", "two@kindle.com", now); err != nil || !inserted {
+		t.Fatalf("EnqueueSend two: inserted=%v, err=%v", inserted, err)
+	}
+
+	var count int
+	if err := db.Read().QueryRow(`SELECT count(*) FROM send_log WHERE book_id = ?`, bookID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("send_log rows for book = %d, want 2 (one per address)", count)
+	}
+}
+
+func TestEnqueueSendGuardCoversSendingButNotTerminalRows(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	firstID, inserted, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", now)
+	if err != nil || !inserted {
+		t.Fatalf("EnqueueSend: inserted=%v, err=%v", inserted, err)
+	}
+
+	// Claiming flips the row to sending — still a message in flight, so it
+	// blocks a second enqueue the same way a queued row does.
+	if _, err := db.ClaimNextSend(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("ClaimNextSend: %v", err)
+	}
+	if _, inserted, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", now.Add(time.Minute)); err != nil || inserted {
+		t.Fatalf("EnqueueSend while sending: inserted=%v, err=%v; want not inserted", inserted, err)
+	}
+
+	// Once it resolves — delivered here — a fresh enqueue is a new promise,
+	// not a duplicate of a finished one. "Send again" relies on exactly
+	// this.
+	if err := db.MarkSendDelivered(ctx, firstID, "msg-1", now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("MarkSendDelivered: %v", err)
+	}
+	secondID, inserted, err := db.EnqueueSend(ctx, bookID, "Piranesi", "reader@kindle.com", now.Add(3*time.Minute))
+	if err != nil || !inserted {
+		t.Fatalf("EnqueueSend after delivered: inserted=%v, err=%v; want inserted", inserted, err)
+	}
+	if secondID == firstID {
+		t.Error("EnqueueSend after delivered reused the delivered row's id")
+	}
+
+	var count int
+	if err := db.Read().QueryRow(`SELECT count(*) FROM send_log WHERE book_id = ?`, bookID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("send_log rows for book = %d, want 2 (one delivered, one fresh)", count)
+	}
+}
+
 func TestClaimNextSendClaimsOldestFirst(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -65,11 +191,11 @@ func TestClaimNextSendClaimsOldestFirst(t *testing.T) {
 	later := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	earlier := later.Add(-time.Hour)
 
-	secondID, err := db.EnqueueSend(ctx, bookID, "Book", "later@kindle.com", later)
+	secondID, _, err := db.EnqueueSend(ctx, bookID, "Book", "later@kindle.com", later)
 	if err != nil {
 		t.Fatalf("EnqueueSend later: %v", err)
 	}
-	firstID, err := db.EnqueueSend(ctx, bookID, "Book", "earlier@kindle.com", earlier)
+	firstID, _, err := db.EnqueueSend(ctx, bookID, "Book", "earlier@kindle.com", earlier)
 	if err != nil {
 		t.Fatalf("EnqueueSend earlier: %v", err)
 	}
@@ -93,7 +219,7 @@ func TestMarkSendDeliveredSetsFinishedAt(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	if _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt); err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
 	send, err := db.ClaimNextSend(ctx, queuedAt)
@@ -131,7 +257,7 @@ func TestMarkSendDeliveredRefusesANonSendingRow(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	sendID, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt)
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt)
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -167,7 +293,7 @@ func TestMarkSendFailedRefusesANonSendingRow(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	sendID, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt)
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt)
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -216,7 +342,7 @@ func TestPruneMissingFilesLeavesSendLogRowWithNullBookID(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	sendID, err := db.EnqueueSend(ctx, bookID, "Vanishing Book", "reader@kindle.com", queuedAt)
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Vanishing Book", "reader@kindle.com", queuedAt)
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -293,7 +419,7 @@ func TestListRecipientsOrdersMostRecentlyUsedFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
-	if _, err := db.EnqueueSend(ctx, bookID, "Book", "used@kindle.com", now.Add(time.Hour)); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, bookID, "Book", "used@kindle.com", now.Add(time.Hour)); err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
 
@@ -329,11 +455,11 @@ func TestFailInterruptedSendsFailsOnlySendingRows(t *testing.T) {
 	}
 
 	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	interruptedID, err := db.EnqueueSend(ctx, bookID, "Book", "interrupted@kindle.com", queuedAt)
+	interruptedID, _, err := db.EnqueueSend(ctx, bookID, "Book", "interrupted@kindle.com", queuedAt)
 	if err != nil {
 		t.Fatalf("EnqueueSend interrupted: %v", err)
 	}
-	stillQueuedID, err := db.EnqueueSend(ctx, bookID, "Book", "queued@kindle.com", queuedAt.Add(time.Second))
+	stillQueuedID, _, err := db.EnqueueSend(ctx, bookID, "Book", "queued@kindle.com", queuedAt.Add(time.Second))
 	if err != nil {
 		t.Fatalf("EnqueueSend still-queued: %v", err)
 	}
@@ -390,10 +516,10 @@ func TestLatestSendForBookOrdersMostRecentFirst(t *testing.T) {
 	earlier := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	later := earlier.Add(time.Hour)
 
-	if _, err := db.EnqueueSend(ctx, bookID, "Book", "first@kindle.com", earlier); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, bookID, "Book", "first@kindle.com", earlier); err != nil {
 		t.Fatalf("EnqueueSend earlier: %v", err)
 	}
-	latestID, err := db.EnqueueSend(ctx, bookID, "Book", "second@kindle.com", later)
+	latestID, _, err := db.EnqueueSend(ctx, bookID, "Book", "second@kindle.com", later)
 	if err != nil {
 		t.Fatalf("EnqueueSend later: %v", err)
 	}
@@ -436,18 +562,18 @@ func TestListSendsSinceOrdersNewestFirstAndRespectsSinceAndLimit(t *testing.T) {
 	middle := since.Add(time.Hour)
 	newest := since.Add(2 * time.Hour)
 
-	if _, err := db.EnqueueSend(ctx, bookID, "Book", "excluded@kindle.com", tooOld); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, bookID, "Book", "excluded@kindle.com", tooOld); err != nil {
 		t.Fatalf("EnqueueSend tooOld: %v", err)
 	}
-	oldestID, err := db.EnqueueSend(ctx, bookID, "Book", "oldest@kindle.com", oldest)
+	oldestID, _, err := db.EnqueueSend(ctx, bookID, "Book", "oldest@kindle.com", oldest)
 	if err != nil {
 		t.Fatalf("EnqueueSend oldest: %v", err)
 	}
-	middleID, err := db.EnqueueSend(ctx, bookID, "Book", "middle@kindle.com", middle)
+	middleID, _, err := db.EnqueueSend(ctx, bookID, "Book", "middle@kindle.com", middle)
 	if err != nil {
 		t.Fatalf("EnqueueSend middle: %v", err)
 	}
-	newestID, err := db.EnqueueSend(ctx, bookID, "Book", "newest@kindle.com", newest)
+	newestID, _, err := db.EnqueueSend(ctx, bookID, "Book", "newest@kindle.com", newest)
 	if err != nil {
 		t.Fatalf("EnqueueSend newest: %v", err)
 	}
@@ -489,7 +615,7 @@ func TestListSendsSinceIncludesSendForADeletedBook(t *testing.T) {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 	queuedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	sendID, err := db.EnqueueSend(ctx, bookID, "Vanishing Book", "reader@kindle.com", queuedAt)
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Vanishing Book", "reader@kindle.com", queuedAt)
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -536,7 +662,7 @@ func TestListSendsSinceIncludesSendToARemovedRecipient(t *testing.T) {
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", queuedAt); err != nil {
 		t.Fatalf("CreateRecipient: %v", err)
 	}
-	if _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt); err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
 	if deleted, err := db.DeleteRecipient(ctx, "reader@kindle.com"); err != nil || !deleted {
@@ -602,7 +728,7 @@ func TestDeleteRecipientLeavesSendLogUntouched(t *testing.T) {
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", queuedAt); err != nil {
 		t.Fatalf("CreateRecipient: %v", err)
 	}
-	sendID, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt)
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", queuedAt)
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}

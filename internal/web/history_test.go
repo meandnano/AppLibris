@@ -104,7 +104,7 @@ func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBookWithFile delivered: %v", err)
 	}
-	deliveredSendID, err := db.EnqueueSend(ctx, deliveredID, "Delivered Book", "reader@kindle.com", now.Add(-3*time.Hour))
+	deliveredSendID, _, err := db.EnqueueSend(ctx, deliveredID, "Delivered Book", "reader@kindle.com", now.Add(-3*time.Hour))
 	if err != nil {
 		t.Fatalf("EnqueueSend delivered: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBookWithFile failed: %v", err)
 	}
-	failedSendID, err := db.EnqueueSend(ctx, failedID, "Failed Book", "reader@kindle.com", now.Add(-90*time.Minute))
+	failedSendID, _, err := db.EnqueueSend(ctx, failedID, "Failed Book", "reader@kindle.com", now.Add(-90*time.Minute))
 	if err != nil {
 		t.Fatalf("EnqueueSend failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBookWithFile sending: %v", err)
 	}
-	if _, err := db.EnqueueSend(ctx, sendingID, "Sending Book", "reader@kindle.com", now.Add(-time.Minute)); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, sendingID, "Sending Book", "reader@kindle.com", now.Add(-time.Minute)); err != nil {
 		t.Fatalf("EnqueueSend sending: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestHistoryRowForDeletedBookRendersWithoutALink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
-	if _, err := db.EnqueueSend(ctx, bookID, "Vanishing Book", "reader@kindle.com", now.Add(-time.Hour)); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, bookID, "Vanishing Book", "reader@kindle.com", now.Add(-time.Hour)); err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
 	f, err := db.FindFileByPath(ctx, "a.epub")
@@ -220,7 +220,7 @@ func TestHistoryScopeLineNamesTheCapOnlyWhenTruncated(t *testing.T) {
 	}
 	for i := 0; i < service.SendHistoryLimit+1; i++ {
 		at := now.Add(-time.Duration(service.SendHistoryLimit-i) * time.Second)
-		if _, err := db.EnqueueSend(ctx, bookID, "Book", fmt.Sprintf("reader%d@kindle.com", i), at); err != nil {
+		if _, _, err := db.EnqueueSend(ctx, bookID, "Book", fmt.Sprintf("reader%d@kindle.com", i), at); err != nil {
 			t.Fatalf("EnqueueSend %d: %v", i, err)
 		}
 	}
@@ -246,7 +246,7 @@ func TestHistoryScopeLineIsPlainWhenNotTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
-	if _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", now.Add(-time.Hour)); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", now.Add(-time.Hour)); err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
 

@@ -437,6 +437,38 @@ func TestQueueSendValidAddressCreatesRecipientAndCallsNotify(t *testing.T) {
 	}
 }
 
+func TestQueueSendTwiceForTheSamePendingSendCallsNotifyOnce(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	notifyCount := 0
+	svc.Notify = func() { notifyCount++ }
+
+	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-1", Title: "Piranesi", SortTitle: "Piranesi", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	// A double click, or two open tabs: the same address submitted twice
+	// while the first send is still pending.
+	first, err := svc.QueueSend(ctx, id, "reader@kindle.com", "")
+	if err != nil {
+		t.Fatalf("QueueSend first: %v", err)
+	}
+	second, err := svc.QueueSend(ctx, id, "reader@kindle.com", "")
+	if err != nil {
+		t.Fatalf("QueueSend second: %v", err)
+	}
+
+	if second.ID != first.ID {
+		t.Errorf("second QueueSend id = %d, want the pending send's id %d", second.ID, first.ID)
+	}
+	if notifyCount != 1 {
+		t.Errorf("Notify called %d times across two QueueSend calls, want exactly 1", notifyCount)
+	}
+}
+
 func TestQueueSendUnknownBookReturnsNilNil(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -472,7 +504,10 @@ func TestLatestSendUnsentBookReturnsNilNil(t *testing.T) {
 
 // enqueueSendsAt queues n sends for a fresh book, one second apart ending
 // at now, so callers get a run of distinct, ordered timestamps without
-// caring about the exact values.
+// caring about the exact values. Each send goes to a different address —
+// EnqueueSend's dedup guard would otherwise collapse a run of same-address
+// calls that are all still "queued" into the one row a real double submit
+// is meant to catch.
 func enqueueSendsAt(t *testing.T, db *storage.DB, now time.Time, n int) {
 	t.Helper()
 	ctx := context.Background()
@@ -482,7 +517,7 @@ func enqueueSendsAt(t *testing.T, db *storage.DB, now time.Time, n int) {
 	}
 	for i := 0; i < n; i++ {
 		at := now.Add(-time.Duration(n-1-i) * time.Second)
-		if _, err := db.EnqueueSend(ctx, id, "Book", "reader@kindle.com", at); err != nil {
+		if _, _, err := db.EnqueueSend(ctx, id, "Book", "reader"+itoa(i)+"@kindle.com", at); err != nil {
 			t.Fatalf("EnqueueSend %d: %v", i, err)
 		}
 	}
@@ -542,10 +577,10 @@ func TestSendHistoryWindowIsMeasuredFromTheServiceClock(t *testing.T) {
 
 	tooOld := now.Add(-31 * 24 * time.Hour)
 	inWindow := now.Add(-29 * 24 * time.Hour)
-	if _, err := db.EnqueueSend(ctx, id, "Book", "excluded@kindle.com", tooOld); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, id, "Book", "excluded@kindle.com", tooOld); err != nil {
 		t.Fatalf("EnqueueSend tooOld: %v", err)
 	}
-	if _, err := db.EnqueueSend(ctx, id, "Book", "included@kindle.com", inWindow); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, id, "Book", "included@kindle.com", inWindow); err != nil {
 		t.Fatalf("EnqueueSend inWindow: %v", err)
 	}
 
@@ -573,7 +608,7 @@ func TestSendHistoryAtIsFinishedAtForTerminalAndQueuedAtForPending(t *testing.T)
 		t.Fatalf("CreateBook pending: %v", err)
 	}
 	queuedAt := now.Add(-time.Hour)
-	if _, err := db.EnqueueSend(ctx, id, "Pending Book", "reader@kindle.com", queuedAt); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, id, "Pending Book", "reader@kindle.com", queuedAt); err != nil {
 		t.Fatalf("EnqueueSend pending: %v", err)
 	}
 
@@ -582,7 +617,7 @@ func TestSendHistoryAtIsFinishedAtForTerminalAndQueuedAtForPending(t *testing.T)
 		t.Fatalf("CreateBook delivered: %v", err)
 	}
 	deliveredQueuedAt := now.Add(-2 * time.Hour)
-	if _, err := db.EnqueueSend(ctx, deliveredID, "Delivered Book", "reader@kindle.com", deliveredQueuedAt); err != nil {
+	if _, _, err := db.EnqueueSend(ctx, deliveredID, "Delivered Book", "reader@kindle.com", deliveredQueuedAt); err != nil {
 		t.Fatalf("EnqueueSend delivered: %v", err)
 	}
 	claimed, err := db.ClaimNextSend(ctx, deliveredQueuedAt.Add(time.Minute))

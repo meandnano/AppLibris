@@ -451,7 +451,11 @@ func (s *Service) Recipients(ctx context.Context) ([]RecipientOption, error) {
 //     title snapshot has no use for.
 //   - The recipient is saved (idempotently — re-adding a known address is
 //     a user slip, not an error) before the send is queued, and Notify is
-//     called only once both writes succeed.
+//     called only once both writes succeed — and only when EnqueueSend
+//     actually queued a new row: a double submit (a slow no-JS click, two
+//     open tabs) returns the already-pending send's state instead of a
+//     second row, and a poke for a job the worker already holds is
+//     harmless but pointless.
 func (s *Service) QueueSend(ctx context.Context, bookID int64, address, label string) (*SendState, error) {
 	parsed, err := mail.ParseAddress(address)
 	if err != nil {
@@ -470,12 +474,12 @@ func (s *Service) QueueSend(ctx context.Context, bookID int64, address, label st
 	if _, err := s.db.CreateRecipient(ctx, parsed.Address, label, now); err != nil {
 		return nil, err
 	}
-	sendID, err := s.db.EnqueueSend(ctx, bookID, book.Title, parsed.Address, now)
+	sendID, inserted, err := s.db.EnqueueSend(ctx, bookID, book.Title, parsed.Address, now)
 	if err != nil {
 		return nil, err
 	}
 
-	if s.Notify != nil {
+	if inserted && s.Notify != nil {
 		s.Notify()
 	}
 

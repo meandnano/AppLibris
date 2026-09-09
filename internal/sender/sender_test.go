@@ -77,7 +77,7 @@ func TestWorkerHappyPathDelivers(t *testing.T) {
 
 	content := []byte("epub bytes")
 	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", content)
-	sendID, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Book", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -125,11 +125,11 @@ func TestWorkerTransportErrorFailsAndContinuesQueue(t *testing.T) {
 	goodBook := setupBookWithFile(t, db, libraryDir, "good.epub", []byte("good"))
 
 	now := time.Now()
-	badID, err := db.EnqueueSend(ctx, badBook, "Bad", "reader@kindle.com", now)
+	badID, _, err := db.EnqueueSend(ctx, badBook, "Bad", "reader@kindle.com", now)
 	if err != nil {
 		t.Fatalf("EnqueueSend bad: %v", err)
 	}
-	goodID, err := db.EnqueueSend(ctx, goodBook, "Good", "reader@kindle.com", now.Add(time.Second))
+	goodID, _, err := db.EnqueueSend(ctx, goodBook, "Good", "reader@kindle.com", now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("EnqueueSend good: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestWorkerOversizedFileFailsWithoutCallingTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
-	sendID, err := db.EnqueueSend(ctx, bookID, "Huge", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Huge", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestWorkerMissingFileLocationFails(t *testing.T) {
 		t.Fatalf("SetFilesMissing: %v", err)
 	}
 
-	sendID, err := db.EnqueueSend(ctx, bookID, "Gone", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Gone", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestWorkerPrunedBookFails(t *testing.T) {
 	ctx := context.Background()
 
 	bookID := setupBookWithFile(t, db, libraryDir, "prune.epub", []byte("x"))
-	sendID, err := db.EnqueueSend(ctx, bookID, "Prune", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Prune", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
 	}()
 
 	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
-	sendID, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestWorkerCancellationLeavesRowSendingForRecovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
-	sendID, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -427,7 +427,7 @@ func TestWorkerRecordsDeliveryEvenIfCancelledOnTheWayBack(t *testing.T) {
 	defer cancel()
 
 	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
-	sendID, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestWorkerStorageFailureDoesNotClaimTheFileIsGone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
-	sendID, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestWorkerTimeoutIsRecordedAsUnknownOutcome(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	bookID := setupBookWithFile(t, db, libraryDir, "slow.epub", []byte("x"))
-	sendID, err := db.EnqueueSend(ctx, bookID, "Slow", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Slow", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestWorkerDeletedFileIsGone(t *testing.T) {
 	if err := os.Remove(filepath.Join(libraryDir, "deleted.epub")); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	sendID, err := db.EnqueueSend(ctx, bookID, "Deleted", "reader@kindle.com", time.Now())
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Deleted", "reader@kindle.com", time.Now())
 	if err != nil {
 		t.Fatalf("EnqueueSend: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestWorkerUnreadableFileIsNotGone(t *testing.T) {
 			bookID := setupBookWithFile(t, db, libraryDir, "locked.epub", []byte("x"))
 			fullPath := filepath.Join(libraryDir, "locked.epub")
 			tc.setup(t, fullPath)
-			sendID, err := db.EnqueueSend(ctx, bookID, "Locked", "reader@kindle.com", time.Now())
+			sendID, _, err := db.EnqueueSend(ctx, bookID, "Locked", "reader@kindle.com", time.Now())
 			if err != nil {
 				t.Fatalf("EnqueueSend: %v", err)
 			}
