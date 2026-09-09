@@ -158,7 +158,44 @@ full design.
   `MATCH` expression; `SanitizeFTSQuery` (also `internal/storage`, no DB
   access) is the one place raw user input becomes one, by quoting and
   prefix-terming every whitespace-separated token so no input, however
-  adversarial, can reach `MATCH` unescaped. Two query shapes skip that
+  adversarial, can reach `MATCH` unescaped. It is also where the input is
+  **bounded**, for the same reason: a caller — the programmatic API
+  DESIGN.md defers, most obviously — is then bounded by construction
+  rather than by remembering to clip first. The byte cap arrives through
+  `NormalizeSearchQuery`, the exported first step of the same function:
+  control characters stripped, then cut to `MaxSearchBytes` (256) **on a
+  rune boundary**. `internal/web` calls it too, so the query the page
+  renders back is the string that was searched rather than a
+  same-numbered clip of its own applied at a different point in the
+  pipeline — which is the difference between a property and a discipline,
+  since the handler sees the query *before* control characters are
+  stripped and a clip there is not the same cut. **The rune boundary is
+  not for FTS5's sake**, which is the plausible-sounding reason to avoid:
+  a term ending mid-rune is one FTS5 accepts happily, matching nothing —
+  measured through the real driver, not assumed. The boundary is for the
+  two places the cut is observable: the final term would search a token
+  ending in a byte no title contains, and the same string is rendered into
+  the search input and every paging URL, where half a character is a
+  U+FFFD in front of the reader. `maxSearchTerms` (16) then
+  drops any token past the sixteenth, silently: a search box has nowhere to
+  show a refusal, and "the first sixteen words were searched" is a result.
+  Only the byte cap is mirrored outside this package, so a thirty-word
+  query under 256 bytes renders all thirty words while sixteen are
+  searched — the silent drop working as designed, not a rendering bug.
+  Neither cap subsumes the other, which is the tidy-up to avoid — 256 bytes
+  still admits 128 single-letter tokens, measured at 0.25s for one
+  request's three queries against a 200-book fixture, so the byte cap
+  bounds the input and the term cap bounds the work. Unbounded, the same
+  request was reproducible as a denial of service on a trusted network: one
+  `q` of 100,000 tokens ran past a ten-minute test timeout, each search
+  spends the expression on three queries (`SearchBooks`,
+  `CountSearchBooks`, `MatchedSearchFields`'s four `EXISTS`), the read pool
+  holds eight connections, and `WriteTimeout` never touches
+  `r.Context()` — so eight pastes stalled every page in the application. A
+  regression test drives all three queries under a deadline, and pins the
+  byte cap rather than the term cap: 256 bytes already admits at most 128
+  tokens, so it stays fast with `maxSearchTerms` lifted to a million and
+  fails only with both caps gone. Two query shapes skip that
   per-word path and are normalised to bare digits instead, matching the
   index's own `replace(replace(b.isbn, '-', ''), ' ', '')`: a **complete**
   ISBN however punctuated (10 or 13 characters once hyphens and spaces are
@@ -1579,7 +1616,27 @@ full design.
   ships, so the id is what to search for). With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
-  drift out of sync. A `q` that sanitizes to nothing is "not
+  drift out of sync. Two separate things bound an overlong `q`, and it is
+  worth keeping them apart, because the obvious-sounding pairing is
+  backwards. `libraryHandler` passes `q` through
+  `storage.NormalizeSearchQuery` — the same call the service makes on its
+  way to a `MATCH` expression — before it is used for anything, so the
+  copies the page renders (the input's `value`, the no-results heading, the
+  paging URLs) are the string that was searched. That is **all** it does:
+  it cannot bound the request, because the search input lives outside
+  `#book-grid` and is never swapped, so between keystrokes the box still
+  holds whatever was pasted and htmx re-sends — and, since nothing here
+  sets `HX-Push-Url`, re-pushes — exactly that. What bounds the request is
+  the input's own `maxlength`, carried into the template as
+  `libraryPage.SearchMaxLength` from `storage.MaxSearchBytes` so the number
+  has one home; a forgotten field renders `maxlength="0"` and makes the box
+  untypeable, which is why the wiring has its own test. The attribute
+  counts UTF-16 units rather than bytes, so it approximates the byte cap
+  **from above** — never cutting what the server would keep — and nothing
+  about the bound depends on it. Plan
+  `2026090705`'s Decision 2 credited the handler clip with keeping a long
+  query out of browser history; it never could, and the plan carries an
+  appended correction saying so. A `q` that sanitizes to nothing is "not
   searching" — the plain grid, no result count, same as before this query
   parameter existed; that covers blank and whitespace-only input and also
   input stripped to nothing, such as a lone control character. A `q` that

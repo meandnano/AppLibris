@@ -11,12 +11,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"library/internal/service"
 	"library/internal/storage"
@@ -417,6 +419,108 @@ func TestSearchHandlesNULInQueryParam(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Errorf("GET /?%s status = %d, want 200 (not a 500 from an unsanitized NUL reaching MATCH)", rawQuery, rec.Code)
 		}
+	}
+}
+
+// A q past storage.MaxSearchBytes is searched clipped, so every copy this
+// page renders has to be the clipped one: the input's value, so the box
+// shows what was searched, and the paging URLs, so a reveal — and the
+// hx-push-url entry the browser keeps per keystroke — carries the same
+// bounded string rather than the original.
+func TestOverlongSearchQueryIsClippedInEveryRenderedCopy(t *testing.T) {
+	// The titles carry one long token and the query another, agreeing only
+	// over the first MaxSearchBytes of it: the clipped query is a prefix
+	// of the title token, so the search matches enough books to page,
+	// while the unclipped query is a string the page has no other reason
+	// to contain.
+	clipped := strings.Repeat("x", storage.MaxSearchBytes)
+	titleToken := clipped + strings.Repeat("y", 64)
+	queryToken := clipped + strings.Repeat("z", 64)
+
+	db := newPagingTestDB(t)
+	seedBooks(t, db, pageSize+10, titleToken)
+	handler := Routes(service.New(db), t.TempDir(), false, false)
+
+	rec := get(handler, "/?q="+queryToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=<overlong> = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	if strings.Contains(body, queryToken) {
+		t.Error("body carries the unclipped query somewhere")
+	}
+	// Against storage's own normalization rather than a number, since what
+	// makes the rendered copies trustworthy is that the handler and the
+	// service bound the query the same way, not that both spell 256.
+	if want := storage.NormalizeSearchQuery(queryToken); want != clipped {
+		t.Fatalf("fixture assumes the clip: NormalizeSearchQuery gives %.16q…", want)
+	}
+	if !strings.Contains(body, `value="`+clipped+`"`) {
+		t.Errorf("search input does not echo the clipped query; got %q", lineContaining(body, "search__input"))
+	}
+	trigger := triggerElement(body)
+	if trigger == "" {
+		t.Fatalf("no reveal trigger rendered, so there are no paging URLs to check; body has %d cards", countCards(body))
+	}
+	if !strings.Contains(trigger, "q="+clipped) {
+		t.Errorf("paging URL does not carry the clipped query: %q", trigger)
+	}
+}
+
+// The search input's maxlength is what keeps a paste from being sent and
+// pushed into history in full — the input is never swapped, so the
+// handler's clip cannot reach it between keystrokes. The number comes from
+// the view model, and a forgotten field renders maxlength="0", which makes
+// the box untypeable while every other test here stays green.
+func TestSearchInputCarriesTheByteCapAsMaxlength(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	rec := get(handler, "/", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", rec.Code)
+	}
+	input := lineContaining(rec.Body.String(), "search__input")
+	if want := fmt.Sprintf(`maxlength="%d"`, storage.MaxSearchBytes); !strings.Contains(input, want) {
+		t.Errorf("search input does not carry %s: %q", want, input)
+	}
+}
+
+// The handler normalizes through storage, so a control character is gone
+// before it can be rendered — a raw NUL in an attribute value otherwise
+// reaches the browser, and every later copy of the query (the paging URLs)
+// carries it too.
+func TestControlCharacterIsStrippedFromTheRenderedQuery(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	rec := get(handler, "/?q=hel%00lo", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=hel%%00lo = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.ContainsRune(body, 0) {
+		t.Error("rendered body carries a raw NUL from the query")
+	}
+	if !strings.Contains(body, `value="hello"`) {
+		t.Errorf("search input does not echo the stripped query; got %q", lineContaining(body, "search__input"))
+	}
+}
+
+// The transport half of the rune-boundary rule: a clipped multibyte query
+// is rendered as text, so cutting one mid-rune would put a replacement
+// character in the search box and in every paging URL.
+func TestClippedMultibyteQueryRendersAsValidUTF8(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	rec := get(handler, "/?q="+url.QueryEscape(strings.Repeat("é", storage.MaxSearchBytes)), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=<overlong multibyte> = %d, want 200", rec.Code)
+	}
+	if !utf8.ValidString(rec.Body.String()) {
+		t.Error("rendered page is not valid UTF-8, so the query was cut mid-rune")
+	}
+	if strings.Contains(rec.Body.String(), "�") {
+		t.Error("rendered page carries a replacement character from a query cut mid-rune")
 	}
 }
 

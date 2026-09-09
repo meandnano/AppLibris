@@ -1,9 +1,13 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 // assertValidFTS5Expression drives got through a real, standalone FTS5
@@ -219,6 +223,197 @@ func TestSanitizeFTSQueryMatchesEveryStateOfATypedHyphenatedISBN(t *testing.T) {
 		}
 		if !strings.HasPrefix(indexed, term) {
 			t.Errorf("typing %q produced the term %q, which is not a prefix of the indexed token %q", prefix, term, indexed)
+		}
+	}
+}
+
+func TestSanitizeFTSQueryDropsTokensPastTheTermCap(t *testing.T) {
+	fields := make([]string, maxSearchTerms+1)
+	for i := range fields {
+		fields[i] = fmt.Sprintf("w%02d", i)
+	}
+	got := SanitizeFTSQuery(strings.Join(fields, " "))
+
+	if n := strings.Count(got, `*`); n != maxSearchTerms {
+		t.Errorf("SanitizeFTSQuery(%d tokens) produced %d terms, want %d: %q", len(fields), n, maxSearchTerms, got)
+	}
+	if last := fields[len(fields)-1]; strings.Contains(got, last) {
+		t.Errorf("SanitizeFTSQuery kept %q, the token past the cap: %q", last, got)
+	}
+	assertValidFTS5Expression(t, got)
+}
+
+// The byte cap cuts on a rune boundary, dropping a straddling character
+// whole. Deliberately *not* asserted through FTS5: a term ending mid-rune
+// is one FTS5 accepts, matching nothing, so a round trip there would pass
+// either way. What the boundary buys is a final term that searches for
+// something typeable, and a value the page can render — which the
+// internal/web half of this asserts on the rendered body.
+func TestSanitizeFTSQueryCutsOnARuneBoundary(t *testing.T) {
+	filler := strings.Repeat("a", MaxSearchBytes-1)
+	got := SanitizeFTSQuery(filler + "é")
+
+	if want := `"` + filler + `"*`; got != want {
+		t.Errorf("SanitizeFTSQuery cut mid-rune: got %q, want %q", got, want)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("SanitizeFTSQuery produced invalid UTF-8: %q", got)
+	}
+}
+
+// A three-byte rune straddles the cap from three different offsets, two of
+// which a boundary check that backed off a single byte would still split.
+func TestSanitizeFTSQueryCutsAMultibyteRuneWhole(t *testing.T) {
+	for pad := 0; pad < 3; pad++ {
+		in := strings.Repeat("a", MaxSearchBytes-1-pad) + "→" + strings.Repeat("b", 8)
+		got := SanitizeFTSQuery(in)
+		if !utf8.ValidString(got) {
+			t.Errorf("pad %d: SanitizeFTSQuery produced invalid UTF-8: %q", pad, got)
+		}
+	}
+}
+
+// Both ISBN shapes are far shorter than the cap, so what the cap can still
+// do to one is decide whether it is on screen when the cut lands. Trailing
+// padding is harmless; leading padding past the cap takes the ISBN with it,
+// which is a real cost of cutting the input rather than the terms — and one
+// nobody can type, since the padding would have to be pasted ahead of the
+// number.
+func TestSanitizeFTSQueryISBNPathSurvivesTheCap(t *testing.T) {
+	const isbn = "978 0 85705 998 5"
+	pad := strings.Repeat(" ", MaxSearchBytes)
+
+	if got, want := SanitizeFTSQuery(isbn+pad), `"9780857059985"*`; got != want {
+		t.Errorf("trailing padding past the cap: SanitizeFTSQuery = %q, want %q", got, want)
+	}
+	if got := SanitizeFTSQuery(pad + isbn); got != "" {
+		t.Errorf("leading padding past the cap: SanitizeFTSQuery = %q, want %q (the ISBN is cut away)", got, "")
+	}
+}
+
+func TestNormalizeSearchQuery(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"short input is returned as it stands", "har pot", "har pot"},
+		{"control characters are stripped", "hel\x00lo", "hello"},
+		{"nothing but control characters", "\x00\x01\x1f", ""},
+		{
+			"over the cap, cut to it",
+			strings.Repeat("a", MaxSearchBytes+10),
+			strings.Repeat("a", MaxSearchBytes),
+		},
+		{
+			// The stripping runs first, so an input whose bytes exceed the
+			// cap only because of control characters is not cut at all.
+			"control characters do not count toward the cap",
+			strings.Repeat("\x01", 100) + strings.Repeat("a", MaxSearchBytes),
+			strings.Repeat("a", MaxSearchBytes),
+		},
+		{
+			"a straddling rune is dropped whole",
+			strings.Repeat("a", MaxSearchBytes-1) + "é",
+			strings.Repeat("a", MaxSearchBytes-1),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := NormalizeSearchQuery(c.in)
+			if got != c.want {
+				t.Errorf("NormalizeSearchQuery(%.32q…) = %.32q…, want %.32q…", c.in, got, c.want)
+			}
+			if again := NormalizeSearchQuery(got); again != got {
+				t.Errorf("not idempotent: %.32q… normalizes again to %.32q…", got, again)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("NormalizeSearchQuery produced invalid UTF-8: %q", got)
+			}
+		})
+	}
+}
+
+// internal/web renders what this returns and internal/service searches what
+// SanitizeFTSQuery makes of it, so the two agreeing on the bound is the
+// whole point of the transport calling the same function rather than
+// clipping to the same number.
+func TestSanitizeFTSQueryIsBuiltFromTheNormalizedQuery(t *testing.T) {
+	for _, in := range []string{
+		"har pot",
+		"hel\x00lo",
+		strings.Repeat("a", MaxSearchBytes+10),
+		strings.Repeat("é", MaxSearchBytes),
+		"978 0 85705 998 5",
+	} {
+		if got, want := SanitizeFTSQuery(in), SanitizeFTSQuery(NormalizeSearchQuery(in)); got != want {
+			t.Errorf("SanitizeFTSQuery(%.24q…) = %q, but %q once normalized first", in, got, want)
+		}
+	}
+}
+
+// The reproduction from the 2026-09-07 review: 100,000 single-letter tokens
+// were still executing inside CountSearchBooks when a ten-minute test
+// timeout fired, holding one of the read pool's eight connections for the
+// whole time. All three queries one search request makes are driven here,
+// under a deadline, so the failure is a failure rather than a hung suite.
+//
+// What it does *not* pin is maxSearchTerms, and that is worth knowing
+// before trusting it: MaxSearchBytes is applied first and 256 bytes admits
+// at most 128 single-letter tokens, so with the term cap lifted to a
+// million this still passed in 0.25s. It fails (17s, deadline exceeded)
+// only with both caps gone. TestSanitizeFTSQueryDropsTokensPastTheTermCap
+// is what pins the term cap; this pins that a query nobody should be able
+// to send cannot cost the read pool a connection.
+func TestSearchWithAnAbsurdTokenCountCompletesPromptly(t *testing.T) {
+	db := openTestDB(t)
+	seedSearchableBooks(t, db, 200)
+
+	tokens := make([]string, 100_000)
+	for i := range tokens {
+		tokens[i] = "a"
+	}
+	query := SanitizeFTSQuery(strings.Join(tokens, " "))
+
+	// One budget for both the deadline and the assertion, so the message
+	// cannot claim a threshold the check does not use. Generous against a
+	// measured ~20ms with both caps in place: the failure being caught is
+	// seconds-to-minutes, not milliseconds.
+	const budget = 2 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	if _, err := db.SearchBooks(ctx, query, BookPage{Limit: 48}); err != nil {
+		t.Fatalf("SearchBooks: %v", err)
+	}
+	if _, err := db.CountSearchBooks(ctx, query); err != nil {
+		t.Fatalf("CountSearchBooks: %v", err)
+	}
+	if _, err := db.MatchedSearchFields(ctx, query); err != nil {
+		t.Fatalf("MatchedSearchFields: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > budget {
+		t.Errorf("one search request's three queries took %v, want under %v", elapsed, budget)
+	}
+}
+
+// seedSearchableBooks creates n books whose title, authors and description
+// all match the letter the query above repeats, so every term the
+// expression carries has rows to work over rather than being answered by an
+// empty index.
+func seedSearchableBooks(t *testing.T, db *DB, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		title := fmt.Sprintf("a book about apples %03d", i)
+		if _, err := db.CreateBook(context.Background(), Book{
+			ContentHash: fmt.Sprintf("absurd-%03d", i),
+			Title:       title,
+			SortTitle:   title,
+			Description: "an apple a day, and another apple after that",
+			ISBN:        "9780857059985",
+			Format:      "epub",
+		}, []string{"Anna Applebaum"}); err != nil {
+			t.Fatalf("CreateBook %d: %v", i, err)
 		}
 	}
 }

@@ -3,6 +3,7 @@ package storage
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -33,6 +34,42 @@ const (
 	// — and costs those ISBN-10s exactly one dead keystroke at their second
 	// hyphen.
 	minPartialISBNDigits = 4
+
+	// MaxSearchBytes bounds how much of the input becomes an expression —
+	// NormalizeSearchQuery is where it is applied. A title, an author and
+	// an ISBN together fit several times over, so only a paste or a
+	// generated URL ever reaches it.
+	//
+	// Exported so internal/web can put the number in the search input's
+	// maxlength attribute, which is what stops a browser sending (and
+	// pushing into its history) more than this per keystroke. That
+	// attribute counts UTF-16 units rather than bytes, so it approximates
+	// this cap from above and never cuts anything the cap would keep;
+	// nothing about the bound depends on it, since NormalizeSearchQuery
+	// applies the real one to whatever arrives.
+	MaxSearchBytes = 256
+
+	// maxSearchTerms bounds how many prefix terms one expression carries,
+	// which nothing else does: every whitespace-separated token becomes
+	// one, and each search runs the expression through three queries
+	// (SearchBooks, CountSearchBooks, and MatchedSearchFields, itself four
+	// EXISTS). A hundred thousand single-letter tokens against three
+	// thousand books did not finish inside ten minutes, and the read pool
+	// holds eight connections — so eight such requests stall every page in
+	// the application, with WriteTimeout unable to cancel any of them
+	// because it never touches the request's context.
+	//
+	// It is not made redundant by MaxSearchBytes, which is the tidy-up to
+	// avoid: 256 bytes still admits 128 single-letter tokens, and those
+	// three queries took 0.25s against a 200-book fixture — a library
+	// fifteen times that size is no longer prompt. The byte cap bounds the
+	// input, this one bounds the work.
+	//
+	// Sixteen is generous for what it bounds: a title fragment and an
+	// author is under ten tokens. Tokens past it are dropped rather than
+	// refused, since a search box has nowhere to show a refusal and "the
+	// first sixteen words were searched" is a result.
+	maxSearchTerms = 16
 )
 
 // SanitizeFTSQuery turns raw user input into a valid FTS5 MATCH expression.
@@ -63,17 +100,20 @@ const (
 // neither shape: it is one token of digits, so the per-word path below
 // already quotes it into the same prefix term the ISBN path would produce.
 //
+// Both caps above are applied here rather than by each caller, because
+// this is the one place raw user input becomes a MATCH expression: the
+// programmatic API DESIGN.md defers is then bounded by construction rather
+// than by remembering to clip first. The byte cap arrives through
+// NormalizeSearchQuery, which internal/web calls too so that what it
+// renders back is the string this searched rather than a same-numbered
+// clip of its own.
+//
 // Input with no non-whitespace content returns "", which callers treat as
 // "no search" (the full list) rather than a query that matches nothing.
 // So does input that is entirely control characters, since those are
 // stripped above — "no search" there too, not a search for nothing.
 func SanitizeFTSQuery(input string) string {
-	input = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, input)
+	input = NormalizeSearchQuery(input)
 
 	if isbn, ok := normalizeIfISBNShaped(input); ok {
 		return `"` + isbn + `"*`
@@ -82,6 +122,9 @@ func SanitizeFTSQuery(input string) string {
 	fields := strings.Fields(input)
 	if len(fields) == 0 {
 		return ""
+	}
+	if len(fields) > maxSearchTerms {
+		fields = fields[:maxSearchTerms]
 	}
 
 	terms := make([]string, len(fields))
@@ -182,4 +225,45 @@ func partialISBNShaped(input string) (string, bool) {
 		return "", false
 	}
 	return digits.String(), true
+}
+
+// NormalizeSearchQuery is the raw query as it will actually be searched:
+// control characters stripped (a raw NUL from "?q=%00" would otherwise make
+// FTS5's parser reject the quoted string containing it), then cut to
+// MaxSearchBytes on a rune boundary. SanitizeFTSQuery builds its expression
+// from exactly this string.
+//
+// It is exported because internal/web renders the query back into the page
+// — the search input's value, the no-results heading, the paging URLs — and
+// calling this is what makes those copies the string that was searched
+// rather than a clip of its own applied at a different point in the
+// pipeline. Idempotent, so a caller normalizing before handing input on
+// costs nothing.
+func NormalizeSearchQuery(input string) string {
+	input = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, input)
+	return clipToRuneBoundary(input, MaxSearchBytes)
+}
+
+// clipToRuneBoundary returns s cut to at most n bytes without splitting a
+// rune: a multibyte character straddling the cut is dropped whole.
+//
+// Not because FTS5 refuses half a character — it accepts such a term
+// happily and matches nothing with it, which was measured rather than
+// assumed. The boundary is for the two places the cut is observable: the
+// final term would search a token ending in a byte nobody's title contains,
+// and the same string is rendered back into the search input and every
+// paging URL, where half a character is a U+FFFD in front of the reader.
+func clipToRuneBoundary(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

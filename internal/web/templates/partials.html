@@ -65,7 +65,14 @@
   <div class="search__row">
     <div class="search__box">
       <span class="search__icon" aria-hidden="true">⌕</span>
-      <input class="search__input" type="search" name="q" value="{{.Query}}"
+      {{/* maxlength is what actually bounds a paste: the input is never
+           swapped, so hx-push-url pushes — and every keystroke re-sends —
+           whatever the box holds, however long. It counts UTF-16 units
+           rather than bytes, so it approximates storage.MaxSearchBytes from
+           above and never cuts what the server would keep;
+           storage.NormalizeSearchQuery applies the real bound to whatever
+           arrives. */}}
+      <input class="search__input" type="search" name="q" value="{{.Query}}" maxlength="{{.SearchMaxLength}}"
              placeholder="Search title or author" aria-label="Search title or author"
              data-search-input{{if .LibraryEmpty}} disabled{{end}}
              hx-get="/" hx-trigger="input changed delay:300ms, search"
