@@ -472,7 +472,21 @@ full design.
   digit upper-cased) rather than as found — it's the lookup key a future
   provider chain needs. Cover hrefs are percent-decoded (and any fragment
   stripped) before the zip lookup, since a manifest href is a URI
-  reference.
+  reference. Every zip entry it opens is read through a cap (`readEntry`):
+  `cover.MaxCoverBytes` for the cover, `maxPackageDocBytes` (4 MiB) for
+  `container.xml` and the OPF — because `archive/zip` bounds only the
+  compressed bytes it reads and deflate runs to about 1000:1, so a 521 KB
+  EPUB whose cover entry inflates to 512 MB cost 1.2 GB of allocation
+  before this. The declared `UncompressedSize64` is checked first; it is
+  attacker-controlled, but `archive/zip`'s own reader fails with
+  `ErrFormat` as soon as a read passes the declared size, so a header that
+  understates it cannot inflate past its own claim — a test rewrites the
+  central directory to understate a size and pins that. The bounded read
+  behind the pre-check is defence in depth, not the guarantee, kept
+  because it costs nothing and does not rest on knowing that behaviour.
+  An over-cap cover is dropped exactly like an
+  unreadable one (Debug line, text metadata intact); an over-cap OPF is an
+  error, since without it there is no metadata to read.
 - `internal/fb2` — reads embedded metadata from an FB2 document, mirroring
   `internal/epub`'s `Metadata` field set and surface exactly so the scanner
   can fill it from either source with the same code shape. `PublishedDate`
@@ -491,18 +505,76 @@ full design.
   encoding it doesn't otherwise recognise. A `.fb2.zip` archive is parsed
   the same way after opening it and locating its one `.fb2` entry; zero or
   more than one is an error rather than a guess at which book it contains.
+  Only `<description>` is decoded through a struct. The `<binary>` elements
+  are walked token by token, and **only the one the coverpage names is
+  read** — its base64 accumulated whitespace-stripped, byte by byte with
+  `maxCoverBase64Bytes` (4/3 of `cover.MaxCoverBytes`, padded to a whole
+  quantum so a cover of exactly the cap is admitted as `Store` admits it)
+  checked as the buffer fills, dropped mid-token past it, and the decoded
+  length then checked exactly, since one base64 quantum encodes three byte
+  lengths alike — every other one `Skip`ped — because the former `Binary
+  []binaryElement`
+  field held every illustration in the book as a string to find one cover:
+  a 1.4 MB `.fb2.zip` carrying 400 one-megabyte binaries cost 800 MB, and a
+  legitimately illustrated 300 MB FB2 cost twice its size to read a title
+  out of. A test pins the walk at a few MB over 16 one-MiB illustrations.
+  The walk also **stops as soon as nothing more is wanted** — after the
+  description when it names no cover, after the cover's binary otherwise —
+  so the rest of the document is never tokenised and a document malformed
+  past that point still yields its metadata. It relies on FB2's order
+  (`<description>` first, `<binary>` last): a binary placed before the
+  description is never matched, the same no-cover outcome a dangling
+  coverpage id gets, and a test pins that. **What the cover cap does not
+  bound is the node itself**: `encoding/xml` buffers a whole text node
+  inside `Decoder.text` before `Token` returns it, nothing in the package
+  caps that, and a review measured the first version — which copied the
+  whole token three times before consulting the cap — at 1 GiB from a
+  711 KiB archive. So the `.fb2` inside a `.fb2.zip` is read through a
+  `cappedReader` at `maxZipDocumentBytes` (**128 MiB**), which is in
+  effect the largest single text node an archive may inflate to; the
+  tokeniser's buffer doubles as it grows, so the worst case is about twice
+  that transiently, in line with the ~300 MB `maxPixels` already accepts.
+  Plan `2026090704` says 256 MiB; it was written before the per-node
+  buffer was understood to be the residual, and since a completed plan is
+  immutable the supersession is recorded here. Where the cap lands decides
+  what survives it: past the description it costs the cover only
+  (`errDocumentTooLarge` is told apart from a parse failure), inside it
+  there is nothing to keep and it is an error. A plain `.fb2` has no such
+  cap, since it already costs its own size on disk.
 - `internal/cover` — turns a raw cover image into the stored thumbnail:
   resized to ~400px on the long edge (never upscaling), JPEG, written to a
   derived directory keyed by content hash. `Store` creates that directory
   on demand and writes through a same-directory temporary file plus atomic
-  rename, so readers never observe a partial canonical cover. It reads the
-  image header on its own first (`image.DecodeConfig`) and refuses anything
-  over `maxPixels` (50 MP) before `image.Decode` allocates a pixel buffer:
-  a byte cap on the input is not the same guarantee, since a small, highly
-  compressible file decodes to width × height × 4 bytes of RGBA. That
-  matters most for a cover a metadata provider supplied (`internal/enrich`),
-  where the bytes come from a third party, but an embedded cover is no more
-  trustworthy.
+  rename, so readers never observe a partial canonical cover. It decodes
+  GIF, PNG, JPEG and — via `golang.org/x/image/webp`, already in the module
+  for `draw` — WebP, an EPUB 3.3 core media type and the format most likely
+  to arrive embedded and otherwise undecodable. It refuses `raw` over
+  `MaxCoverBytes` (8 MiB, exported: the cap `internal/epub` and
+  `internal/fb2` apply while *extracting* a cover, so the bytes are never
+  held first) before reading anything, then reads the image header on its
+  own (`image.DecodeConfig`) and refuses anything over `maxPixels` before
+  `image.Decode` allocates. `maxPixels` is 16 MP, **sized off the worst
+  decoder rather than the RGBA arithmetic** that first set it at 50 MP:
+  `image/jpeg`'s progressive path allocates `mxx*myy*h*v` 256-byte
+  coefficient blocks per component on the scan header alone, before any
+  entropy data, so a header of a few dozen bytes declaring 7000×7000
+  measured 700 MB
+  with three components and 934 MB with four, where 4 bytes × pixels
+  predicted 200 MB; at 16 MP the same headers measure 228 MB and 305 MB,
+  survivable once. Do not raise it back on the RGBA reasoning. Every
+  refusal the bytes themselves decide — no registered decoder, a corrupt
+  image, either cap — wraps **`ErrUnsupportedCover`**; a filesystem failure
+  (`MkdirAll`, `CreateTemp`, `Encode`, `Rename`) does not. The distinction
+  is what `internal/scanner` needs: an I/O failure is worth retrying next
+  sweep, a decode failure fails identically forever, and only `Store` knows
+  which statement failed.
+  `internal/enrich.MaxCoverBytes` (512 KiB) is deliberately **a separate,
+  smaller constant** rather than an alias of this one, the fallback plan
+  `2026090704`'s Decision 1 offers: it is a network bound, and
+  `internal/googlebooks` chose which cover size to request by measuring
+  against exactly that figure (`medium` over `extraLarge`), so raising it
+  would silently make that choice wrong. A downloaded cover is under
+  `Store`'s cap by construction.
 - `internal/resend` — `Client.Send` POSTs one attachment to Resend's API
   (DESIGN.md's send-to-Kindle transport), enforcing the ~28MB size limit
   DESIGN.md derives before attempting a send, and setting a non-empty
@@ -807,7 +879,8 @@ full design.
   fetches it through `enrich.FetchCover` on its own `*http.Client`
   (`coverFetchTimeout`) — the URL may name a host, Open Library's separate
   covers domain for one, that has nothing to do with whichever provider
-  answered — capped at `MaxCoverBytes` (512 KiB) read *before* any decoding
+  answered — capped at `enrich.MaxCoverBytes` (512 KiB; deliberately not
+  `cover.MaxCoverBytes`, see `internal/cover` above) read *before* any decoding
   and refused outright if its scheme is not `http`/`https`, since the URL
   is a third party's string rather than one this process chose — a check
   the worker's client re-applies to every redirect hop
@@ -1207,7 +1280,31 @@ full design.
   original is never recovered even once the read works again. An empty
   stored cover path records that no embedded cover was found and is not
   retried on every sweep; a separate `cover_retry` marker records a
-  transient initial store failure and retries it later. Cover inspection
+  transient initial store failure and retries it later — **and only a
+  transient one: a decode failure is recorded as no cover.** `createBook`
+  splits `cover.Store`'s error on `cover.ErrUnsupportedCover`: an I/O
+  failure sets the marker as before, a cover that cannot decode (WebP
+  before it was registered, SVG, BMP, a corrupt image, one past the caps)
+  leaves both `cover_path` and the marker empty with an Info line, the same
+  state a book with no embedded cover has, which `maybeRegenerateCover`'s
+  first guard passes by from then on. Before the split every such book set
+  the marker, the marker skips the stat check entirely, and so every sweep
+  re-opened and fully re-parsed the book to fail the same way and Warn
+  again — forever, on every watcher poke. `maybeRegenerateCover`'s own
+  `Store` call gets the same split, through `storage.RecordUnusableCover`:
+  `ClearProviderCover`'s write under a second name (shared
+  `forgetCoverTx`, guard on the observed `cover_path` included), since the
+  two states that reach it are the legacy one — a book indexed before the
+  split, still carrying the marker, which this is what finally clears —
+  and a provider cover whose file has gone beside an embedded original that
+  cannot replace it, where the provider row is the same stale claim
+  `ClearProviderCover` removes. Plan `2026090711`'s Decision 2 offers
+  `UpdateBookCoverPath` with an empty path or a sibling; that write is
+  unguarded, which is why the sibling. `recordUnusableCover` also refuses
+  to write while a stored cover path is present unless
+  `coverFileDefinitelyGone` confirms it — with the marker set the stat was
+  skipped, so it has no evidence about that file, the same "confirmed gone,
+  not assumed" guard `forgetUnregenerableCover` holds. Cover inspection
   regenerates only on a missing or zero-byte file; other stat failures warn
   without re-parsing the source. A new book is created together with its
   first file location in one transaction (`storage.CreateBookWithFile`).

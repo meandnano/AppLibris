@@ -8,12 +8,46 @@ import (
 	"archive/zip"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"slices"
 	"strings"
-	"unicode"
+
+	"library/internal/cover"
 )
+
+// maxCoverBase64Bytes bounds the copy readCoverBinary accumulates of the
+// cover's <binary> character data: the base64 of a cover cover.Store would
+// accept, padded to a whole quantum so a cover of exactly MaxCoverBytes is
+// admitted here as it is there. One quantum encodes three byte lengths, so
+// the exact boundary is drawn on the decoded length afterwards; this only
+// bounds the copy. Past it the cover is dropped mid-token and nothing more
+// of the element is looked at. It bounds that copy and nothing
+// else: encoding/xml buffers a whole text node inside Decoder.text before
+// Token returns it, and nothing in the package caps that, so the node itself
+// still costs its own size once — maxZipDocumentBytes is what bounds it for
+// an archive, and a plain file's size on disk bounds it for a plain .fb2
+const maxCoverBase64Bytes = (cover.MaxCoverBytes + 2) / 3 * 4
+
+// maxZipDocumentBytes bounds the .fb2 inside a .fb2.zip, and is in effect the
+// largest single text node an archive may inflate to: the walk keeps a
+// document of any length from accumulating, but the tokeniser holds one text
+// node whole, and a zip entry can inflate one node to whatever size it likes
+// for a few kilobytes on disk. The tokeniser's buffer doubles as it grows,
+// so the worst case is about twice this transiently — 128 MiB keeps that in
+// line with the ~300 MB internal/cover's maxPixels already accepts from a
+// progressive JPEG header. A real document whose cover binary sits past this
+// much of other illustrations loses its cover and keeps its text. A plain
+// .fb2 has no such cap, since it already costs its own size on disk
+const maxZipDocumentBytes = 128 << 20
+
+// errDocumentTooLarge is what a cappedReader returns once its cap is
+// reached; readMetadata tells it apart from a parse failure so that a
+// document whose text metadata was already read keeps it
+var errDocumentTooLarge = errors.New("fb2 document exceeds the size limit")
 
 // Metadata is what's extracted from an FB2 document. Same field set as
 // epub.Metadata, deliberately: the scanner's bookMeta already has these
@@ -29,12 +63,13 @@ type Metadata struct {
 	Cover         []byte
 }
 
-type fictionBook struct {
-	Description struct {
-		TitleInfo   titleInfo   `xml:"title-info"`
-		PublishInfo publishInfo `xml:"publish-info"`
-	} `xml:"description"`
-	Binary []binaryElement `xml:"binary"`
+// description is the <description> element, the one part of an FB2 document
+// decoded through a struct. The <binary> elements that follow it are walked
+// token by token instead (see readMetadata), so a struct field for them
+// would hold every illustration in the book in memory to find one cover
+type description struct {
+	TitleInfo   titleInfo   `xml:"title-info"`
+	PublishInfo publishInfo `xml:"publish-info"`
 }
 
 type titleInfo struct {
@@ -120,11 +155,6 @@ type publishInfo struct {
 	ISBN      string `xml:"isbn"`
 }
 
-type binaryElement struct {
-	ID      string `xml:"id,attr"`
-	Content string `xml:",chardata"`
-}
-
 // ReadMetadata parses path as either a plain FB2 document or a .fb2.zip
 // archive containing exactly one, dispatching on the filename suffix
 // case-insensitively.
@@ -177,10 +207,38 @@ func readMetadataFromZip(path string) (Metadata, error) {
 	}
 	defer rc.Close()
 
-	return readMetadata(rc)
+	return readMetadata(&cappedReader{r: rc, remaining: maxZipDocumentBytes})
 }
 
-// readMetadata parses an FB2 document from r.
+// cappedReader is io.LimitReader with a distinct error at the cap instead of
+// io.EOF, so the XML decoder reports a truncated document as too large
+// rather than as malformed
+type cappedReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.remaining <= 0 {
+		return 0, fmt.Errorf("%w (%d bytes)", errDocumentTooLarge, maxZipDocumentBytes)
+	}
+	if int64(len(p)) > c.remaining {
+		p = p[:c.remaining]
+	}
+	n, err := c.r.Read(p)
+	c.remaining -= int64(n)
+	return n, err
+}
+
+// readMetadata parses an FB2 document from r: the <description> through a
+// struct, then a walk of the remaining top-level elements that decodes only
+// the <binary> the coverpage names and skips every other one token by token.
+// FB2 places <description> first and <binary> last, so the cover's id is
+// known before any binary is reached; a document ordered the other way round
+// is invalid FB2 and gets no cover, the same as one whose coverpage points
+// at an id that does not exist. Reading stops as soon as nothing more is
+// wanted — after the description when it names no cover, after the cover's
+// binary otherwise — so the rest of an illustrated book is never read
 func readMetadata(r io.Reader) (Metadata, error) {
 	decoder := xml.NewDecoder(r)
 	// A declared non-UTF-8 encoding would otherwise fail the whole parse
@@ -193,22 +251,165 @@ func readMetadata(r io.Reader) (Metadata, error) {
 		return input, nil
 	}
 
-	var fb fictionBook
-	if err := decoder.Decode(&fb); err != nil {
+	if _, err := nextStartElement(decoder); err != nil {
 		return Metadata{}, fmt.Errorf("parse fb2: %w", err)
 	}
 
-	ti := fb.Description.TitleInfo
+	var desc description
+	var haveDescription bool
+	var coverID string
+	var coverData []byte
+	// The cap running out while the walk is still looking for the cover is
+	// not a parse failure: the text metadata is already in hand and is not
+	// made wrong by a cover that could not be reached. Before the
+	// description it is one, since there is nothing to keep
+	coverNotReached := func(err error) bool {
+		if !haveDescription || !errors.Is(err, errDocumentTooLarge) {
+			return false
+		}
+		slog.Debug("fb2 cover not reached", "error", err)
+		return true
+	}
+walk:
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			if err == io.EOF || coverNotReached(err) {
+				break
+			}
+			return Metadata{}, fmt.Errorf("parse fb2: %w", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch {
+			case t.Name.Local == "description" && !haveDescription:
+				if err := decoder.DecodeElement(&desc, &t); err != nil {
+					return Metadata{}, fmt.Errorf("parse fb2: %w", err)
+				}
+				haveDescription = true
+				coverID = strings.TrimPrefix(strings.TrimSpace(desc.TitleInfo.Coverpage.Image.Href), "#")
+				if coverID == "" {
+					break walk
+				}
+			case t.Name.Local == "binary" && haveDescription && attrValue(t, "id") == coverID:
+				coverData = readCoverBinary(decoder)
+				break walk
+			default:
+				if err := decoder.Skip(); err != nil {
+					if coverNotReached(err) {
+						break walk
+					}
+					return Metadata{}, fmt.Errorf("parse fb2: %w", err)
+				}
+			}
+		case xml.EndElement:
+			break walk
+		}
+	}
+
+	ti := desc.TitleInfo
 	return Metadata{
 		Title:         strings.TrimSpace(ti.BookTitle),
 		Authors:       authorNames(ti.Author),
 		Language:      strings.TrimSpace(ti.Lang),
-		ISBN:          strings.TrimSpace(fb.Description.PublishInfo.ISBN),
+		ISBN:          strings.TrimSpace(desc.PublishInfo.ISBN),
 		Description:   annotationText(ti.Annotation.P),
-		Publisher:     strings.TrimSpace(fb.Description.PublishInfo.Publisher),
-		PublishedDate: findPublishedDate(fb),
-		Cover:         readCover(fb),
+		Publisher:     strings.TrimSpace(desc.PublishInfo.Publisher),
+		PublishedDate: findPublishedDate(desc),
+		Cover:         coverData,
 	}, nil
+}
+
+// nextStartElement consumes tokens up to and including the first start
+// element — the document's root, past the XML declaration and any comments
+func nextStartElement(decoder *xml.Decoder) (xml.StartElement, error) {
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			if err == io.EOF {
+				return xml.StartElement{}, io.ErrUnexpectedEOF
+			}
+			return xml.StartElement{}, err
+		}
+		if start, ok := tok.(xml.StartElement); ok {
+			return start, nil
+		}
+	}
+}
+
+func attrValue(start xml.StartElement, name string) string {
+	for _, a := range start.Attr {
+		if a.Name.Local == name {
+			return a.Value
+		}
+	}
+	return ""
+}
+
+// readCoverBinary accumulates the character data of the <binary> just
+// opened, whitespace stripped, and base64-decodes it. It returns nil on a
+// cover past maxCoverBase64Bytes, on malformed base64 and on a truncated
+// element — a missing or corrupt cover must never invalidate the rest of
+// the metadata, matching epub.readCover. On the first two nothing more of
+// the element is read: the caller stops at the cover either way
+func readCoverBinary(decoder *xml.Decoder) []byte {
+	var encoded []byte
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			slog.Debug("fb2 cover binary unreadable", "error", err)
+			return nil
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			// Byte by byte into the one buffer, with the cap checked as it
+			// fills, rather than a copy, a whitespace strip and an append of
+			// the whole token first: the token is the entire node, which for
+			// a hostile archive is hundreds of megabytes, and three copies of
+			// it made before the cap was consulted is what the cap was meant
+			// to prevent. The strip is byte-wise since base64 is ASCII; a
+			// non-ASCII byte is kept and fails the decode below, as it should.
+			// Real files wrap base64 at a fixed line length, so the newlines
+			// have to go before StdEncoding sees them.
+			//
+			// Room for the token is reserved once, bounded by what the cap
+			// still allows: append's own growth past a few hundred bytes is
+			// 1.25x a step, and a byte-at-a-time fill of eleven megabytes
+			// through it measured five times the final size in allocation
+			room := min(len(t), maxCoverBase64Bytes+1-len(encoded))
+			encoded = slices.Grow(encoded, room)
+			for _, b := range t {
+				if b == ' ' || b == '\n' || b == '\r' || b == '\t' {
+					continue
+				}
+				if len(encoded) >= maxCoverBase64Bytes {
+					slog.Debug("fb2 cover binary dropped", "reason", "over the byte limit", "limit", maxCoverBase64Bytes)
+					return nil
+				}
+				encoded = append(encoded, b)
+			}
+		case xml.StartElement:
+			if err := decoder.Skip(); err != nil {
+				slog.Debug("fb2 cover binary unreadable", "error", err)
+				return nil
+			}
+		case xml.EndElement:
+			// Decoded straight from the buffer: a string conversion first
+			// would be a second copy of the one copy the cap bounds
+			data, err := base64.StdEncoding.AppendDecode(nil, encoded)
+			if err != nil {
+				return nil
+			}
+			// The character cap admits up to two bytes past the limit, since
+			// a final quantum encodes one, two or three bytes alike; the
+			// decoded length is where the limit is exact
+			if len(data) > cover.MaxCoverBytes {
+				slog.Debug("fb2 cover binary dropped", "reason", "over the byte limit", "limit", cover.MaxCoverBytes)
+				return nil
+			}
+			return data
+		}
+	}
 }
 
 func authorName(a fb2Author) string {
@@ -252,47 +453,13 @@ func annotationText(paragraphs []paragraph) string {
 // 2026083114-epub-metadata-completeness established for dc:date and for
 // the same reason: the column is TEXT so display formatting stays the
 // template's job.
-func findPublishedDate(fb fictionBook) string {
-	if year := strings.TrimSpace(fb.Description.PublishInfo.Year); year != "" {
+func findPublishedDate(desc description) string {
+	if year := strings.TrimSpace(desc.PublishInfo.Year); year != "" {
 		return year
 	}
-	date := fb.Description.TitleInfo.Date
+	date := desc.TitleInfo.Date
 	if v := strings.TrimSpace(date.Value); v != "" {
 		return v
 	}
 	return strings.TrimSpace(date.Text)
-}
-
-// readCover finds the <binary> the coverpage's namespaced href points at
-// (stripping the leading "#" reference marker) and base64-decodes it.
-// Returns nil on any mismatch — a missing or corrupt cover must never
-// invalidate the rest of the metadata, matching epub.readCover.
-func readCover(fb fictionBook) []byte {
-	id := strings.TrimPrefix(strings.TrimSpace(fb.Description.TitleInfo.Coverpage.Image.Href), "#")
-	if id == "" {
-		return nil
-	}
-
-	for _, b := range fb.Binary {
-		if b.ID != id {
-			continue
-		}
-		// Real files wrap base64 content at a fixed line length, so the
-		// chardata carries embedded newlines StdEncoding won't tolerate.
-		data, err := base64.StdEncoding.DecodeString(stripWhitespace(b.Content))
-		if err != nil {
-			return nil
-		}
-		return data
-	}
-	return nil
-}
-
-func stripWhitespace(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
-		}
-		return r
-	}, s)
 }

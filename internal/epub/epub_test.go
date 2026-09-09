@@ -3,9 +3,13 @@ package epub
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"library/internal/cover"
 )
 
 const containerXML = `<?xml version="1.0"?>
@@ -489,5 +493,126 @@ func TestReadMetadataMissingContainer(t *testing.T) {
 
 	if _, err := ReadMetadata(path); err == nil {
 		t.Error("ReadMetadata on an epub missing container.xml: want error, got nil")
+	}
+}
+
+const coverOPF = `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Capped Cover</dc:title>
+  </metadata>
+  <manifest>
+    <item id="cover-img" href="cover.png" media-type="image/png" properties="cover-image"/>
+  </manifest>
+</package>`
+
+// A zip entry costs its compressed size on disk and its inflated size in
+// memory, and deflate runs to about 1000:1 on flat data — so a cover entry
+// a few kilobytes on disk can inflate to half a gigabyte. Over the cap it
+// is treated exactly like a cover that cannot be read: dropped, with the
+// text metadata intact
+func TestReadMetadataDropsCoverOverTheByteCap(t *testing.T) {
+	path := buildTestEPUBWithExtra(t, coverOPF, map[string][]byte{
+		"OEBPS/cover.png": make([]byte, cover.MaxCoverBytes+1),
+	})
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.Cover != nil {
+		t.Errorf("Cover has %d bytes, want nil for an entry over the cap", len(got.Cover))
+	}
+	if got.Title != "Capped Cover" {
+		t.Errorf("Title = %q, want the text metadata intact", got.Title)
+	}
+}
+
+// Exactly at the cap is admitted: the limit is inclusive, so a cover the
+// size Store accepts is never refused a byte early here
+func TestReadMetadataKeepsCoverExactlyAtTheByteCap(t *testing.T) {
+	path := buildTestEPUBWithExtra(t, coverOPF, map[string][]byte{
+		"OEBPS/cover.png": make([]byte, cover.MaxCoverBytes),
+	})
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if len(got.Cover) != cover.MaxCoverBytes {
+		t.Errorf("Cover has %d bytes, want %d", len(got.Cover), cover.MaxCoverBytes)
+	}
+}
+
+// The declared uncompressed size is whatever the archive says it is, and a
+// header that understates it passes the pre-check. What stops it is
+// archive/zip itself, which fails the read with ErrFormat as soon as more
+// bytes than declared come out — so a lying header cannot inflate past its
+// own claim, and the cover is dropped as unreadable rather than as over the
+// cap. This pins that the pre-check is not the only thing standing between
+// the header and the heap
+func TestReadMetadataDropsCoverWhoseHeaderLiesAboutItsSize(t *testing.T) {
+	path := buildTestEPUBWithExtra(t, coverOPF, map[string][]byte{
+		"OEBPS/cover.png": make([]byte, cover.MaxCoverBytes+1),
+	})
+	understateEntrySize(t, path, "OEBPS/cover.png", 100)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.Cover != nil {
+		t.Errorf("Cover has %d bytes, want nil for an entry that inflates past the cap", len(got.Cover))
+	}
+	if got.Title != "Capped Cover" {
+		t.Errorf("Title = %q, want the text metadata intact", got.Title)
+	}
+}
+
+// understateEntrySize rewrites the uncompressed size archive/zip reads for
+// name — the central directory's, which is the only one it consults — to
+// size, leaving the compressed data as it is
+func understateEntrySize(t *testing.T, path, name string, size uint32) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Central directory file header: signature, then the file name at
+	// offset 46 with its length at 28, and the uncompressed size at 24
+	sig := []byte{0x50, 0x4b, 0x01, 0x02}
+	for i := 0; i+46 <= len(data); i++ {
+		if !bytes.Equal(data[i:i+4], sig) {
+			continue
+		}
+		nameLen := int(binary.LittleEndian.Uint16(data[i+28:]))
+		if string(data[i+46:i+46+nameLen]) != name {
+			continue
+		}
+		binary.LittleEndian.PutUint32(data[i+24:], size)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatalf("no central directory entry for %s", name)
+}
+
+// The OPF is held whole to parse, so an entry inflating past its own cap is
+// an error rather than a degraded read: with no package document there is
+// no metadata to fall back on
+func TestReadMetadataRefusesOPFOverTheByteCap(t *testing.T) {
+	padded := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Padded</dc:title>
+  </metadata>
+  <!--` + strings.Repeat(" ", maxPackageDocBytes) + `-->
+</package>`
+	path := buildTestEPUB(t, padded)
+
+	if _, err := ReadMetadata(path); err == nil {
+		t.Fatal("ReadMetadata: want an error for an OPF over the byte cap")
 	}
 }

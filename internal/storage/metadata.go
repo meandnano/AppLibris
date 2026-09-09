@@ -279,28 +279,67 @@ func (db *DB) UpdateBookAuthors(ctx context.Context, bookID int64, names []strin
 // maybeRegenerateCover for why "a row exists" is the whole test.
 func (db *DB) ClearProviderCover(ctx context.Context, bookID int64, observedPath string, at time.Time) (cleared bool, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		// Guarded on the path the caller actually looked at, not merely on
-		// the book existing. The scanner decides to clear from a snapshot
-		// and then does a stat, a full EPUB/FB2 parse and a provenance round
-		// trip before this write lands; in that window an enrichment run can
-		// write a fresh cover and its row, and an unguarded blank would
-		// throw it away. Same staleness fieldIsStillMissingTx closes for
-		// every other field — no reason for this one to opt out.
-		if err := tx.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM books WHERE id = ? AND cover_path = ?)`,
-			bookID, observedPath).Scan(&cleared); err != nil || !cleared {
-			return err
-		}
-		// Through the shared helper rather than a second copy of its
-		// statement: its FieldCover branch is this write with a value
-		// bound, and it already carries the cover_retry pairing that would
-		// otherwise be stated in two places and drift.
-		if err := updateBookColumnTx(ctx, tx, bookID, FieldCover, "", at); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx,
-			`DELETE FROM field_sources WHERE book_id = ? AND field = ?`, bookID, FieldCover)
+		cleared, err = forgetCoverTx(ctx, tx, bookID, observedPath, at)
 		return err
 	})
 	return cleared, err
+}
+
+// RecordUnusableCover records that a book's embedded cover can never be
+// stored: cover.Store refused the image itself (cover.ErrUnsupportedCover)
+// rather than the filesystem, so storing the same bytes again fails the same
+// way. It writes the state a book with no embedded cover has — cover_path
+// empty, cover_retry clear — and the scanner's first guard then passes the
+// book by on every later sweep instead of re-parsing it to reach the same
+// refusal. The retry marker is the point: it was designed for a store that
+// failed on I/O, and left set here it re-opens the loop this ends.
+//
+// It is ClearProviderCover's write under a second name, guard included, and
+// not by coincidence: a book reaches this with either the marker set and no
+// cover at all, or a provider cover whose file has gone and an embedded
+// original that cannot replace it — and in the second case the provider's
+// row beside an empty cover_path is the same stale claim ClearProviderCover
+// removes. The guard on observedPath matters here for the same reason too:
+// the scanner re-parses the whole book between reading its snapshot and
+// writing, and an enrichment run finishing inside that window has a fresh
+// cover this must not blank.
+//
+// recorded is false when the book is gone or its cover_path has moved on
+// from observedPath, the finders' absent-isn't-an-error contract
+func (db *DB) RecordUnusableCover(ctx context.Context, bookID int64, observedPath string, at time.Time) (recorded bool, err error) {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		recorded, err = forgetCoverTx(ctx, tx, bookID, observedPath, at)
+		return err
+	})
+	return recorded, err
+}
+
+// forgetCoverTx is the one write ClearProviderCover and RecordUnusableCover
+// share: guarded on the cover_path the caller observed, it empties the path,
+// clears cover_retry and deletes the cover's field_sources row. It reports
+// false, and writes nothing, when the guard refuses
+func forgetCoverTx(ctx context.Context, tx *sql.Tx, bookID int64, observedPath string, at time.Time) (bool, error) {
+	// Guarded on the path the caller actually looked at, not merely on the
+	// book existing. The scanner decides to clear from a snapshot and then
+	// does a stat, a full EPUB/FB2 parse and a provenance round trip before
+	// this write lands; in that window an enrichment run can write a fresh
+	// cover and its row, and an unguarded blank would throw it away. Same
+	// staleness fieldIsStillMissingTx closes for every other field — no
+	// reason for this one to opt out
+	var matches bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM books WHERE id = ? AND cover_path = ?)`,
+		bookID, observedPath).Scan(&matches); err != nil || !matches {
+		return false, err
+	}
+	// Through the shared helper rather than a second copy of its statement:
+	// its FieldCover branch is this write with a value bound, and it already
+	// carries the cover_retry pairing that would otherwise be stated in two
+	// places and drift
+	if err := updateBookColumnTx(ctx, tx, bookID, FieldCover, "", at); err != nil {
+		return false, err
+	}
+	_, err := tx.ExecContext(ctx,
+		`DELETE FROM field_sources WHERE book_id = ? AND field = ?`, bookID, FieldCover)
+	return err == nil, err
 }
