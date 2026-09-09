@@ -99,6 +99,23 @@ book's other traces or by the directory gaining a file; a pruned book's
 edits are not recoverable at all. The `Scanned == 0` root guard has made
 this exact trade for the whole library since it was written.
 
+**Correction, found while implementing.** "Left untouched" above, and
+"neither marked nor pruned" in the Tests section, were built first: the row
+was skipped before `Lstat`, so it was never given a `missing_since`. That
+contradicts this Decision's own next paragraph ("stays marked missing … the
+detail page shows its 'missing' annotation") and the Verification bullet
+("the marks clear on the next sweep"), and review found it regresses
+sending: `internal/sender`'s `resolveFile` takes the first `ListBookFiles`
+row with a `NULL` `missing_since`, in `file_path` order, and `process` fails
+the job on a stat error without trying the next copy, so an unmarked dead
+row that sorts first fails every send of its book — which renaming a
+top-level folder would do to every book in it — and the detail page shows
+the dead path as a live location. What shipped marks the row exactly as
+before and refuses only the prune, whatever the mark's age. The Tests
+bullet reads accordingly as "marked, never pruned", and the offline-mount
+test gained the remount step from Verification: the same bytes back at the
+same path clear the mark on the next sweep.
+
 ## Decision 2: the unconfirmed set is logged once per sweep, not per row
 
 A warning per row would be `N` lines per sweep for a disk that is offline

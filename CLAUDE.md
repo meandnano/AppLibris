@@ -1172,10 +1172,65 @@ full design.
   time (`Scan` tracks these as `skippedDirs`, a negative list — `WalkDir`'s
   callback only ever reports directory-read failure as a second,
   error-bearing invocation, so a positive "cleanly read" list isn't
-  obtainable from the API); and reconciliation is skipped entirely if the
-  sweep visited zero files (an unmounted volume can present as an empty
-  directory, so seeing nothing is not evidence that everything is gone),
-  logged at Warn.
+  obtainable from the API); a row whose **top-level directory yielded no
+  book files this sweep** — whether it read as empty or is gone — is
+  **marked as before but never pruned**, counted in `Result.Unconfirmed`
+  (which `runScan`'s summary line shows beside `missing` and `pruned`) and
+  named, with a per-directory row count, in one Warn per sweep rather than
+  one per row, because that is exactly what an offline sub-mount looks like
+  (a second bind mount, an NFS share in a subfolder, an Unraid disk
+  mid-rebuild): `WalkDir` reads the directory cleanly, so nothing lands in
+  `skippedDirs`, and every row under it fails `Lstat` with `ErrNotExist`,
+  the very signal the two phases trust — so past `MISSING_GRACE` a weekend
+  rebuild would have pruned every book with it, manual edits, provenance
+  and enrichment results included, the one thing the scanner destroys that
+  it cannot rebuild. The row is still *marked*, and this is the half that
+  was first built the other way (plan `2026090703` says "left untouched"
+  and carries the appended correction): the mark is reversible
+  (`ClearFilesMissing` on the next sweep that sees the file), it is what
+  puts the "missing" annotation on the detail page, and it is what keeps
+  `internal/sender` off the path — `resolveFile` takes the first
+  `ListBookFiles` row with a `NULL` `missing_since`, in `file_path` order,
+  and fails the job on a stat error without trying the next copy, so an
+  unmarked dead row that sorts first fails every send of its book, which a
+  renamed top-level folder would otherwise do to every book in it. The test
+  is the top-level directory and not the row's own, which is the plan's
+  "some ancestor has a seen file under it" rule collapsed: a file under a
+  nested directory is under its top-level ancestor too, so a reorganisation
+  that empties `a/novels/` while `a/` keeps files still prunes, where a
+  disk mounted at `a/` going offline leaves nothing under `a/` at any
+  depth. Two limits follow and are recorded rather than left to be
+  discovered. **Only a mount directly under the library root is
+  protected**: `mnt/disk2` offline beside a populated `mnt/disk1` has a
+  populated top-level ancestor, so its rows are pruned after grace exactly
+  as before — the plan's own rule seen from the other side. And **a
+  root-level row has no top-level directory**, so it is covered by the
+  `Scanned == 0` guard alone and otherwise reconciles by `Lstat` as before,
+  which is asymmetric on purpose: deleting every root-level file while a
+  subdirectory keeps books prunes them after grace, while deleting every
+  file under a top-level subdirectory while the root keeps books does not,
+  since a root-level file is not a mount shape and the plan's literal rule
+  (no ancestor below the root) would otherwise never prune one. The cost,
+  accepted: the last *book* file deleted from a top-level directory —
+  sidecars do not count, matching how `Scanned` counts — stays marked
+  missing, a phantom card with "missing" on the detail page, until that
+  directory gains a book again, and a phantom card is recoverable where a
+  pruned book's edits are not. The most ordinary way to pay it is not a
+  deletion but a **renamed top-level folder**: every book under it gains a
+  live `Moved` row and keeps its old row marked, the old name never regains
+  a book, so each of them shows "2 paths" and a dead location annotated
+  "missing" for good, with the Warn firing on every sweep — recovery today
+  is recreating the old name with a book in it and waiting out the grace,
+  and the "forget this location" affordance that would be the honest fix is
+  `docs/backlog/2026090901-forget-missing-location.md`. Storing `st_dev` per row would be the
+  precise test and was declined: it adds the very column the mover
+  paragraph below argues against, plus a migration and backfill, for a
+  guarantee this rule already gives. And reconciliation is skipped entirely
+  if the sweep visited zero files (an unmounted volume can present as an
+  empty directory, so seeing nothing is not evidence that everything is
+  gone), logged at Warn — the root case of the same rule, kept for its
+  specific message; `Unconfirmed` reads zero on that sweep, since nothing
+  was counted, and the Warn is what carries it.
 - The filesystem watcher (`internal/scanner/watcher.go`) is a *trigger*,
   not a second index path: it never reads, hashes or parses the file an
   event names, it only pokes a capacity-1 channel that `cmd/server`'s one

@@ -24,13 +24,17 @@ import (
 
 // Result summarizes what a Scan did, for logging.
 type Result struct {
-	Scanned           int
-	New               int
-	Moved             int
-	Unchanged         int
-	Orphaned          int
-	Missing           int
-	Pruned            int
+	Scanned   int
+	New       int
+	Moved     int
+	Unchanged int
+	Orphaned  int
+	Missing   int
+	Pruned    int
+	// Unconfirmed counts rows absent this sweep whose top-level directory
+	// yielded no files, so they were marked missing but not trusted for
+	// deletion: their absence may be an offline sub-mount
+	Unconfirmed       int
 	CoversRegenerated int
 	Errors            int
 }
@@ -174,6 +178,35 @@ func relSlash(libraryDir, path string) string {
 // or not it was previously marked, since not being able to look isn't
 // evidence one way or the other.
 //
+// The same posture extends, for the prune alone, to a top-level directory
+// whose subtree yielded no files this sweep, whether it read as empty or
+// is gone: that is what an offline sub-mount looks like — a second bind
+// mount, an NFS share in a subfolder, an Unraid disk mid-rebuild — and
+// WalkDir reads it cleanly, so nothing lands in skippedDirs while every
+// row under it fails os.Lstat with ErrNotExist, the very signal the two
+// phases below trust. Rows under such a directory are still marked: the
+// mark is reversible, gives the detail page its annotation, and is what
+// keeps internal/sender off a path that is not there — an unmarked dead
+// row sorts first in ListBookFiles and fails every send of its book, which
+// a renamed top-level folder would otherwise do to every book in it. They
+// are never pruned, however old the mark; they are counted in
+// Result.Unconfirmed and named in one Warn per sweep, not one per row.
+// The test is the top-level directory rather than the row's own because
+// "some ancestor of the row has a seen file under it" reduces to exactly
+// that (a file under a nested directory is under its top-level ancestor
+// too), so a reorganisation that empties a/novels/ while a/ keeps files
+// still prunes, where a disk mounted at a/ going offline leaves nothing
+// under a/ at any depth. A mount nested one level down beside a populated
+// sibling is therefore not protected. The cost is that the last book file
+// deleted from a top-level directory stays marked missing until the
+// directory gains a file again — a phantom card is recoverable, a pruned
+// book's manual edits and provenance are not. A renamed top-level folder
+// pays the same cost on every book in it, a live Moved row beside a dead
+// one marked for good, since the old name never regains a file. A
+// root-level row has no top-level directory and is covered by the
+// Scanned == 0 guard alone, the root case of the same rule kept for its
+// specific message
+//
 // Every unseen, non-excluded row is re-checked with os.Lstat this same
 // sweep — including one already marked missing from an earlier sweep.
 // Deletion eligibility (past missingGrace) is necessary but never
@@ -197,6 +230,8 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 
 	now := time.Now()
 	cutoff := now.Add(-missingGrace)
+	populated := populatedTopLevelDirs(seen)
+	unconfirmed := make(map[string]int)
 
 	var toMark, toClear, toPrune []int64
 	for _, f := range all {
@@ -225,13 +260,30 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 			continue
 		}
 
-		if !f.MissingSince.Valid {
+		// A root-level row has no top-level directory and is covered by
+		// the Scanned == 0 guard instead
+		unconfirmedDir := false
+		if top := topLevelDir(f.FilePath); top != "" && !populated[top] {
+			unconfirmed[top]++
+			unconfirmedDir = true
+		}
+		switch {
+		case !f.MissingSince.Valid:
 			toMark = append(toMark, f.ID)
-		} else if f.MissingSince.Time.Before(cutoff) {
+		case unconfirmedDir:
+			// Marked, but an empty top-level directory is not evidence its
+			// books are gone, so the prune is refused whatever the mark's age
+		case f.MissingSince.Time.Before(cutoff):
 			toPrune = append(toPrune, f.ID)
 		}
 	}
 
+	if len(unconfirmed) > 0 {
+		for _, n := range unconfirmed {
+			result.Unconfirmed += n
+		}
+		slog.Warn("directories yielded no files, refusing to prune their rows", "rows_by_dir", unconfirmed, "rows", result.Unconfirmed)
+	}
 	if len(toMark) > 0 {
 		if err := db.SetFilesMissing(ctx, toMark, now); err != nil {
 			slog.Warn("mark missing files failed", "error", err)
@@ -257,6 +309,27 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 	if files > 0 || books > 0 {
 		slog.Info("pruned missing files", "files", files, "books", books)
 	}
+}
+
+// topLevelDir returns the first segment of a slash-separated relative
+// path, or "" for a path directly under the library root
+func topLevelDir(relPath string) string {
+	if i := strings.IndexByte(relPath, '/'); i >= 0 {
+		return relPath[:i]
+	}
+	return ""
+}
+
+// populatedTopLevelDirs is the set of top-level directories with at least
+// one seen file under them, at any depth
+func populatedTopLevelDirs(seen map[string]bool) map[string]bool {
+	populated := make(map[string]bool)
+	for p := range seen {
+		if top := topLevelDir(p); top != "" {
+			populated[top] = true
+		}
+	}
+	return populated
 }
 
 // underAny reports whether relPath is nested under any of prefixes.
