@@ -1775,14 +1775,22 @@ full design.
   ("Sending"): the UI has no separate treatment for the gap between
   enqueue and claim, which the worker's `Notify` poke keeps short anyway.
   Every route that renders the control — the full page, the send POST,
-  the status poll and the recipient removal — passes through
-  `applySendability`, so a fragment can never offer a button the full
-  page withholds; the three fragment handlers load the book
-  (`loadSendDetail`) for that alone, which they did not before. That
-  helper returns no error on purpose: `sendHandler` still holds
-  `QueueSend`'s, which may be the rejected-address one the rest of the
-  handler branches on, and a second `err` in that scope is how it was
-  overwritten in the first attempt — the invalid-address test caught it.
+  the status poll and the recipient removal — copies
+  `BookDetail.SendableNote` onto the page, so a fragment can never offer
+  a button the full page withholds; the three fragment handlers load the
+  book for that alone, which they did not before, with the same inline
+  `GetBook`/500/404 block the detail and metadata handlers already use.
+  In `sendHandler` that lookup's error is named `dErr`, because `err` is
+  still `QueueSend`'s and may be the rejected-address one the rest of the
+  handler branches on — a second `err` in that scope silently overwrote
+  it in the first attempt, and the invalid-address test caught it. The
+  page carries **only the note**, not plan `2026090706`'s `Sendable` bool
+  beside it, and the template branches on the note: with two fields a
+  route that copied neither rendered an empty refusal line, which is a
+  contradiction ("refused, no reason") the one-field shape cannot
+  express. The trade is that such a route now offers the button instead,
+  which is exactly master's behaviour before the plan rather than a new
+  blank state, and every current route is pinned by a test either way.
   The whole control is one swap target (`id="send"`, the class
   `detail__send` kept alongside it for positioning) — form and status
   share a region because the states replace each other rather than

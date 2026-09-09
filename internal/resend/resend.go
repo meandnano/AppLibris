@@ -66,9 +66,10 @@ type Client struct {
 
 // NewClient builds a Client that authenticates with apiKey and sends as
 // from. It owns its own *http.Client rather than sharing http.DefaultClient,
-// so nothing else in the process can reconfigure the one this credential
-// travels through; the deadline is the caller's context's — see
-// SendTimeout for why no Timeout is set here.
+// so no other package can set a Timeout on it behind this one's back; the
+// transport underneath is still the shared http.DefaultTransport, which is
+// where the dial and TLS bounds come from. The deadline is the caller's
+// context's — see SendTimeout for why no Timeout is set here.
 func NewClient(apiKey, from string) *Client {
 	return &Client{
 		apiKey:     apiKey,

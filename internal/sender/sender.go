@@ -250,8 +250,11 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 		// restart coming to resolve it, so it is recorded — see
 		// timedOutReason for why as failed, and with that sentence rather
 		// than the error's own text, which names a URL and a Go context
-		// and nothing a person can act on. Every other transport error
-		// is an answer.
+		// and nothing a person can act on. A deadline that expires while
+		// the connection is still being established also lands here,
+		// hedged as unknown though nothing was sent: the safe direction,
+		// and telling the two apart is not worth a wrong answer in the
+		// other one. Every other transport error is an answer.
 		if errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("send timed out", "send_id", send.ID, "deadline", deadline, "size", info.Size(), "error", err)
 			w.fail(ctx, send.ID, timedOutReason)

@@ -29,9 +29,11 @@ func TestSendExpiredContextIsDeadlineExceeded(t *testing.T) {
 	// The handler drains the body before waiting: the server only starts
 	// watching for the client's disconnect once the body is consumed, and
 	// it has to notice, or Close in the cleanup waits on it forever. The
-	// release channel is the belt to that brace.
+	// release channel is the belt to that brace — registered after
+	// testClient so that, cleanups running last-in-first-out, it fires
+	// before the server's Close rather than behind a Close that is waiting
+	// on this very handler.
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
 		select {
@@ -39,6 +41,7 @@ func TestSendExpiredContextIsDeadlineExceeded(t *testing.T) {
 		case <-release:
 		}
 	})
+	t.Cleanup(func() { close(release) })
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 

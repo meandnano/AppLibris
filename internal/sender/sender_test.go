@@ -366,7 +366,13 @@ func TestWorkerCancellationLeavesRowSendingForRecovery(t *testing.T) {
 	stub := &stubTransport{sendFunc: func(ctx context.Context, to string, a resend.Attachment) (string, error) {
 		close(entered)
 		<-ctx.Done()
-		return "", ctx.Err()
+		// Deliberately DeadlineExceeded rather than ctx.Err(): a parent
+		// cancellation must win over the timeout classification whatever
+		// the transport's error says, or a shutdown landing during a slow
+		// upload writes a permanent failed row instead of leaving the
+		// unknown for FailInterruptedSends. This is what pins the order
+		// of the two checks in process.
+		return "", fmt.Errorf("send request: %w", context.DeadlineExceeded)
 	}}
 	w := New(db, stub, libraryDir)
 

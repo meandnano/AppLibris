@@ -73,17 +73,23 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 
 		// The fragment needs the book's format to decide whether it may
 		// offer the button at all, which nothing above has loaded: the
-		// queue path reads a title snapshot, the rejection path reads a
-		// send row. The book cannot be gone here unless it was pruned in
-		// the last few statements, and that narrow race is a 404 like any
-		// other unknown book.
-		detail := loadSendDetail(w, r, svc, id)
+		// queue path read a title snapshot, and the rejection path never
+		// reached the book at all, since the address is parsed first. So
+		// this is also the rejection path's only existence check, and an
+		// unknown book is a 404 on both. Named dErr, not err: err is still
+		// QueueSend's, and the rejected-address branch below reads it.
+		detail, dErr := svc.GetBook(r.Context(), id)
+		if dErr != nil {
+			slog.Error("get book failed", "id", id, "error", dErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		if detail == nil {
+			http.NotFound(w, r)
 			return
 		}
 
-		page := bookDetailPage{ID: id, SendEnabled: true}
-		applySendability(&page, detail)
+		page := bookDetailPage{ID: id, SendEnabled: true, SendableNote: detail.SendableNote}
 		if errors.Is(err, service.ErrInvalidAddress) {
 			// Nothing was queued, so the control has to come back showing
 			// the state it already had — re-reading it rather than passing
@@ -115,26 +121,6 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 			slog.Error("render template failed", "template", "send-control", "error", err)
 		}
 	}
-}
-
-// loadSendDetail fetches the book a send-control fragment is being
-// rendered for, answering the request itself — 500 on a storage error,
-// 404 on an unknown book — when it cannot. A nil result means the
-// response is already written and the handler must return. It returns no
-// error on purpose: sendHandler still holds QueueSend's, which may be the
-// rejected-address one the rest of that handler branches on, and a second
-// err in that scope is how it would be silently overwritten.
-func loadSendDetail(w http.ResponseWriter, r *http.Request, svc *service.Service, id int64) *service.BookDetail {
-	detail, err := svc.GetBook(r.Context(), id)
-	if err != nil {
-		slog.Error("get book failed", "id", id, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return nil
-	}
-	if detail == nil {
-		http.NotFound(w, r)
-	}
-	return detail
 }
 
 // removeRecipientHandler serves POST /recipients/remove: deleting one saved
@@ -176,8 +162,14 @@ func removeRecipientHandler(svc *service.Service, sendEnabled bool) http.Handler
 			return
 		}
 
-		detail := loadSendDetail(w, r, svc, bookID)
+		detail, err := svc.GetBook(r.Context(), bookID)
+		if err != nil {
+			slog.Error("get book failed", "id", bookID, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		if detail == nil {
+			http.NotFound(w, r)
 			return
 		}
 		page := bookDetailPage{ID: bookID}
@@ -227,12 +219,17 @@ func sendStatusHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc 
 			return
 		}
 
-		detail := loadSendDetail(w, r, svc, id)
-		if detail == nil {
+		detail, err := svc.GetBook(r.Context(), id)
+		if err != nil {
+			slog.Error("get book failed", "id", id, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		page := bookDetailPage{ID: id, SendEnabled: sendEnabled}
-		applySendability(&page, detail)
+		if detail == nil {
+			http.NotFound(w, r)
+			return
+		}
+		page := bookDetailPage{ID: id, SendEnabled: sendEnabled, SendableNote: detail.SendableNote}
 		applySendState(&page, state)
 		if sendEnabled {
 			recipients, err := svc.Recipients(r.Context())

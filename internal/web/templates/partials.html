@@ -194,12 +194,13 @@
   {{if not .SendEnabled}}
   <p class="send__disabled">Sending is not configured</p>
   {{else}}
-  {{if not .Sendable}}
+  {{if .SendableNote}}
   {{/* No form at all, not a disabled button: there is nothing a poll
        could swap in, and a button that cannot do what it says is worse
        than a sentence saying why. A status box below still renders for a
        send made before the format was refused — that is history, and
-       history is not edited. */}}
+       history is not edited. The branch is on the note itself, so a
+       refusal always has its reason. */}}
   <p class="send__disabled">{{.SendableNote}}</p>
   {{else}}
   <form class="send__form" method="post" action="/books/{{.ID}}/send" hx-post="/books/{{.ID}}/send" hx-target="#send" hx-swap="outerHTML">
