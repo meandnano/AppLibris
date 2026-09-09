@@ -61,8 +61,15 @@ type bookDetailPage struct {
 	DescriptionField editableFieldView
 	MetadataFields   []editableFieldView
 
-	ID                int64
-	SendEnabled       bool
+	ID          int64
+	SendEnabled bool
+	// SendableNote is service.BookDetail's sentence for a format Kindle
+	// does not accept; empty means the book can be sent. The template
+	// branches on the note alone rather than on a separate bool, so the
+	// page cannot hold the contradictory "not sendable, no reason" state
+	// that a route forgetting to copy one of two fields would render as an
+	// empty refusal line.
+	SendableNote      string
 	Recipients        []service.RecipientOption
 	Send              *service.SendState
 	SendPending       bool
@@ -161,7 +168,7 @@ func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.B
 		ID:                detail.ID,
 	}
 	applyFieldViews(&page, detail, edit)
-	if err := populateSendControl(r.Context(), svc, sendEnabled, &page); err != nil {
+	if err := populateSendControl(r.Context(), svc, sendEnabled, detail, &page); err != nil {
 		return nil, err
 	}
 	if err := populateEnrichControl(r.Context(), svc, enrichEnabled, &page); err != nil {
@@ -300,8 +307,9 @@ func makeFieldViews(detail *service.BookDetail, edit string) map[storage.Metadat
 // detail-page render and the standalone send-control fragment handlers in
 // send.go, so the three routes derive the picker and status box the same
 // way.
-func populateSendControl(ctx context.Context, svc *service.Service, sendEnabled bool, page *bookDetailPage) error {
+func populateSendControl(ctx context.Context, svc *service.Service, sendEnabled bool, detail *service.BookDetail, page *bookDetailPage) error {
 	page.SendEnabled = sendEnabled
+	page.SendableNote = detail.SendableNote
 	if !sendEnabled {
 		return nil
 	}

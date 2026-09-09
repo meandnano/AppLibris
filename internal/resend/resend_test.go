@@ -5,15 +5,49 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
-func TestNewClientSetsTimeout(t *testing.T) {
+// The deadline belongs to the caller's context: a client-level Timeout
+// would win whenever it was the smaller of the two, silently capping the
+// size-scaled deadline internal/sender computes for a large attachment.
+func TestNewClientLeavesTheDeadlineToTheCaller(t *testing.T) {
 	c := NewClient("key", "from@example.com")
-	if c.httpClient.Timeout != SendTimeout {
-		t.Errorf("httpClient.Timeout = %v, want SendTimeout (%v); http.DefaultClient has none at all", c.httpClient.Timeout, SendTimeout)
+	if c.httpClient.Timeout != 0 {
+		t.Errorf("httpClient.Timeout = %v, want none — the worker's per-send context carries the deadline", c.httpClient.Timeout)
+	}
+}
+
+// internal/sender tells a timed-out send from a rejected one with
+// errors.Is(err, context.DeadlineExceeded), so the wrapping here has to
+// preserve that through the url.Error net/http returns.
+func TestSendExpiredContextIsDeadlineExceeded(t *testing.T) {
+	// The handler drains the body before waiting: the server only starts
+	// watching for the client's disconnect once the body is consumed, and
+	// it has to notice, or Close in the cleanup waits on it forever. The
+	// release channel is the belt to that brace — registered after
+	// testClient so that, cleanups running last-in-first-out, it fires
+	// before the server's Close rather than behind a Close that is waiting
+	// on this very handler.
+	release := make(chan struct{})
+	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := client.Send(ctx, "reader@kindle.com", Attachment{Filename: "b.epub", Content: []byte("x")})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want one wrapping context.DeadlineExceeded", err)
 	}
 }
 

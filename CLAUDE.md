@@ -508,12 +508,17 @@ full design.
   DESIGN.md derives before attempting a send, and setting a non-empty
   `text` body ("Sent from the library.") since Resend requires one of
   `text`/`html`/`react`. Its caller is `internal/sender`'s queue worker.
-  `NewClient` builds its own `*http.Client` with `SendTimeout` (5 minutes)
-  set, rather than `http.DefaultClient`, which has none — the exported
-  constant covers the *whole* request including the attachment upload, not
-  just a connect deadline, and `internal/sender` reuses it for the
-  worker's own per-job context deadline, the mechanism that actually makes
-  a send abandonable at shutdown. The whole attachment is still held in
+  `NewClient` builds its own `*http.Client` rather than sharing
+  `http.DefaultClient`, but sets **no** `Timeout` on it: the deadline is
+  the caller's context's, and `internal/sender` owns it. `SendTimeout`
+  (5 minutes) is exported as the *floor* of that deadline, not the
+  deadline itself — the worker scales it up with the attachment's size,
+  and since the smaller of a client-level timeout and the context wins, a
+  fixed `Timeout` here would silently cap exactly the large send that
+  scaling exists to allow. A caller passing `context.Background()` has no
+  backstop at all; the worker is the only caller and always passes a
+  deadline, and a test pins the absent `Timeout` so the old backstop is
+  not quietly restored. The whole attachment is still held in
   memory as raw bytes, a base64 string, the marshaled JSON body and a
   reader over it all at once (~3.3x `MaxAttachmentSize` at the ceiling) —
   deliberately unstreamed: `internal/sender` runs a single worker, so
@@ -540,12 +545,28 @@ full design.
   the index *itself* is reported separately ("could not read the library
   index — try again"), never folded into that one: a storage error says
   nothing about whether the book is still there, and claiming otherwise is
-  a confident lie about a file that is probably fine. Before reading
+  a confident lie about a file that is probably fine. The filesystem gets
+  the same treatment: only `fs.ErrNotExist` from the stat or the read means
+  the file is gone, and every other error — `EACCES` after a permissions
+  change, `EIO` from a failing disk, `ESTALE` from an NFS restart, a path
+  component that is no longer a directory, the ordinary failures on a
+  NAS — records a third reason, "could not read the file — try again", and
+  logs the OS error with the path at Error (`failFileError`), since the
+  status box deliberately carries a sentence rather than an errno and the
+  log is otherwise the only place to diagnose from. An unknown is not
+  evidence, the posture the scanner's missing-file reconciliation takes
+  toward a non-`ErrNotExist` `Lstat`. Before reading
   the file, its size is stat'd against `resend.MaxAttachmentSize`, failing
   with both sizes named ("14.2 MB exceeds the 28 MB limit") so an
   oversized file is never loaded into memory and the failure reason always
   has the numbers; the transport call itself runs under a per-job
-  `context.WithTimeout(ctx, resend.SendTimeout)`. A transport error's text
+  deadline `sendDeadline` computes from that size — the base64-encoded
+  length over `minUplinkBytesPerSecond` (1 Mbit/s, a slow domestic line)
+  plus half of `resend.SendTimeout` as slack, floored at `SendTimeout`
+  itself, so a small file keeps five minutes and a 28 MB one gets about
+  seven and three-quarter rather than being cut off mid-upload. The floor
+  is a `Worker` field (`sendTimeout`), defaulted from the constant, so a
+  test can drive the timeout path in milliseconds. A transport error's text
   is recorded verbatim (truncated to `maxFailureReason`, 500 bytes, on a
   UTF-8 boundary) as the
   failure reason — Resend's API errors already read as sentences. Two
@@ -570,7 +591,21 @@ full design.
   rewrites a delivered book as failed and invites a duplicate send. Only
   the genuinely unknown case, a transport call abandoned mid-flight (its
   error arrives with `ctx` already cancelled), skips the write and leaves
-  the row `sending` for startup recovery to surface.
+  the row `sending` for startup recovery to surface. **A send whose own
+  deadline expired is the same unknown** — the upload may have completed
+  with only the response outstanding — but with no restart coming to
+  resolve it, so it is the one unknown that *is* written: `failed`, the
+  only terminal state that offers Retry, with `timedOutReason` ("timed out
+  before Resend answered — check the Kindle before sending again") in
+  place of the raw error's URL and `context deadline exceeded`, the
+  sentence carrying the doubt the state cannot. It is detected by
+  `errors.Is(err, context.DeadlineExceeded)` *after* the `ctx.Err()` check,
+  since a parent cancellation also expires the child context; a resend
+  test pins that `Client.Send` wraps the error so that check keeps
+  working. Leaving it `sending` was rejected because the UI would poll it
+  until the next restart; Resend's idempotency keys would make the retry
+  itself safe and are the right long-term answer, deliberately a plan of
+  their own.
 - `internal/enrich` is the metadata provider-enrichment queue: a single
   `Worker` over `enrichment_jobs`, the `Provider` interface
   `internal/openlibrary` and `internal/googlebooks` implement, and the `Resolve`
@@ -1430,7 +1465,19 @@ full design.
   reads the book directly via storage rather than through `GetBook` (whose
   authors/file-location joins a title snapshot has no use for), returning
   `nil, nil` on an unknown id, `GetBook`'s own contract; then saves the
-  recipient (idempotently) and calls `EnqueueSend`. `Service.Notify
+  recipient (idempotently) and calls `EnqueueSend`. `BookDetail.Sendable`
+  and `SendableNote` are whether Amazon's Send to Kindle accepts the
+  book's format at all, decided by `sendableFormat` over a table of the
+  formats Amazon lists that the scanner can index — today only `epub`.
+  Amazon **drops** an FB2 or ZIP attachment silently, so a send Resend
+  accepted reads "Delivered" for a book that never reached the device;
+  until DESIGN.md's deferred format conversion exists, the honest surface
+  is a control that says why it is not offered, and the decision lives
+  here because a future API answers the same question. `QueueSend` does
+  **not** refuse an unsendable book: the button is not rendered, and a
+  hand-crafted POST queueing a send is harmless, where a 4xx would be a
+  second rule to keep in step with the first for no visible gain.
+  `Service.Notify
   func()`, set by `cmd/server` to the worker's `Notify` method (nil in
   tests and whenever sending is unconfigured), is called once a send is
   successfully queued — a function field rather than an interface, since
@@ -1714,7 +1761,12 @@ full design.
   `GET /books/{id}/sends/{sendID}` build one mostly-zero-valued
   `bookDetailPage` rather than a parallel type. Plate 06's four states
   (idle, sending, delivered, failed) plus a fifth for
-  `RESEND_API_KEY`/`RESEND_FROM` being unset are driven by fields
+  `RESEND_API_KEY`/`RESEND_FROM` being unset, and a sixth for a format
+  Kindle does not accept (`Sendable` false, from `service.BookDetail` —
+  no form at all in the `send__disabled` treatment, the `SendableNote`
+  sentence in its place, while a status box for a send made before the
+  refusal still renders beneath it, since history is not edited), are
+  driven by fields
   `book.go`'s `applySendState` computes once — `SendPending`,
   `SendButtonLabel`, `SendButtonPrimary`, `SendAt`, `SendPollURL` — the
   same discipline `searchSummary` applies to the results line, so the
@@ -1722,6 +1774,23 @@ full design.
   it. `send.Status` of `queued` or `sending` are one visual state
   ("Sending"): the UI has no separate treatment for the gap between
   enqueue and claim, which the worker's `Notify` poke keeps short anyway.
+  Every route that renders the control — the full page, the send POST,
+  the status poll and the recipient removal — copies
+  `BookDetail.SendableNote` onto the page, so a fragment can never offer
+  a button the full page withholds; the three fragment handlers load the
+  book for that alone, which they did not before, with the same inline
+  `GetBook`/500/404 block the detail and metadata handlers already use.
+  In `sendHandler` that lookup's error is named `dErr`, because `err` is
+  still `QueueSend`'s and may be the rejected-address one the rest of the
+  handler branches on — a second `err` in that scope silently overwrote
+  it in the first attempt, and the invalid-address test caught it. The
+  page carries **only the note**, not plan `2026090706`'s `Sendable` bool
+  beside it, and the template branches on the note: with two fields a
+  route that copied neither rendered an empty refusal line, which is a
+  contradiction ("refused, no reason") the one-field shape cannot
+  express. The trade is that such a route now offers the button instead,
+  which is exactly master's behaviour before the plan rather than a new
+  blank state, and every current route is pinned by a test either way.
   The whole control is one swap target (`id="send"`, the class
   `detail__send` kept alongside it for positioning) — form and status
   share a region because the states replace each other rather than

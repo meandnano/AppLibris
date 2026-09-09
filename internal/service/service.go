@@ -217,6 +217,42 @@ type BookDetail struct {
 	// only the provider ones; see internal/web's makeFieldViews for why
 	// provenance is rendered as a caveat rather than a label on all three.
 	FieldSources map[string]string
+	// Sendable is whether Amazon's Send to Kindle accepts this book's
+	// format as an email attachment; SendableNote is the sentence the send
+	// control shows in place of its button when it does not. Decided here,
+	// from Format, rather than in the transport — a future API answers the
+	// same question, and a handler stays "parse request, call service
+	// method, render".
+	Sendable     bool
+	SendableNote string
+}
+
+// kindleFormats is the set of formats Amazon's Send to Kindle by email
+// accepts as an attachment, restricted to those the scanner can index.
+// Amazon also lists PDF, DOC, DOCX, TXT, RTF, HTM, HTML and a few image
+// types, none of which the scanner records yet; a future one needs an
+// entry here and nothing else. FB2 and ZIP archives are not accepted at
+// all — Amazon drops them silently, so a send that Resend accepted reads
+// "Delivered" for a book that never reaches the device, which is what
+// makes this a rule the UI has to know rather than a failure it can show.
+var kindleFormats = map[string]bool{
+	"epub": true,
+}
+
+// sendableFormat decides whether a book of the given format can be sent
+// to a Kindle and, when it cannot, the sentence the send control shows
+// instead of a button. FB2 gets the specific remedy because it is the
+// library's one indexed format Kindle refuses and DESIGN.md's deferred
+// conversion is the fix; anything else unrecognised gets a generic
+// refusal rather than a remedy this code cannot vouch for.
+func sendableFormat(format string) (sendable bool, note string) {
+	if kindleFormats[format] {
+		return true, ""
+	}
+	if format == "fb2" {
+		return false, "Kindle doesn't accept FB2 — convert to EPUB to send."
+	}
+	return false, "Kindle doesn't accept this format."
 }
 
 // EnrichmentState is one enrichment job as the detail page's control needs
@@ -286,6 +322,8 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 		fieldSources[string(field)] = source
 	}
 
+	sendable, sendableNote := sendableFormat(book.Format)
+
 	var fileSize int64
 	hasFileSize := len(files) > 0
 	locations := make([]FileLocation, len(files))
@@ -307,6 +345,8 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 		Description:   book.Description,
 		CoverPath:     book.CoverPath,
 		Format:        book.Format,
+		Sendable:      sendable,
+		SendableNote:  sendableNote,
 		FileSize:      fileSize,
 		HasFileSize:   hasFileSize,
 		AddedAt:       book.AddedAt,

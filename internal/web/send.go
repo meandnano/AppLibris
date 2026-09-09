@@ -71,7 +71,25 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 			return
 		}
 
-		page := bookDetailPage{ID: id, SendEnabled: true}
+		// The fragment needs the book's format to decide whether it may
+		// offer the button at all, which nothing above has loaded: the
+		// queue path read a title snapshot, and the rejection path never
+		// reached the book at all, since the address is parsed first. So
+		// this is also the rejection path's only existence check, and an
+		// unknown book is a 404 on both. Named dErr, not err: err is still
+		// QueueSend's, and the rejected-address branch below reads it.
+		detail, dErr := svc.GetBook(r.Context(), id)
+		if dErr != nil {
+			slog.Error("get book failed", "id", id, "error", dErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if detail == nil {
+			http.NotFound(w, r)
+			return
+		}
+
+		page := bookDetailPage{ID: id, SendEnabled: true, SendableNote: detail.SendableNote}
 		if errors.Is(err, service.ErrInvalidAddress) {
 			// Nothing was queued, so the control has to come back showing
 			// the state it already had — re-reading it rather than passing
@@ -144,8 +162,18 @@ func removeRecipientHandler(svc *service.Service, sendEnabled bool) http.Handler
 			return
 		}
 
+		detail, err := svc.GetBook(r.Context(), bookID)
+		if err != nil {
+			slog.Error("get book failed", "id", bookID, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if detail == nil {
+			http.NotFound(w, r)
+			return
+		}
 		page := bookDetailPage{ID: bookID}
-		if err := populateSendControl(r.Context(), svc, sendEnabled, &page); err != nil {
+		if err := populateSendControl(r.Context(), svc, sendEnabled, detail, &page); err != nil {
 			slog.Error("build send control failed", "id", bookID, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -191,7 +219,17 @@ func sendStatusHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc 
 			return
 		}
 
-		page := bookDetailPage{ID: id, SendEnabled: sendEnabled}
+		detail, err := svc.GetBook(r.Context(), id)
+		if err != nil {
+			slog.Error("get book failed", "id", id, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if detail == nil {
+			http.NotFound(w, r)
+			return
+		}
+		page := bookDetailPage{ID: id, SendEnabled: sendEnabled, SendableNote: detail.SendableNote}
 		applySendState(&page, state)
 		if sendEnabled {
 			recipients, err := svc.Recipients(r.Context())
