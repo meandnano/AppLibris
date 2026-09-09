@@ -70,6 +70,10 @@ func run(ctx context.Context) error {
 	if watchSettle < 0 {
 		return fmt.Errorf("parse WATCH_SETTLE: must not be negative: %s", watchSettle)
 	}
+	requireFetchMetadata, err := strconv.ParseBool(envOrDefault("REQUIRE_FETCH_METADATA", "true"))
+	if err != nil {
+		return fmt.Errorf("parse REQUIRE_FETCH_METADATA: %w", err)
+	}
 
 	metadataProviderNames := metadataProviderNames(os.LookupEnv)
 
@@ -148,7 +152,16 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
-	mux.Handle("/", web.Routes(svc, coversDir, sendEnabled, enrichEnabled))
+	// The UI's cross-site guard reads Sec-Fetch-Site, which browsers send
+	// only to an HTTPS or localhost origin, so the service is documented as
+	// requiring an HTTPS gateway in front with this listener reachable only
+	// through it. Failing closed by default is what makes a deployment that
+	// breaks the requirement show up in the log instead of silently running
+	// without the guard; the opt-out keeps a one-line tripwire.
+	if !requireFetchMetadata {
+		slog.Warn("REQUIRE_FETCH_METADATA=false: state-changing requests without fetch metadata are admitted, so cross-site protection depends on the listener being unreachable from any browser except through an HTTPS gateway")
+	}
+	mux.Handle("/", fetchMetadataGuard(requireFetchMetadata, web.Routes(svc, coversDir, sendEnabled, enrichEnabled)))
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -310,6 +323,19 @@ func run(ctx context.Context) error {
 	waitForBackground(cancelScan, enrichDone, shutdownCtx.Done(), "enrichment")
 
 	return db.Close()
+}
+
+// fetchMetadataGuard picks which of internal/web's two fetch-metadata
+// wrappers goes around the UI routes. A function rather than an inline if
+// so the mapping from the parsed setting to the wrapper is testable on its
+// own: swapping the two branches inverts the security default with every
+// handler test still green, which is exactly the kind of mistake a
+// verification checklist does not catch and a table test does.
+func fetchMetadataGuard(require bool, next http.Handler) http.Handler {
+	if require {
+		return web.RequireFetchMetadata(next)
+	}
+	return web.WarnMissingFetchMetadata(next)
 }
 
 // waitForBackground cancels the background goroutine driven by cancel and

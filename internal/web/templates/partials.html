@@ -384,3 +384,12 @@
   </dd>
 </div>
 {{end}}
+
+{{/* What RequireFetchMetadata hands an htmx caller it has refused. It
+     arrives with HX-Reswap: afterbegin, so it lands as the first child of
+     whatever the posting form targets and the control below it survives.
+     A 200 rather than the 403 every other client gets, because htmx does
+     not swap a 4xx and a refusal nobody can see is a broken button. */}}
+{{define "fetch-metadata-refused"}}
+<p class="refused" role="alert">Refused: this page must be reached through the service&rsquo;s HTTPS address &mdash; see the server log.</p>
+{{end}}

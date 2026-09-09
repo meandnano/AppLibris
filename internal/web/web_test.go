@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1071,4 +1072,131 @@ func TestButtonClassesInMarkupHaveRules(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The two fetch-metadata wrappers are what turn the deployment requirement
+// (an HTTPS gateway in front, the plain listener unreachable otherwise)
+// into something the log can report as violated. Both are tested against a
+// stub next handler rather than Routes, since what they decide is
+// independent of any route and Routes itself must keep admitting an empty
+// header for the opt-out mode to mean anything.
+func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		method   string
+		headers  map[string]string
+		wantCode int
+		wantNext bool
+		wantBody string
+		wantSwap string
+	}{
+		{name: "POST with no header", method: http.MethodPost, wantCode: http.StatusForbidden, wantBody: "HTTPS address"},
+		// An htmx caller is refused with a 200 and a swap instruction, since
+		// the vendored htmx does not swap a 4xx and a refusal nobody can see
+		// is indistinguishable from a broken button. Same security property:
+		// next is not called either way.
+		{name: "htmx POST with no header", method: http.MethodPost, headers: map[string]string{"HX-Request": "true"},
+			wantCode: http.StatusOK, wantBody: "Refused", wantSwap: "afterbegin"},
+		// A history-restore request is swapped into the whole body, so it
+		// is not a fragment caller and gets the plain 403 like everyone else.
+		{name: "htmx history-restore POST with no header", method: http.MethodPost,
+			headers:  map[string]string{"HX-Request": "true", "HX-History-Restore-Request": "true"},
+			wantCode: http.StatusForbidden, wantBody: "HTTPS address"},
+		{name: "POST same-origin", method: http.MethodPost, headers: map[string]string{"Sec-Fetch-Site": "same-origin"}, wantCode: http.StatusOK, wantNext: true},
+		{name: "POST none", method: http.MethodPost, headers: map[string]string{"Sec-Fetch-Site": "none"}, wantCode: http.StatusOK, wantNext: true},
+		// Refusing cross-site is sameSiteOnly's job, not this wrapper's;
+		// it must pass the request on so that guard still gets to answer.
+		{name: "POST cross-site", method: http.MethodPost, headers: map[string]string{"Sec-Fetch-Site": "cross-site"}, wantCode: http.StatusOK, wantNext: true},
+		{name: "GET with no header", method: http.MethodGet, wantCode: http.StatusOK, wantNext: true},
+		{name: "HEAD with no header", method: http.MethodHead, wantCode: http.StatusOK, wantNext: true},
+		{name: "OPTIONS with no header", method: http.MethodOptions, wantCode: http.StatusOK, wantNext: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			handler := RequireFetchMetadata(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+			}))
+
+			req := httptest.NewRequest(tc.method, "/books/1/enrich", nil)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if called != tc.wantNext {
+				t.Errorf("next called = %v, want %v", called, tc.wantNext)
+			}
+			if tc.wantBody != "" && !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Errorf("body = %q, want it to contain %q", rec.Body.String(), tc.wantBody)
+			}
+			if got := rec.Header().Get("HX-Reswap"); got != tc.wantSwap {
+				t.Errorf("HX-Reswap = %q, want %q", got, tc.wantSwap)
+			}
+		})
+	}
+}
+
+func TestRequireFetchMetadataLogsEveryRefusal(t *testing.T) {
+	logged := captureLog(t)
+	handler := RequireFetchMetadata(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	for range 2 {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/books/1/send", nil))
+	}
+
+	if got := strings.Count(logged.String(), "REQUIRE_FETCH_METADATA"); got != 2 {
+		t.Errorf("logged %d refusals naming the env var, want 2:\n%s", got, logged.String())
+	}
+}
+
+func TestWarnMissingFetchMetadataAdmitsAndWarnsOnce(t *testing.T) {
+	logged := captureLog(t)
+	calls := 0
+	handler := WarnMissingFetchMetadata(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+	}))
+
+	// A request that does carry metadata is not what the tripwire is for
+	// and must not be the one that trips it.
+	withMetadata := httptest.NewRequest(http.MethodPost, "/books/1/send", nil)
+	withMetadata.Header.Set("Sec-Fetch-Site", "same-origin")
+	handler.ServeHTTP(httptest.NewRecorder(), withMetadata)
+	if logged.Len() != 0 {
+		t.Fatalf("a same-origin POST tripped the warning:\n%s", logged.String())
+	}
+
+	for range 3 {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/books/1/send", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200: this wrapper admits everything", rec.Code)
+		}
+	}
+
+	if calls != 4 {
+		t.Errorf("next called %d times, want 4", calls)
+	}
+	if got := strings.Count(logged.String(), "REQUIRE_FETCH_METADATA=false"); got != 1 {
+		t.Errorf("warned %d times, want exactly once:\n%s", got, logged.String())
+	}
+}
+
+// captureLog routes the default slog logger into a buffer for the rest of
+// the test, restoring the previous logger on cleanup.
+//
+// It replaces the process-global logger, so it must not be called from a
+// test that uses t.Parallel(), nor from one that starts goroutines which
+// log after the test returns: either would race the buffer and make any
+// assertion on it flaky rather than fail clearly.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+	return &buf
 }
