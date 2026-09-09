@@ -1413,6 +1413,280 @@ func TestScanUnreadableSubdirectoryPrunesNothingUnderIt(t *testing.T) {
 	}
 }
 
+// An offline sub-mount — a second bind mount, an NFS share in a subfolder,
+// an Unraid disk mid-rebuild — presents as a directory the walk reads
+// cleanly and finds empty, so nothing lands in skippedDirs and every row
+// under it fails Lstat with ErrNotExist, the very signal reconciliation
+// otherwise trusts. Its rows are marked like any other absent row, so the
+// detail page annotates them and the sender skips them, but must never be
+// pruned however long the directory stays empty: manual edits, provenance
+// and enrichment results are what pruning would destroy, and none of them
+// can be rebuilt from the files when the disk returns. Going offline is
+// simulated by moving the content out of the library and back, so the
+// remount lands byte-identical files at their old paths
+func TestScanSubdirectoryWithNoFilesPrunesNothingUnderIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// offline moves the library's b/ content into stash; online moves
+		// it back
+		offline, online func(t *testing.T, libDir, stash string)
+	}{
+		{"directory left empty",
+			func(t *testing.T, libDir, stash string) {
+				if err := os.Rename(filepath.Join(libDir, "b", "gone.epub"), filepath.Join(stash, "gone.epub")); err != nil {
+					t.Fatalf("move gone.epub out: %v", err)
+				}
+			},
+			func(t *testing.T, libDir, stash string) {
+				if err := os.Rename(filepath.Join(stash, "gone.epub"), filepath.Join(libDir, "b", "gone.epub")); err != nil {
+					t.Fatalf("move gone.epub back: %v", err)
+				}
+			}},
+		{"directory removed",
+			func(t *testing.T, libDir, stash string) {
+				if err := os.Rename(filepath.Join(libDir, "b"), filepath.Join(stash, "b")); err != nil {
+					t.Fatalf("move b out: %v", err)
+				}
+			},
+			func(t *testing.T, libDir, stash string) {
+				if err := os.Rename(filepath.Join(stash, "b"), filepath.Join(libDir, "b")); err != nil {
+					t.Fatalf("move b back: %v", err)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			libDir := t.TempDir()
+			coversDir := t.TempDir()
+			stash := t.TempDir()
+			db := openTestDB(t)
+			ctx := context.Background()
+
+			for _, dir := range []string{"a", "b"} {
+				if err := os.Mkdir(filepath.Join(libDir, dir), 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", dir, err)
+				}
+			}
+			writeTestEPUB(t, filepath.Join(libDir, "a", "kept.epub"), "Kept Book", "Author A", nil)
+			writeTestEPUB(t, filepath.Join(libDir, "b", "gone.epub"), "Gone Book", "Author B", nil)
+
+			if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+				t.Fatalf("first Scan: %v", err)
+			} else if first.New != 2 {
+				t.Fatalf("first scan = %+v, want New=2", first)
+			}
+
+			tc.offline(t, libDir, stash)
+
+			second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+			if err != nil {
+				t.Fatalf("second Scan: %v", err)
+			}
+			if second.Scanned != 1 || second.Missing != 1 || second.Pruned != 0 || second.Unconfirmed != 1 {
+				t.Errorf("second scan = %+v, want Scanned=1 Missing=1 Pruned=0 Unconfirmed=1", second)
+			}
+			gone, err := db.FindFileByPath(ctx, "b/gone.epub")
+			if err != nil || gone == nil {
+				t.Fatalf("FindFileByPath b/gone.epub: %+v, %v (want the row left in place)", gone, err)
+			}
+			if !gone.MissingSince.Valid {
+				t.Error("b/gone.epub is not marked missing, want it marked: the mark is what keeps the sender off a path that is not there")
+			}
+
+			// Long overdue, the row must still survive — the guard is about
+			// evidence, not age
+			if err := db.SetFilesMissing(ctx, []int64{gone.ID}, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+				t.Fatalf("backdate missing_since: %v", err)
+			}
+			third, err := Scan(ctx, db, libDir, coversDir, time.Hour)
+			if err != nil {
+				t.Fatalf("third Scan: %v", err)
+			}
+			if third.Missing != 0 || third.Pruned != 0 || third.Unconfirmed != 1 {
+				t.Errorf("third scan = %+v, want Missing=0 Pruned=0 Unconfirmed=1", third)
+			}
+			if f, err := db.FindFileByPath(ctx, "b/gone.epub"); err != nil || f == nil {
+				t.Fatalf("FindFileByPath b/gone.epub past grace: %+v, %v (want it to survive despite being overdue)", f, err)
+			} else if !f.MissingSince.Valid {
+				t.Error("MissingSince was cleared, want the pre-existing mark left exactly as it was")
+			}
+			if kept, err := db.FindFileByPath(ctx, "a/kept.epub"); err != nil || kept == nil {
+				t.Fatalf("FindFileByPath a/kept.epub: %+v, %v", kept, err)
+			} else if kept.MissingSince.Valid {
+				t.Error("a/kept.epub was marked missing, want the populated directory's row untouched")
+			}
+			var bookCount int
+			if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM books`).Scan(&bookCount); err != nil {
+				t.Fatalf("count books: %v", err)
+			}
+			if bookCount != 2 {
+				t.Errorf("books count = %d, want 2 (an offline directory must not cost its books)", bookCount)
+			}
+
+			// The disk returns: the same bytes at the same path clear the
+			// mark on the next sweep, with nothing re-indexed
+			tc.online(t, libDir, stash)
+			fourth, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+			if err != nil {
+				t.Fatalf("fourth Scan: %v", err)
+			}
+			if fourth.Scanned != 2 || fourth.New != 0 || fourth.Missing != 0 || fourth.Unconfirmed != 0 {
+				t.Errorf("fourth scan = %+v, want Scanned=2 New=0 Missing=0 Unconfirmed=0", fourth)
+			}
+			if f, err := db.FindFileByPath(ctx, "b/gone.epub"); err != nil || f == nil {
+				t.Fatalf("FindFileByPath b/gone.epub after remount: %+v, %v", f, err)
+			} else if f.MissingSince.Valid {
+				t.Error("b/gone.epub is still marked missing after it came back, want the mark cleared")
+			}
+		})
+	}
+}
+
+// The guard is about a directory that yielded nothing, not about any
+// missing row: a file removed from a directory that keeps another is a
+// deletion the sweep has every reason to trust, so it still reconciles in
+// the ordinary two phases
+func TestScanPrunesFileRemovedFromDirectoryThatKeepsAnother(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	for _, dir := range []string{"a", "b"} {
+		if err := os.Mkdir(filepath.Join(libDir, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	writeTestEPUB(t, filepath.Join(libDir, "a", "kept.epub"), "Kept Book", "Author A", nil)
+	writeTestEPUB(t, filepath.Join(libDir, "b", "stays.epub"), "Staying Book", "Author B", nil)
+	writeTestEPUB(t, filepath.Join(libDir, "b", "gone.epub"), "Gone Book", "Author C", nil)
+
+	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	} else if first.New != 3 {
+		t.Fatalf("first scan = %+v, want New=3", first)
+	}
+
+	if err := os.Remove(filepath.Join(libDir, "b", "gone.epub")); err != nil {
+		t.Fatalf("remove gone.epub: %v", err)
+	}
+
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.Missing != 1 || second.Pruned != 0 || second.Unconfirmed != 0 {
+		t.Errorf("second scan = %+v, want Missing=1 Pruned=0 Unconfirmed=0", second)
+	}
+
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE book_files SET missing_since = ? WHERE file_path = ?`,
+			"2020-01-01T00:00:00.000000000Z", "b/gone.epub")
+		return err
+	}); err != nil {
+		t.Fatalf("backdate missing_since: %v", err)
+	}
+
+	third, err := Scan(ctx, db, libDir, coversDir, time.Hour)
+	if err != nil {
+		t.Fatalf("third Scan: %v", err)
+	}
+	if third.Pruned != 1 || third.Unconfirmed != 0 {
+		t.Errorf("third scan = %+v, want Pruned=1 Unconfirmed=0", third)
+	}
+	if f, err := db.FindFileByPath(ctx, "b/gone.epub"); err != nil {
+		t.Fatalf("FindFileByPath b/gone.epub: %v", err)
+	} else if f != nil {
+		t.Error("b/gone.epub still exists, want it pruned: its directory kept a file, so its absence is confirmed")
+	}
+}
+
+// A book moved up from a/novels/ to a/ leaves a/novels/ empty, and that is
+// a real reorganisation, not an offline mount: a/ still has files, so the
+// old row is confirmed and marked. Narrowing the guard from the top-level
+// directory to the row's own directory is what this test refuses
+func TestScanMarksMissingWhenFileMovedOutOfNowEmptyNestedDirectory(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if err := os.MkdirAll(filepath.Join(libDir, "a", "novels"), 0o755); err != nil {
+		t.Fatalf("mkdir a/novels: %v", err)
+	}
+	oldPath := filepath.Join(libDir, "a", "novels", "book.epub")
+	writeTestEPUB(t, oldPath, "Book One", "Author A", nil)
+
+	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	} else if first.New != 1 {
+		t.Fatalf("first scan = %+v, want New=1", first)
+	}
+
+	if err := os.Rename(oldPath, filepath.Join(libDir, "a", "book.epub")); err != nil {
+		t.Fatalf("move book: %v", err)
+	}
+
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.Moved != 1 || second.Missing != 1 || second.Unconfirmed != 0 {
+		t.Errorf("second scan = %+v, want Moved=1 Missing=1 Unconfirmed=0", second)
+	}
+	if f, err := db.FindFileByPath(ctx, "a/novels/book.epub"); err != nil || f == nil {
+		t.Fatalf("FindFileByPath a/novels/book.epub: %+v, %v (want it marked, not deleted yet)", f, err)
+	} else if !f.MissingSince.Valid {
+		t.Error("a/novels/book.epub is not marked missing, want it marked: a/ still has files, so the move is confirmed")
+	}
+	if f, err := db.FindFileByPath(ctx, "a/book.epub"); err != nil || f == nil {
+		t.Fatalf("FindFileByPath a/book.epub: %+v, %v", f, err)
+	} else if f.MissingSince.Valid {
+		t.Error("a/book.epub is marked missing, want the new location clean")
+	}
+}
+
+// Deleting a single-directory library's only file makes the root itself
+// the directory that yielded nothing, and the Scanned == 0 guard answers
+// first: the row is left alone and not counted as unconfirmed, the root
+// case of the same rule rather than a second one
+func TestScanOfLibraryWhoseOnlyFileWasDeletedPrunesNothing(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	path := filepath.Join(libDir, "book.epub")
+	writeTestEPUB(t, path, "Book One", "Author A", nil)
+
+	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	} else if first.New != 1 {
+		t.Fatalf("first scan = %+v, want New=1", first)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove book: %v", err)
+	}
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE book_files SET missing_since = ? WHERE file_path = ?`,
+			"2020-01-01T00:00:00.000000000Z", "book.epub")
+		return err
+	}); err != nil {
+		t.Fatalf("backdate missing_since: %v", err)
+	}
+
+	result, err := Scan(ctx, db, libDir, coversDir, time.Hour)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if result.Scanned != 0 || result.Missing != 0 || result.Pruned != 0 || result.Unconfirmed != 0 {
+		t.Errorf("second scan = %+v, want Scanned=0 Missing=0 Pruned=0 Unconfirmed=0", result)
+	}
+	if f, err := db.FindFileByPath(ctx, "book.epub"); err != nil || f == nil {
+		t.Fatalf("FindFileByPath book.epub: %+v, %v (want it to survive despite being overdue)", f, err)
+	}
+}
+
 // A non-ErrNotExist failure to stat a path (e.g. a path component that's no
 // longer a directory) must not be read as "the file is missing" — only a
 // specific ErrNotExist is trusted as proof of absence.
@@ -1422,16 +1696,17 @@ func TestScanDoesNotMarkMissingOnNonNotExistLstatError(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	subDir := filepath.Join(libDir, "sub")
-	if err := os.Mkdir(subDir, 0o755); err != nil {
-		t.Fatalf("mkdir sub: %v", err)
+	subDir := filepath.Join(libDir, "top", "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir top/sub: %v", err)
 	}
 	writeTestEPUB(t, filepath.Join(subDir, "book.epub"), "Book One", "Author A", nil)
-	// A readable sibling keeps Scanned > 0 on the second scan — otherwise
-	// replacing the library's only subtree trips the empty-sweep guard
+	// A sibling inside top/ keeps that directory populated on the second
+	// scan — otherwise replacing the only subtree under it trips the
+	// unconfirmed-directory guard (and, at the root, the empty-sweep guard)
 	// before reconcileMissing ever reaches the Lstat call this test means
 	// to exercise, and the test would pass vacuously.
-	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author B", nil)
+	writeTestEPUB(t, filepath.Join(libDir, "top", "sibling.epub"), "Sibling Book", "Author B", nil)
 
 	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
 		t.Fatalf("first Scan: %v", err)
@@ -1440,7 +1715,7 @@ func TestScanDoesNotMarkMissingOnNonNotExistLstatError(t *testing.T) {
 	}
 
 	// Replace the directory itself with a plain file of the same name, so a
-	// later Lstat on the stored nested path ("sub/book.epub") fails with
+	// later Lstat on the stored nested path ("top/sub/book.epub") fails with
 	// ENOTDIR rather than ErrNotExist — deterministic and root-independent,
 	// unlike a permissions-based approach.
 	if err := os.RemoveAll(subDir); err != nil {
@@ -1460,8 +1735,11 @@ func TestScanDoesNotMarkMissingOnNonNotExistLstatError(t *testing.T) {
 	if result.Missing != 0 {
 		t.Errorf("second scan = %+v, want Missing=0 (ENOTDIR is not proof of absence)", result)
 	}
+	if result.Unconfirmed != 0 {
+		t.Errorf("second scan = %+v, want Unconfirmed=0 (top/ kept a file, so the row must reach Lstat)", result)
+	}
 
-	f, err := db.FindFileByPath(ctx, "sub/book.epub")
+	f, err := db.FindFileByPath(ctx, "top/sub/book.epub")
 	if err != nil || f == nil {
 		t.Fatalf("FindFileByPath: %+v, %v", f, err)
 	}
@@ -1482,13 +1760,14 @@ func TestScanDoesNotPruneWhenCurrentSweepCannotReconfirmAbsence(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	subDir := filepath.Join(libDir, "sub")
-	if err := os.Mkdir(subDir, 0o755); err != nil {
-		t.Fatalf("mkdir sub: %v", err)
+	subDir := filepath.Join(libDir, "top", "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir top/sub: %v", err)
 	}
 	writeTestEPUB(t, filepath.Join(subDir, "book.epub"), "Book One", "Author A", nil)
-	// A readable sibling keeps Scanned > 0 throughout.
-	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author B", nil)
+	// A sibling inside top/ keeps that directory populated throughout, so
+	// the row reaches Lstat rather than the unconfirmed-directory guard
+	writeTestEPUB(t, filepath.Join(libDir, "top", "sibling.epub"), "Sibling Book", "Author B", nil)
 
 	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
 		t.Fatalf("first Scan: %v", err)
@@ -1508,7 +1787,7 @@ func TestScanDoesNotPruneWhenCurrentSweepCannotReconfirmAbsence(t *testing.T) {
 	}
 
 	// Now replace "sub" itself with a plain file, so a later Lstat on
-	// "sub/book.epub" fails with ENOTDIR — a different failure mode than
+	// "top/sub/book.epub" fails with ENOTDIR — a different failure mode than
 	// the ErrNotExist that earned the mark in the first place.
 	if err := os.RemoveAll(subDir); err != nil {
 		t.Fatalf("remove sub: %v", err)
@@ -1521,7 +1800,7 @@ func TestScanDoesNotPruneWhenCurrentSweepCannotReconfirmAbsence(t *testing.T) {
 	// sitting missing for a long time before this happened.
 	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `UPDATE book_files SET missing_since = ? WHERE file_path = ?`,
-			"2020-01-01T00:00:00.000000000Z", "sub/book.epub")
+			"2020-01-01T00:00:00.000000000Z", "top/sub/book.epub")
 		return err
 	}); err != nil {
 		t.Fatalf("backdate missing_since: %v", err)
@@ -1537,8 +1816,11 @@ func TestScanDoesNotPruneWhenCurrentSweepCannotReconfirmAbsence(t *testing.T) {
 	if third.Pruned != 0 {
 		t.Errorf("third scan = %+v, want Pruned=0 (ENOTDIR this sweep must not honor an old ErrNotExist confirmation)", third)
 	}
+	if third.Unconfirmed != 0 {
+		t.Errorf("third scan = %+v, want Unconfirmed=0 (top/ kept a file, so the row must reach Lstat)", third)
+	}
 
-	f, err := db.FindFileByPath(ctx, "sub/book.epub")
+	f, err := db.FindFileByPath(ctx, "top/sub/book.epub")
 	if err != nil || f == nil {
 		t.Fatalf("FindFileByPath: %+v, %v (want it to survive — this sweep could not reconfirm absence)", f, err)
 	}
