@@ -1705,7 +1705,21 @@ full design.
   with a 403, logging each refusal at Warn — every browser released since
   2023 sends the header over HTTPS, so a mutation without it is a script or
   an exposed plain listener, and a person whose edit was refused needs the
-  log to say so. `WarnMissingFetchMetadata` (`REQUIRE_FETCH_METADATA=false`)
+  log to say so. **The refusal has two shapes**, for the same reason
+  `metadataError` answers a rejected fragment with 200: the vendored htmx
+  does not swap a 4xx, so a bare 403 to an `hx-post` is a button that does
+  nothing. An htmx fragment request (`isHTMXFragment`) is refused with a
+  200 carrying the `fetch-metadata-refused` partial and
+  `HX-Reswap: afterbegin`, which inserts that one line as the first child
+  of whatever the posting form's own `hx-target` names — `#send`,
+  `#enrich`, an editable field's wrapper — so the control survives beneath
+  it and the wrapper never has to know which control posted. Every other
+  client gets the 403. `next` is not called in either shape, so the
+  security property does not depend on which one answered. `cmd/server`
+  picks the wrapper through `fetchMetadataGuard(require, next)`, a pure
+  function with a table test pinning both directions, since swapping the
+  two branches would invert the security default with every handler test
+  still green. `WarnMissingFetchMetadata` (`REQUIRE_FETCH_METADATA=false`)
   admits everything and logs one Warn per process on the first such
   request, a tripwire rather than a guard. `sameSiteOnly` itself still
   passes an empty header through, deliberately: it answers only the question

@@ -5,6 +5,8 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -233,6 +235,39 @@ func TestMetadataProviderNamesDistinguishesEmptyFromUnset(t *testing.T) {
 				if got[i] != tc.want[i] {
 					t.Errorf("names[%d] = %q, want %q", i, got[i], tc.want[i])
 				}
+			}
+		})
+	}
+}
+
+// The setting's whole effect is which wrapper goes around the routes, and
+// the two wrappers answer a header-less POST oppositely. Pinning both
+// directions here is what stops a swapped branch — the strict default
+// silently becoming the permissive one — from passing every other test.
+func TestFetchMetadataGuardMapsTheSettingToTheRightWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		require  bool
+		wantCode int
+		wantNext bool
+	}{
+		{"required refuses", true, http.StatusForbidden, false},
+		{"not required admits", false, http.StatusOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			handler := fetchMetadataGuard(tc.require, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+			}))
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/books/1/enrich", nil))
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if called != tc.wantNext {
+				t.Errorf("next called = %v, want %v", called, tc.wantNext)
 			}
 		})
 	}

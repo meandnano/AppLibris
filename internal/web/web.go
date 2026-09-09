@@ -99,6 +99,16 @@ func sameSiteOnly(next http.HandlerFunc) http.HandlerFunc {
 // or send was refused needs the log to say why, and a flood here is the
 // symptom of exactly the exposure the wrapper exists to surface.
 //
+// The refusal has two shapes, because the person pressing the button has
+// to see it and the vendored htmx does not swap a 4xx — the same fact that
+// makes metadataError answer a rejected fragment with 200. An htmx
+// request gets a 200 carrying a one-line message and HX-Reswap: afterbegin,
+// which inserts that line as the first child of whatever the form's own
+// hx-target names (#send, #enrich, an editable field's wrapper), so the
+// control stays on the page with the refusal above it and this wrapper
+// never has to know which control posted. Everything else gets the honest
+// 403. The security property is identical in both: next is never called.
+//
 // REQUIRE_FETCH_METADATA=false in cmd/server swaps this for
 // WarnMissingFetchMetadata. Reads pass through both untouched.
 func RequireFetchMetadata(next http.Handler) http.Handler {
@@ -106,7 +116,15 @@ func RequireFetchMetadata(next http.Handler) http.Handler {
 		if isStateChanging(r) && !hasFetchMetadata(r) {
 			slog.Warn("refused a state-changing request carrying no fetch metadata: the service is being reached over plain HTTP or by a script, and cross-site protection needs an HTTPS gateway in front — REQUIRE_FETCH_METADATA=false admits such requests anyway",
 				"method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
-			http.Error(w, "request carries no fetch metadata", http.StatusForbidden)
+			if isHTMXFragment(r) {
+				w.Header().Set("HX-Reswap", "afterbegin")
+				if err := render(w, "fetch-metadata-refused", nil); err != nil {
+					slog.Error("render template failed", "template", "fetch-metadata-refused", "error", err)
+					http.Error(w, "internal error", http.StatusInternalServerError)
+				}
+				return
+			}
+			http.Error(w, "request carries no fetch metadata: the service must be reached through its HTTPS address", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

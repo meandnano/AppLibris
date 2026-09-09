@@ -158,14 +158,10 @@ func run(ctx context.Context) error {
 	// through it. Failing closed by default is what makes a deployment that
 	// breaks the requirement show up in the log instead of silently running
 	// without the guard; the opt-out keeps a one-line tripwire.
-	routes := web.Routes(svc, coversDir, sendEnabled, enrichEnabled)
-	if requireFetchMetadata {
-		routes = web.RequireFetchMetadata(routes)
-	} else {
+	if !requireFetchMetadata {
 		slog.Warn("REQUIRE_FETCH_METADATA=false: state-changing requests without fetch metadata are admitted, so cross-site protection depends on the listener being unreachable from any browser except through an HTTPS gateway")
-		routes = web.WarnMissingFetchMetadata(routes)
 	}
-	mux.Handle("/", routes)
+	mux.Handle("/", fetchMetadataGuard(requireFetchMetadata, web.Routes(svc, coversDir, sendEnabled, enrichEnabled)))
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -327,6 +323,19 @@ func run(ctx context.Context) error {
 	waitForBackground(cancelScan, enrichDone, shutdownCtx.Done(), "enrichment")
 
 	return db.Close()
+}
+
+// fetchMetadataGuard picks which of internal/web's two fetch-metadata
+// wrappers goes around the UI routes. A function rather than an inline if
+// so the mapping from the parsed setting to the wrapper is testable on its
+// own: swapping the two branches inverts the security default with every
+// handler test still green, which is exactly the kind of mistake a
+// verification checklist does not catch and a table test does.
+func fetchMetadataGuard(require bool, next http.Handler) http.Handler {
+	if require {
+		return web.RequireFetchMetadata(next)
+	}
+	return web.WarnMissingFetchMetadata(next)
 }
 
 // waitForBackground cancels the background goroutine driven by cancel and

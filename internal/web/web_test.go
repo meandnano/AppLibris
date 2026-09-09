@@ -1082,21 +1082,34 @@ func TestButtonClassesInMarkupHaveRules(t *testing.T) {
 // header for the opt-out mode to mean anything.
 func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		method    string
-		fetchSite string
-		wantCode  int
-		wantNext  bool
+		name     string
+		method   string
+		headers  map[string]string
+		wantCode int
+		wantNext bool
+		wantBody string
+		wantSwap string
 	}{
-		{"POST with no header", http.MethodPost, "", http.StatusForbidden, false},
-		{"POST same-origin", http.MethodPost, "same-origin", http.StatusOK, true},
-		{"POST none", http.MethodPost, "none", http.StatusOK, true},
+		{name: "POST with no header", method: http.MethodPost, wantCode: http.StatusForbidden, wantBody: "HTTPS address"},
+		// An htmx caller is refused with a 200 and a swap instruction, since
+		// the vendored htmx does not swap a 4xx and a refusal nobody can see
+		// is indistinguishable from a broken button. Same security property:
+		// next is not called either way.
+		{name: "htmx POST with no header", method: http.MethodPost, headers: map[string]string{"HX-Request": "true"},
+			wantCode: http.StatusOK, wantBody: "Refused", wantSwap: "afterbegin"},
+		// A history-restore request is swapped into the whole body, so it
+		// is not a fragment caller and gets the plain 403 like everyone else.
+		{name: "htmx history-restore POST with no header", method: http.MethodPost,
+			headers:  map[string]string{"HX-Request": "true", "HX-History-Restore-Request": "true"},
+			wantCode: http.StatusForbidden, wantBody: "HTTPS address"},
+		{name: "POST same-origin", method: http.MethodPost, headers: map[string]string{"Sec-Fetch-Site": "same-origin"}, wantCode: http.StatusOK, wantNext: true},
+		{name: "POST none", method: http.MethodPost, headers: map[string]string{"Sec-Fetch-Site": "none"}, wantCode: http.StatusOK, wantNext: true},
 		// Refusing cross-site is sameSiteOnly's job, not this wrapper's;
 		// it must pass the request on so that guard still gets to answer.
-		{"POST cross-site", http.MethodPost, "cross-site", http.StatusOK, true},
-		{"GET with no header", http.MethodGet, "", http.StatusOK, true},
-		{"HEAD with no header", http.MethodHead, "", http.StatusOK, true},
-		{"OPTIONS with no header", http.MethodOptions, "", http.StatusOK, true},
+		{name: "POST cross-site", method: http.MethodPost, headers: map[string]string{"Sec-Fetch-Site": "cross-site"}, wantCode: http.StatusOK, wantNext: true},
+		{name: "GET with no header", method: http.MethodGet, wantCode: http.StatusOK, wantNext: true},
+		{name: "HEAD with no header", method: http.MethodHead, wantCode: http.StatusOK, wantNext: true},
+		{name: "OPTIONS with no header", method: http.MethodOptions, wantCode: http.StatusOK, wantNext: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
@@ -1105,8 +1118,8 @@ func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
 			}))
 
 			req := httptest.NewRequest(tc.method, "/books/1/enrich", nil)
-			if tc.fetchSite != "" {
-				req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
 			}
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
@@ -1116,6 +1129,12 @@ func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
 			}
 			if called != tc.wantNext {
 				t.Errorf("next called = %v, want %v", called, tc.wantNext)
+			}
+			if tc.wantBody != "" && !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Errorf("body = %q, want it to contain %q", rec.Body.String(), tc.wantBody)
+			}
+			if got := rec.Header().Get("HX-Reswap"); got != tc.wantSwap {
+				t.Errorf("HX-Reswap = %q, want %q", got, tc.wantSwap)
 			}
 		})
 	}
@@ -1168,6 +1187,11 @@ func TestWarnMissingFetchMetadataAdmitsAndWarnsOnce(t *testing.T) {
 
 // captureLog routes the default slog logger into a buffer for the rest of
 // the test, restoring the previous logger on cleanup.
+//
+// It replaces the process-global logger, so it must not be called from a
+// test that uses t.Parallel(), nor from one that starts goroutines which
+// log after the test returns: either would race the buffer and make any
+// assertion on it flaky rather than fail clearly.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
