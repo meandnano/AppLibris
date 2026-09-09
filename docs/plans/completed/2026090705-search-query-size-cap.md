@@ -109,6 +109,18 @@ body cap from it rather than restating the number.
   well under a second. This is the regression test for the reproduction
   and should carry a short deadline.
 
+**Found while implementing:** that last test does not exercise
+`maxSearchTerms` at all, so it is not on its own a regression test for
+both caps. `MaxSearchBytes` is applied first, and 256 bytes admits at most
+128 single-letter tokens — so with the byte cap in place and the term cap
+lifted to a million, the 100,000-token search still completed in 0.25s
+and the test passed. It fails (17s, deadline exceeded) only with both caps
+lifted. Measured, not reasoned: the term cap earns its place because 128
+prefix terms took 0.25s for one request's three queries against a
+200-book fixture, which a library fifteen times that size no longer
+answers promptly. Recorded in CLAUDE.md as the reason neither cap
+subsumes the other.
+
 `internal/web`:
 
 - A `q` over the cap renders the clipped value in the input and in the

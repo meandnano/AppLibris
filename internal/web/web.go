@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"library/internal/service"
 	"library/internal/storage"
@@ -304,7 +305,12 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
 
 		params := r.URL.Query()
-		query := params.Get("q")
+		// Clipped to the bound SanitizeFTSQuery applies anyway, so every
+		// copy this page renders — the input's value, the no-results
+		// heading, the paging URLs — names what was actually searched, and
+		// a pasted page of text stops round-tripping through hx-push-url
+		// into browser history once per keystroke.
+		query := clipToRuneBoundary(params.Get("q"), storage.MaxSearchBytes)
 		fragment := isHTMXFragment(r)
 		appending := params.Get(appendParam) != ""
 
@@ -502,4 +508,18 @@ func searchSummary(matched, total int, fields []string) string {
 		named[i] = f
 	}
 	return summary + " · matched " + strings.Join(named, ", ")
+}
+
+// clipToRuneBoundary returns s cut to at most n bytes without splitting a
+// rune. Storage cuts the query it searches the same way; this cut is about
+// what the page then says it searched, so a clipped value renders as text
+// rather than as a replacement character.
+func clipToRuneBoundary(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

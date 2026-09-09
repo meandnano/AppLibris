@@ -158,7 +158,29 @@ full design.
   `MATCH` expression; `SanitizeFTSQuery` (also `internal/storage`, no DB
   access) is the one place raw user input becomes one, by quoting and
   prefix-terming every whitespace-separated token so no input, however
-  adversarial, can reach `MATCH` unescaped. Two query shapes skip that
+  adversarial, can reach `MATCH` unescaped. It is also where the input is
+  **bounded**, for the same reason: a caller — the programmatic API
+  DESIGN.md defers, most obviously — is then bounded by construction
+  rather than by remembering to clip first. `MaxSearchBytes` (256, exported
+  so `internal/web` clips the query it renders back to the same number
+  instead of restating it, the way `service.MaxDescriptionBytes` is
+  exported for the body cap) cuts the input after control characters are
+  stripped and **on a rune boundary** — half a multibyte character is an
+  invalid sequence FTS5 rejects, so a plain byte cut would make the cap the
+  one input this function cannot render valid. `maxSearchTerms` (16) then
+  drops any token past the sixteenth, silently: a search box has nowhere to
+  show a refusal, and "the first sixteen words were searched" is a result.
+  Neither cap subsumes the other, which is the tidy-up to avoid — 256 bytes
+  still admits 128 single-letter tokens, measured at 0.25s for one
+  request's three queries against a 200-book fixture, so the byte cap
+  bounds the input and the term cap bounds the work. Unbounded, the same
+  request was reproducible as a denial of service on a trusted network: one
+  `q` of 100,000 tokens ran past a ten-minute test timeout, each search
+  spends the expression on three queries (`SearchBooks`,
+  `CountSearchBooks`, `MatchedSearchFields`'s four `EXISTS`), the read pool
+  holds eight connections, and `WriteTimeout` never touches
+  `r.Context()` — so eight pastes stalled every page in the application. A
+  regression test drives all three queries under a deadline. Two query shapes skip that
   per-word path and are normalised to bare digits instead, matching the
   index's own `replace(replace(b.isbn, '-', ''), ' ', '')`: a **complete**
   ISBN however punctuated (10 or 13 characters once hyphens and spaces are
@@ -1579,7 +1601,13 @@ full design.
   ships, so the id is what to search for). With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
-  drift out of sync. A `q` that sanitizes to nothing is "not
+  drift out of sync. `libraryHandler` clips `q` to
+  `storage.MaxSearchBytes`, on a rune boundary, before it is used for
+  anything: the storage layer bounds what it searches either way, so this
+  is about the copies the page renders — the input's `value`, the
+  no-results heading, the paging URLs — naming what was actually searched,
+  and a pasted page of text no longer round-tripping through `hx-push-url`
+  into browser history once per keystroke. A `q` that sanitizes to nothing is "not
   searching" — the plain grid, no result count, same as before this query
   parameter existed; that covers blank and whitespace-only input and also
   input stripped to nothing, such as a lone control character. A `q` that

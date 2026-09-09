@@ -1,9 +1,13 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 // assertValidFTS5Expression drives got through a real, standalone FTS5
@@ -219,6 +223,117 @@ func TestSanitizeFTSQueryMatchesEveryStateOfATypedHyphenatedISBN(t *testing.T) {
 		}
 		if !strings.HasPrefix(indexed, term) {
 			t.Errorf("typing %q produced the term %q, which is not a prefix of the indexed token %q", prefix, term, indexed)
+		}
+	}
+}
+
+func TestSanitizeFTSQueryDropsTokensPastTheTermCap(t *testing.T) {
+	fields := make([]string, maxSearchTerms+1)
+	for i := range fields {
+		fields[i] = fmt.Sprintf("w%02d", i)
+	}
+	got := SanitizeFTSQuery(strings.Join(fields, " "))
+
+	if n := strings.Count(got, `*`); n != maxSearchTerms {
+		t.Errorf("SanitizeFTSQuery(%d tokens) produced %d terms, want %d: %q", len(fields), n, maxSearchTerms, got)
+	}
+	if last := fields[len(fields)-1]; strings.Contains(got, last) {
+		t.Errorf("SanitizeFTSQuery kept %q, the token past the cap: %q", last, got)
+	}
+	assertValidFTS5Expression(t, got)
+}
+
+// The byte cap cuts on a rune boundary because half a multibyte character
+// is an invalid sequence, which FTS5's own parser rejects — so a plain byte
+// cut would make the cap itself the one input this function cannot render
+// valid, the property every other case here exists to hold.
+func TestSanitizeFTSQueryCutsOnARuneBoundary(t *testing.T) {
+	filler := strings.Repeat("a", MaxSearchBytes-1)
+	got := SanitizeFTSQuery(filler + "é")
+
+	if want := `"` + filler + `"*`; got != want {
+		t.Errorf("SanitizeFTSQuery cut mid-rune: got %q, want %q", got, want)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("SanitizeFTSQuery produced invalid UTF-8: %q", got)
+	}
+	assertValidFTS5Expression(t, got)
+}
+
+// A three-byte rune straddles the cap from three different offsets, two of
+// which a boundary check that backed off a single byte would still split.
+func TestSanitizeFTSQueryCutsAMultibyteRuneWhole(t *testing.T) {
+	for pad := 0; pad < 3; pad++ {
+		in := strings.Repeat("a", MaxSearchBytes-1-pad) + "→" + strings.Repeat("b", 8)
+		got := SanitizeFTSQuery(in)
+		if !utf8.ValidString(got) {
+			t.Errorf("pad %d: SanitizeFTSQuery produced invalid UTF-8: %q", pad, got)
+		}
+		assertValidFTS5Expression(t, got)
+	}
+}
+
+// Every ISBN shape is far under the cap, so neither is affected by it —
+// checked against the space-separated complete form, the longest input
+// either shape accepts.
+func TestSanitizeFTSQueryISBNPathSurvivesTheCap(t *testing.T) {
+	got := SanitizeFTSQuery("   978 0 85705 998 5   ")
+	if want := `"9780857059985"*`; got != want {
+		t.Errorf("SanitizeFTSQuery = %q, want %q", got, want)
+	}
+}
+
+// The reproduction from the 2026-09-07 review: 100,000 single-letter tokens
+// were still executing inside CountSearchBooks when a ten-minute test
+// timeout fired, holding one of the read pool's eight connections for the
+// whole time. All three queries one search request makes are driven here,
+// and the context deadline is what fails this rather than hanging the suite
+// if the term cap is ever lifted.
+func TestSearchWithAnAbsurdTokenCountCompletesPromptly(t *testing.T) {
+	db := openTestDB(t)
+	seedSearchableBooks(t, db, 200)
+
+	tokens := make([]string, 100_000)
+	for i := range tokens {
+		tokens[i] = "a"
+	}
+	query := SanitizeFTSQuery(strings.Join(tokens, " "))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	if _, err := db.SearchBooks(ctx, query, BookPage{Limit: 48}); err != nil {
+		t.Fatalf("SearchBooks: %v", err)
+	}
+	if _, err := db.CountSearchBooks(ctx, query); err != nil {
+		t.Fatalf("CountSearchBooks: %v", err)
+	}
+	if _, err := db.MatchedSearchFields(ctx, query); err != nil {
+		t.Fatalf("MatchedSearchFields: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("one search request's three queries took %v, want well under a second", elapsed)
+	}
+}
+
+// seedSearchableBooks creates n books whose title, authors and description
+// all match the letter the query above repeats, so every term the
+// expression carries has rows to work over rather than being answered by an
+// empty index.
+func seedSearchableBooks(t *testing.T, db *DB, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		title := fmt.Sprintf("a book about apples %03d", i)
+		if _, err := db.CreateBook(context.Background(), Book{
+			ContentHash: fmt.Sprintf("absurd-%03d", i),
+			Title:       title,
+			SortTitle:   title,
+			Description: "an apple a day, and another apple after that",
+			ISBN:        "9780857059985",
+			Format:      "epub",
+		}, []string{"Anna Applebaum"}); err != nil {
+			t.Fatalf("CreateBook %d: %v", i, err)
 		}
 	}
 }
