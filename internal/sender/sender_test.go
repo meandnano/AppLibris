@@ -1,11 +1,14 @@
 package sender
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -484,5 +487,115 @@ func TestWorkerStorageFailureDoesNotClaimTheFileIsGone(t *testing.T) {
 	}
 	if got.FailureReason != lookupFailedReason {
 		t.Errorf("FailureReason = %q, want %q", got.FailureReason, lookupFailedReason)
+	}
+}
+
+// A file the index still lists but which has left the disk is the one
+// filesystem failure that genuinely means "gone".
+func TestWorkerDeletedFileIsGone(t *testing.T) {
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	bookID := setupBookWithFile(t, db, libraryDir, "deleted.epub", []byte("x"))
+	if err := os.Remove(filepath.Join(libraryDir, "deleted.epub")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	sendID, err := db.EnqueueSend(ctx, bookID, "Deleted", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	stub := &stubTransport{sendFunc: func(context.Context, string, resend.Attachment) (string, error) {
+		t.Error("transport called for a deleted file")
+		return "", nil
+	}}
+	New(db, stub, libraryDir).drain(ctx)
+
+	got, err := db.GetSend(ctx, sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.Status != storage.SendFailed || got.FailureReason != fileGoneReason {
+		t.Errorf("send = %+v, want failed with %q", got, fileGoneReason)
+	}
+}
+
+// Any filesystem error other than ErrNotExist is an unknown, not evidence
+// the file is gone: the send fails with a reason that invites a retry, and
+// the OS error — which the status box deliberately omits — is logged with
+// the path so there is a line to diagnose from.
+func TestWorkerUnreadableFileIsNotGone(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{
+			// Stat succeeds, ReadFile fails with EISDIR: the second of the
+			// two filesystem calls, and a shape that needs no permission
+			// trick, so it runs everywhere including as root.
+			name: "directory at the path",
+			setup: func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove: %v", err)
+				}
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			},
+		},
+		{
+			// The NAS shape the reason exists for: the file is there and
+			// the process may not read it.
+			name: "permission denied",
+			setup: func(t *testing.T, path string) {
+				if os.Geteuid() == 0 {
+					t.Skip("root reads a 000 file regardless")
+				}
+				if err := os.Chmod(path, 0o000); err != nil {
+					t.Fatalf("chmod: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			libraryDir := t.TempDir()
+			db := openTestDB(t)
+			ctx := context.Background()
+
+			var logged bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+
+			bookID := setupBookWithFile(t, db, libraryDir, "locked.epub", []byte("x"))
+			fullPath := filepath.Join(libraryDir, "locked.epub")
+			tc.setup(t, fullPath)
+			sendID, err := db.EnqueueSend(ctx, bookID, "Locked", "reader@kindle.com", time.Now())
+			if err != nil {
+				t.Fatalf("EnqueueSend: %v", err)
+			}
+
+			stub := &stubTransport{sendFunc: func(context.Context, string, resend.Attachment) (string, error) {
+				t.Error("transport called for an unreadable file")
+				return "", nil
+			}}
+			New(db, stub, libraryDir).drain(ctx)
+
+			got, err := db.GetSend(ctx, sendID)
+			if err != nil || got == nil {
+				t.Fatalf("GetSend: %+v, %v", got, err)
+			}
+			if got.Status != storage.SendFailed {
+				t.Fatalf("Status = %q, want failed", got.Status)
+			}
+			if got.FailureReason != fileUnreadableReason {
+				t.Errorf("FailureReason = %q, want %q — an unreadable file is not a missing one", got.FailureReason, fileUnreadableReason)
+			}
+			if !strings.Contains(logged.String(), "read send file") || !strings.Contains(logged.String(), fullPath) {
+				t.Errorf("log does not name the failure and its path:\n%s", logged.String())
+			}
+		})
 	}
 }

@@ -540,7 +540,17 @@ full design.
   the index *itself* is reported separately ("could not read the library
   index — try again"), never folded into that one: a storage error says
   nothing about whether the book is still there, and claiming otherwise is
-  a confident lie about a file that is probably fine. Before reading
+  a confident lie about a file that is probably fine. The filesystem gets
+  the same treatment: only `fs.ErrNotExist` from the stat or the read means
+  the file is gone, and every other error — `EACCES` after a permissions
+  change, `EIO` from a failing disk, `ESTALE` from an NFS restart, a path
+  component that is no longer a directory, the ordinary failures on a
+  NAS — records a third reason, "could not read the file — try again", and
+  logs the OS error with the path at Error (`failFileError`), since the
+  status box deliberately carries a sentence rather than an errno and the
+  log is otherwise the only place to diagnose from. An unknown is not
+  evidence, the posture the scanner's missing-file reconciliation takes
+  toward a non-`ErrNotExist` `Lstat`. Before reading
   the file, its size is stat'd against `resend.MaxAttachmentSize`, failing
   with both sizes named ("14.2 MB exceeds the 28 MB limit") so an
   oversized file is never loaded into memory and the failure reason always

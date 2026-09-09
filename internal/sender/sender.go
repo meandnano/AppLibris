@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -49,6 +50,16 @@ const fileGoneReason = "the file is no longer in the library"
 // claim to be: the book may be perfectly fine. Says "try again" because,
 // unlike every other failure here, this one plausibly succeeds next time.
 const lookupFailedReason = "could not read the library index — try again"
+
+// fileUnreadableReason is recorded when the file is there as far as the
+// index knows but the filesystem refused to hand it over: a permissions
+// change, a failing disk, a stale NFS handle, an SMB mount that dropped.
+// None of those is "the file is gone", and on a NAS they are the common
+// failure; claiming fileGoneReason for them writes a false statement into
+// send_log. Phrased like lookupFailedReason because, like it, this
+// plausibly succeeds next time — and the OS error text goes to the log, not
+// the status box, since EACCES is not a sentence a person acts on.
+const fileUnreadableReason = "could not read the file — try again"
 
 // Transport is what the worker needs from a mail provider. Declared here,
 // on the consumer side, rather than in internal/resend — which notes it
@@ -161,7 +172,7 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 
 	info, err := os.Stat(path)
 	if err != nil {
-		w.fail(ctx, send.ID, fileGoneReason)
+		w.failFileError(ctx, send.ID, path, err)
 		return
 	}
 	if info.Size() > resend.MaxAttachmentSize {
@@ -172,7 +183,7 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 
 	content, err := os.ReadFile(path)
 	if err != nil {
-		w.fail(ctx, send.ID, fileGoneReason)
+		w.failFileError(ctx, send.ID, path, err)
 		return
 	}
 
@@ -206,6 +217,23 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 	if err := w.db.MarkSendDelivered(markCtx, send.ID, messageID, time.Now()); err != nil {
 		slog.Error("mark send delivered", "send_id", send.ID, "error", err)
 	}
+}
+
+// failFileError records a filesystem failure against the send's file. Only
+// fs.ErrNotExist means the file is gone; every other error — EACCES, EIO,
+// ESTALE, a path component that is no longer a directory — is an unknown,
+// and an unknown is not evidence, the same posture the scanner's
+// missing-file reconciliation takes toward a non-ErrNotExist Lstat. Those
+// are logged with the path, since the status box deliberately does not
+// carry the OS error and this line is otherwise the only place to
+// diagnose from.
+func (w *Worker) failFileError(ctx context.Context, sendID int64, path string, err error) {
+	if errors.Is(err, fs.ErrNotExist) {
+		w.fail(ctx, sendID, fileGoneReason)
+		return
+	}
+	slog.Error("read send file", "send_id", sendID, "path", path, "error", err)
+	w.fail(ctx, sendID, fileUnreadableReason)
 }
 
 // resolveFile picks send's book's first non-missing file location and
