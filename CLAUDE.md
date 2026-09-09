@@ -7,7 +7,12 @@ full design.
 ## Current implementation
 
 - `internal/storage` — SQLite storage layer (`modernc.org/sqlite`). WAL mode,
-  foreign keys on. A read pool (`DB.Read()`), bounded to `readPoolSize` (8)
+  foreign keys on, a 5-second busy timeout on both pools — the driver
+  applies one only when the DSN names it, and defaults to zero, so
+  contention from outside the process (a backup tool's shared lock,
+  `sqlite3 library.db` opened by hand, WAL recovery after a crash) would
+  otherwise fail a write instantly instead of waiting the few seconds such
+  a lock actually holds. A read pool (`DB.Read()`), bounded to `readPoolSize` (8)
   open and idle connections so concurrency above `database/sql`'s default
   idle-2 ceiling reuses pooled connections instead of opening and
   discarding a fresh one per request, and a single-connection write pool
