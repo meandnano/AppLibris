@@ -12,7 +12,17 @@ import (
 	"net/url"
 	"path"
 	"strings"
+
+	"library/internal/cover"
 )
+
+// maxPackageDocBytes bounds container.xml and the OPF package document, the
+// two entries whose whole content is held in memory to parse. A real package
+// document is kilobytes; 4 MiB leaves room for the most verbose manifest and
+// still refuses a zip entry crafted to inflate into gigabytes, since
+// archive/zip bounds only the compressed bytes it reads and deflate runs to
+// about 1000:1
+const maxPackageDocBytes = 4 << 20
 
 // Metadata is what's extracted from an EPUB's embedded OPF package.
 type Metadata struct {
@@ -128,19 +138,44 @@ func readCover(zr *zip.Reader, opfPath string, pkg opfPackage) []byte {
 	}
 
 	coverPath := path.Join(path.Dir(opfPath), decoded)
-	f, err := zr.Open(coverPath)
-	if err != nil {
-		slog.Debug("cover declared but unreadable", "href", href, "path", coverPath, "error", err)
-		return nil
-	}
-	defer f.Close()
-
-	data, err := io.ReadAll(f)
+	// The cap is cover.Store's own byte limit, applied while reading rather
+	// than after: a cover over it would be refused there anyway, so there is
+	// no reason to have held it first
+	data, err := readEntry(zr, coverPath, cover.MaxCoverBytes)
 	if err != nil {
 		slog.Debug("cover declared but unreadable", "href", href, "path", coverPath, "error", err)
 		return nil
 	}
 	return data
+}
+
+// readEntry returns the whole of the zip entry at name, refusing one that
+// would inflate past limit bytes. The declared uncompressed size is checked
+// first, which is free. A header that understates it does not get past the
+// pre-check unpunished either: archive/zip's own reader fails with ErrFormat
+// as soon as a read passes the declared size, so an entry cannot inflate
+// beyond what its header admits. The bounded read is defence in depth behind
+// that, not the guarantee, kept because it costs nothing and does not depend
+// on knowing archive/zip's behaviour; limit+1 bytes distinguishes exactly at
+// the cap from past it without a second read
+func readEntry(zr *zip.Reader, name string, limit int64) ([]byte, error) {
+	f, err := zr.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	if info, err := f.Stat(); err == nil && info.Size() > limit {
+		return nil, fmt.Errorf("%s declares %d bytes, over the %d byte limit", name, info.Size(), limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s inflates past the %d byte limit", name, limit)
+	}
+	return data, nil
 }
 
 func findCoverHref(pkg opfPackage) string {
@@ -179,14 +214,13 @@ func hasToken(tokens, target string) bool {
 }
 
 func findOPFPath(zr *zip.Reader) (string, error) {
-	f, err := zr.Open("META-INF/container.xml")
+	data, err := readEntry(zr, "META-INF/container.xml", maxPackageDocBytes)
 	if err != nil {
 		return "", fmt.Errorf("open container.xml: %w", err)
 	}
-	defer f.Close()
 
 	var c container
-	if err := xml.NewDecoder(f).Decode(&c); err != nil {
+	if err := xml.Unmarshal(data, &c); err != nil {
 		return "", fmt.Errorf("parse container.xml: %w", err)
 	}
 	if len(c.Rootfiles.Rootfile) == 0 || c.Rootfiles.Rootfile[0].FullPath == "" {
@@ -196,14 +230,13 @@ func findOPFPath(zr *zip.Reader) (string, error) {
 }
 
 func readOPFPackage(zr *zip.Reader, opfPath string) (opfPackage, error) {
-	f, err := zr.Open(opfPath)
+	data, err := readEntry(zr, opfPath, maxPackageDocBytes)
 	if err != nil {
 		return opfPackage{}, fmt.Errorf("open %s: %w", opfPath, err)
 	}
-	defer f.Close()
 
 	var pkg opfPackage
-	if err := xml.NewDecoder(f).Decode(&pkg); err != nil {
+	if err := xml.Unmarshal(data, &pkg); err != nil {
 		return opfPackage{}, fmt.Errorf("parse %s: %w", opfPath, err)
 	}
 	return pkg, nil

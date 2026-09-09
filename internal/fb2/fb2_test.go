@@ -2,11 +2,17 @@ package fb2
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+
+	"library/internal/cover"
 )
 
 func buildTestFB2(t *testing.T, xmlBody string) string {
@@ -322,5 +328,233 @@ func TestReadMetadataNotXML(t *testing.T) {
 
 	if _, err := ReadMetadata(path); err == nil {
 		t.Fatal("ReadMetadata on non-XML content: want an error, got nil")
+	}
+}
+
+// fb2WithBinaries renders a document whose description names cover.jpg as
+// the cover and whose <binary> elements are binaries, in order, each given
+// as (id, base64 content)
+func fb2WithBinaries(title string, binaries [][2]string) string {
+	var sb strings.Builder
+	sb.WriteString(`<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+  <description>
+    <title-info>
+      <book-title>`)
+	sb.WriteString(title)
+	sb.WriteString(`</book-title>
+      <coverpage>
+        <image l:href="#cover.jpg"/>
+      </coverpage>
+    </title-info>
+  </description>
+  <body></body>
+`)
+	for _, b := range binaries {
+		sb.WriteString(`  <binary id="` + b[0] + `" content-type="image/jpeg">` + b[1] + "</binary>\n")
+	}
+	sb.WriteString("</FictionBook>\n")
+	return sb.String()
+}
+
+// An illustrated book carries hundreds of <binary> elements and one of them
+// is the cover. Decoding them all through a struct held every illustration
+// in memory to find that one; the token walk skips the rest, so the heap
+// cost of reading a title out of a 300 MB book is bounded by the largest
+// single element the tokeniser passes over, not the document. The bound is
+// taken relative to a one-illustration document rather than as an absolute
+// figure: TotalAlloc counts every doubling of the tokeniser's buffer, and
+// the race detector build doubles that again, so a fixed number sized off
+// one build fails on the other
+func TestReadMetadataSkipsNonCoverBinariesWithoutHoldingThem(t *testing.T) {
+	const illustrations = 16
+	illustration := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x7f}, 1<<20))
+	coverBytes := []byte("the real cover")
+	coverBinary := [2]string{"cover.jpg", base64.StdEncoding.EncodeToString(coverBytes)}
+
+	document := func(count int) string {
+		binaries := make([][2]string, 0, count+1)
+		for i := 0; i < count; i++ {
+			binaries = append(binaries, [2]string{fmt.Sprintf("illustration-%d.jpg", i), illustration})
+		}
+		return fb2WithBinaries("Illustrated", append(binaries, coverBinary))
+	}
+	measure := func(path string) (Metadata, uint64) {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		got, err := ReadMetadata(path)
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatalf("ReadMetadata: %v", err)
+		}
+		return got, after.TotalAlloc - before.TotalAlloc
+	}
+
+	_, oneCost := measure(buildTestFB2(t, document(1)))
+	got, manyCost := measure(buildTestFB2(t, document(illustrations)))
+	if !bytes.Equal(got.Cover, coverBytes) {
+		t.Errorf("Cover = %q, want %q", got.Cover, coverBytes)
+	}
+	// The struct decode accumulated every binary's content as a string, so
+	// sixteen illustrations cost at least sixteen times one. The walk's
+	// buffer is reused across them, so they cost about the same as one.
+	t.Logf("ReadMetadata allocated %d bytes over one illustration, %d over %d", oneCost, manyCost, illustrations)
+	if manyCost > 2*oneCost {
+		t.Errorf("%d illustrations allocated %d bytes against %d for one, want the walk bounded by one", illustrations, manyCost, oneCost)
+	}
+}
+
+// A cover past the cap is dropped, not held and then refused: nothing after
+// the cap is read, and the text metadata comes back intact
+func TestReadMetadataDropsCoverBinaryOverTheCap(t *testing.T) {
+	oversized := base64.StdEncoding.EncodeToString(make([]byte, cover.MaxCoverBytes+1))
+	path := buildTestFB2(t, fb2WithBinaries("Capped", [][2]string{{"cover.jpg", oversized}}))
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.Cover != nil {
+		t.Errorf("Cover has %d bytes, want nil for a binary over the cap", len(got.Cover))
+	}
+	if got.Title != "Capped" {
+		t.Errorf("Title = %q, want the text metadata intact", got.Title)
+	}
+}
+
+// FB2 places <description> first and <binary> last, and the walk relies on
+// it: the cover's id has to be known before its binary is reached. A
+// document ordered the other way round is invalid and gets no cover, the
+// same outcome as a coverpage naming an id that does not exist
+func TestReadMetadataBinaryBeforeDescriptionIsNotACover(t *testing.T) {
+	doc := `<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+  <binary id="cover.jpg" content-type="image/jpeg">` + base64.StdEncoding.EncodeToString([]byte("early")) + `</binary>
+  <description>
+    <title-info>
+      <book-title>Inverted</book-title>
+      <coverpage><image l:href="#cover.jpg"/></coverpage>
+    </title-info>
+  </description>
+  <body></body>
+</FictionBook>`
+	got, err := ReadMetadata(buildTestFB2(t, doc))
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.Cover != nil {
+		t.Errorf("Cover = %q, want nil for a binary placed before the description", got.Cover)
+	}
+	if got.Title != "Inverted" {
+		t.Errorf("Title = %q, want %q", got.Title, "Inverted")
+	}
+}
+
+// The .fb2.zip document cap is the second line of defence, and where it
+// lands decides what survives it. Past the description it costs the cover
+// only: the text metadata was read and is kept. Inside the description
+// there is nothing to keep, so it is an error. Exercised through a small
+// cappedReader rather than an archive the size of maxZipDocumentBytes
+func TestReadMetadataDocumentCap(t *testing.T) {
+	doc := fb2WithBinaries("Capped Document", [][2]string{
+		{"illustration.jpg", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 4096))},
+		{"cover.jpg", base64.StdEncoding.EncodeToString([]byte("cover"))},
+	})
+	descriptionEnd := strings.Index(doc, "</description>") + len("</description>")
+
+	t.Run("past the description keeps the text metadata", func(t *testing.T) {
+		got, err := readMetadata(&cappedReader{r: strings.NewReader(doc), remaining: int64(descriptionEnd + 512)})
+		if err != nil {
+			t.Fatalf("readMetadata: %v", err)
+		}
+		if got.Title != "Capped Document" {
+			t.Errorf("Title = %q, want %q", got.Title, "Capped Document")
+		}
+		if got.Cover != nil {
+			t.Errorf("Cover = %q, want nil for a cover past the cap", got.Cover)
+		}
+	})
+
+	t.Run("inside the description is an error", func(t *testing.T) {
+		_, err := readMetadata(&cappedReader{r: strings.NewReader(doc), remaining: int64(descriptionEnd - 20)})
+		if !errors.Is(err, errDocumentTooLarge) {
+			t.Fatalf("readMetadata error = %v, want errDocumentTooLarge", err)
+		}
+	})
+}
+
+// With no cover named, reading stops at the end of the description: a
+// document that is malformed after that point still yields its metadata
+func TestReadMetadataStopsAfterDescriptionWhenNoCoverIsNamed(t *testing.T) {
+	doc := `<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info><book-title>Coverless</book-title></title-info>
+  </description>
+  <body><p>unterminated`
+	got, err := ReadMetadata(buildTestFB2(t, doc))
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.Title != "Coverless" {
+		t.Errorf("Title = %q, want %q", got.Title, "Coverless")
+	}
+}
+
+// Exactly at the cap is admitted, as it is by internal/epub's reader and by
+// cover.Store: the base64 cap is padded to a whole quantum so the three do
+// not disagree by a byte about which covers exist
+func TestReadMetadataKeepsCoverBinaryExactlyAtTheCap(t *testing.T) {
+	want := bytes.Repeat([]byte{0x5a}, cover.MaxCoverBytes)
+	path := buildTestFB2(t, fb2WithBinaries("At Cap", [][2]string{{"cover.jpg", base64.StdEncoding.EncodeToString(want)}}))
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if !bytes.Equal(got.Cover, want) {
+		t.Errorf("Cover has %d bytes, want %d intact", len(got.Cover), len(want))
+	}
+}
+
+// The cap has to act while the copy fills, not after it. The tokeniser hands
+// the whole node over as one token, so copying it, stripping it and appending
+// it before consulting the cap cost three more copies of the node — a 711 KiB
+// archive measured at a gigabyte. What the walk cannot avoid is the
+// tokeniser's own buffer for the node, and TotalAlloc counts every doubling
+// of it, so the bound is taken relative to that: the same node skipped as a
+// non-cover binary costs the tokeniser alone, and reading it as the cover
+// may add only the capped copy (with its own doublings), never the node
+func TestReadMetadataOverCapCoverBinaryCostsOnlyTheCappedCopy(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(make([]byte, 32<<20))
+	small := base64.StdEncoding.EncodeToString([]byte("small cover"))
+	asCover := buildTestFB2(t, fb2WithBinaries("Over Cap", [][2]string{{"cover.jpg", encoded}}))
+	skipped := buildTestFB2(t, fb2WithBinaries("Skipped", [][2]string{{"other.jpg", encoded}, {"cover.jpg", small}}))
+
+	measure := func(path string) (Metadata, uint64) {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		got, err := ReadMetadata(path)
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatalf("ReadMetadata %s: %v", path, err)
+		}
+		return got, after.TotalAlloc - before.TotalAlloc
+	}
+
+	got, coverCost := measure(asCover)
+	if got.Cover != nil {
+		t.Errorf("Cover has %d bytes, want nil for a binary over the cap", len(got.Cover))
+	}
+	got, skipCost := measure(skipped)
+	if string(got.Cover) != "small cover" {
+		t.Errorf("Cover = %q, want the small cover after the skipped binary", got.Cover)
+	}
+
+	t.Logf("node %d bytes: as cover %d bytes allocated, skipped %d", len(encoded), coverCost, skipCost)
+	if coverCost > skipCost+3*maxCoverBase64Bytes {
+		t.Errorf("reading the node as the cover cost %d bytes over skipping it, want under %d (the capped copy and its growth)", coverCost-skipCost, 3*maxCoverBase64Bytes)
 	}
 }

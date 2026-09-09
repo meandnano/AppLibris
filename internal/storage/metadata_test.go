@@ -407,3 +407,116 @@ func TestUpdateBookCoverPathDropsProviderProvenance(t *testing.T) {
 		t.Errorf("CoverPath = %q, want the new path", book.CoverPath)
 	}
 }
+
+// RecordUnusableCover is the scanner's write for an embedded cover that can
+// never decode. The state it arrives in most often is a retry marker and no
+// path — a book whose first store failed before decode failures were told
+// apart from I/O ones — and the marker is what has to go
+func TestRecordUnusableCoverClearsTheRetryMarker(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, Book{
+		ContentHash: "unusable-cover", Title: "The Book", CoverRetry: true,
+	}, []string{"An Author"})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	at := time.Now().Add(time.Hour).Truncate(time.Second)
+	recorded, err := db.RecordUnusableCover(ctx, id, "", at)
+	if err != nil || !recorded {
+		t.Fatalf("RecordUnusableCover: recorded=%v, err=%v", recorded, err)
+	}
+
+	after, err := db.FindBookByID(ctx, id)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverRetry {
+		t.Error("CoverRetry still set")
+	}
+	if after.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", after.CoverPath)
+	}
+	if !after.ModifiedAt.Equal(at) {
+		t.Errorf("modified_at = %v, want exactly the at argument %v", after.ModifiedAt, at)
+	}
+}
+
+// The other state: a provider cover whose file has gone, and an embedded
+// original that cannot replace it. Its row goes with the path, exactly as
+// ClearProviderCover would remove it
+func TestRecordUnusableCoverForgetsAProviderCover(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, Book{ContentHash: "unusable-provider", Title: "The Book"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, _, err := db.ApplyEnrichedFields(ctx, id,
+		map[MetadataField]string{FieldCover: "covers/gone.jpg"},
+		map[MetadataField]string{FieldCover: "openlibrary"}, time.Now()); err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+
+	recorded, err := db.RecordUnusableCover(ctx, id, "covers/gone.jpg", time.Now())
+	if err != nil || !recorded {
+		t.Fatalf("RecordUnusableCover: recorded=%v, err=%v", recorded, err)
+	}
+	after, err := db.FindBookByID(ctx, id)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", after.CoverPath)
+	}
+	sources, err := db.FieldSourcesForBook(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src, ok := sources[FieldCover]; ok {
+		t.Errorf("cover source = %q, want the row gone", src)
+	}
+}
+
+// Same staleness guard as ClearProviderCover: the scanner parses a whole
+// book between observing cover_path and writing, and a cover an enrichment
+// run stored in that window is not the one it decided was unusable
+func TestRecordUnusableCoverRefusesAStalePath(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, Book{ContentHash: "unusable-stale", Title: "The Book", CoverRetry: true}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, _, err := db.ApplyEnrichedFields(ctx, id,
+		map[MetadataField]string{FieldCover: "covers/fresh.jpg"},
+		map[MetadataField]string{FieldCover: "openlibrary"}, time.Now()); err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+
+	recorded, err := db.RecordUnusableCover(ctx, id, "", time.Now())
+	if err != nil {
+		t.Fatalf("RecordUnusableCover: %v", err)
+	}
+	if recorded {
+		t.Error("recorded = true for a cover_path that moved on from the observed one")
+	}
+	after, err := db.FindBookByID(ctx, id)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath != "covers/fresh.jpg" {
+		t.Errorf("CoverPath = %q, want the fresh cover untouched", after.CoverPath)
+	}
+	sources, err := db.FieldSourcesForBook(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src := sources[FieldCover]; src != "openlibrary" {
+		t.Errorf("cover source = %q, want the provider row untouched", src)
+	}
+}

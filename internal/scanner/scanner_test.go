@@ -2764,3 +2764,193 @@ func TestScanNeverForgetsAScannerCover(t *testing.T) {
 		t.Errorf("the sweep should have warned instead:\n%s", got)
 	}
 }
+
+// bmpCover is an image in a format nothing registers a decoder for: the
+// shape of a cover that can never be stored, however many times it is tried
+func bmpCover() []byte {
+	return append([]byte("BM"), make([]byte, 60)...)
+}
+
+// A cover that fails to decode fails the same way on every sweep, so the
+// retry marker is the wrong record for it: set, it makes every sweep
+// re-open and re-parse the book to reach the same refusal. The book is
+// recorded as having no usable cover instead, and later sweeps say nothing
+// about it at all
+func TestScanRecordsUndecodableCoverWithoutRetry(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", bmpCover())
+	logs := captureLogs(t)
+	first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	if first.New != 1 || first.Errors != 0 {
+		t.Fatalf("first scan = %+v, want New=1 Errors=0", first)
+	}
+	if !strings.Contains(logs.String(), "level=INFO") || !strings.Contains(logs.String(), "embedded cover unusable") {
+		t.Errorf("first scan log = %q, want an Info line recording the unusable cover", logs.String())
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	if book.CoverPath != "" || book.CoverRetry {
+		t.Fatalf("book after undecodable cover = %+v, want empty path and no retry marker", book)
+	}
+
+	logs.Reset()
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.Unchanged != 1 || second.CoversRegenerated != 0 || second.Errors != 0 {
+		t.Errorf("second scan = %+v, want Unchanged=1 CoversRegenerated=0 Errors=0", second)
+	}
+	if strings.Contains(logs.String(), "cover") {
+		t.Errorf("second scan log = %q, want nothing about the cover", logs.String())
+	}
+}
+
+// A book indexed before decode failures were told apart from I/O ones
+// carries the retry marker from that first store. The next sweep's retry
+// reaches the same refusal, and that is what finally clears the marker —
+// after which the book is left alone
+func TestScanClearsLegacyRetryMarkerForUndecodableCover(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", bmpCover())
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE books SET cover_retry = 1 WHERE id = ?`, book.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureLogs(t)
+	second, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if second.CoversRegenerated != 0 || second.Errors != 0 {
+		t.Errorf("second scan = %+v, want CoversRegenerated=0 Errors=0", second)
+	}
+	if !strings.Contains(logs.String(), "embedded cover unusable") {
+		t.Errorf("second scan log = %q, want the unusable cover recorded", logs.String())
+	}
+	if strings.Contains(logs.String(), "level=WARN") {
+		t.Errorf("second scan log = %q, want no warning for a permanent failure", logs.String())
+	}
+	book = bookByPath(t, ctx, db, "book.epub")
+	if book.CoverPath != "" || book.CoverRetry {
+		t.Fatalf("book after retry = %+v, want empty path and the marker cleared", book)
+	}
+
+	logs.Reset()
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("third Scan: %v", err)
+	}
+	if strings.Contains(logs.String(), "cover") {
+		t.Errorf("third scan log = %q, want nothing about the cover", logs.String())
+	}
+}
+
+// A provider cover whose file has gone is normally rebuilt from the book's
+// embedded original. When that original cannot decode, there is nothing to
+// rebuild from, and the provider cover is forgotten the same way it would be
+// for a book with no embedded cover at all: path and provenance row both,
+// so enrichment offers to fetch it again
+func TestScanForgetsProviderCoverWhenEmbeddedCoverIsUndecodable(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", bmpCover())
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+	gone := filepath.Join(coversDir, "provider.jpg")
+	if _, _, err := db.ApplyEnrichedFields(ctx, book.ID,
+		map[storage.MetadataField]string{storage.FieldCover: gone},
+		map[storage.MetadataField]string{storage.FieldCover: "openlibrary"}, time.Now()); err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	book = bookByPath(t, ctx, db, "book.epub")
+	if book.CoverPath != "" || book.CoverRetry {
+		t.Errorf("book after sweep = %+v, want the provider cover forgotten", book)
+	}
+	sources, err := db.FieldSourcesForBook(ctx, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src, ok := sources[storage.FieldCover]; ok {
+		t.Errorf("cover source = %q, want the provider row gone", src)
+	}
+}
+
+// The undecodable-cover branch reaches its write with cover_retry set and the
+// stat skipped, so it has no evidence about a stored cover that happens to be
+// beside the marker. A present provider cover must survive it: the embedded
+// image being undecodable says nothing about the file on disk. Same violated
+// invariant TestScanKeepsAPresentProviderCoverMarkedForRetry constructs, for
+// the same reason — it lives in another package
+func TestScanKeepsAPresentProviderCoverWhenEmbeddedCoverIsUndecodable(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", bmpCover())
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	book := bookByPath(t, ctx, db, "book.epub")
+
+	coverPath := filepath.Join(coversDir, "provider.jpg")
+	if err := os.WriteFile(coverPath, testCoverImage(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	giveProviderCover(t, ctx, db, book.ID, coverPath)
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE books SET cover_retry = 1 WHERE id = ?`, book.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureLogs(t)
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+
+	after, err := db.FindBookByID(ctx, book.ID)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID: %+v, %v", after, err)
+	}
+	if after.CoverPath != coverPath {
+		t.Errorf("CoverPath = %q, want %q — the file was present, so there was no evidence to clear on", after.CoverPath, coverPath)
+	}
+	sources, err := db.FieldSourcesForBook(ctx, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src := sources[storage.FieldCover]; src == "" {
+		t.Error("the provider's provenance row was removed on the strength of cover_retry alone")
+	}
+	if got := logs.String(); !strings.Contains(got, "embedded cover unusable but stored cover present") {
+		t.Errorf("scan log = %q, want the refusal warned about", got)
+	}
+}

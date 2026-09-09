@@ -566,6 +566,10 @@ func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Boo
 
 	coverPath, err := cover.Store(coversDir, book.ContentHash, coverBytes)
 	if err != nil {
+		if errors.Is(err, cover.ErrUnsupportedCover) {
+			recordUnusableCover(ctx, db, book, sourcePath, err)
+			return
+		}
 		slog.Warn("regenerate cover failed", "path", sourcePath, "error", err)
 		return
 	}
@@ -576,6 +580,49 @@ func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Boo
 
 	result.CoversRegenerated++
 	slog.Info("cover regenerated", "path", sourcePath, "cover_path", coverPath)
+}
+
+// recordUnusableCover handles an embedded cover that cover.Store refused
+// for what it is rather than for where it was going. The retry marker and
+// the missing-file check both exist to bring a cover back, and there is
+// nothing to bring back: the same bytes fail the same way on every sweep,
+// and each attempt re-parses the whole book to find that out. So the book
+// is put in the state one with no embedded cover has, which the first guard
+// in maybeRegenerateCover passes by from then on.
+//
+// Two states arrive here. A book indexed before decode failures were told
+// apart from I/O ones carries cover_retry from that first store, and this is
+// what finally clears it. And a book whose provider cover has gone from
+// disk, with an embedded original that cannot replace it, loses the provider
+// row too — the same forgetting forgetUnregenerableCover does when there is
+// no embedded cover at all, reached by a different door.
+//
+// The write is guarded on the cover_path this sweep observed, so a cover an
+// enrichment run wrote while the book was being parsed is left alone.
+//
+// And it is refused outright when a stored cover is present: with cover_retry
+// set, maybeRegenerateCover skips its stat, so a book carrying the marker
+// beside a provider path arrives here with no evidence about that file at
+// all, and blanking it would throw away a perfectly good cover on the
+// strength of the embedded one being undecodable. That pairing should not
+// occur — every write of a path clears the marker — but the invariant lives
+// in another package, and this is the same "confirmed gone, not assumed"
+// posture forgetUnregenerableCover takes for the same reason
+func recordUnusableCover(ctx context.Context, db *storage.DB, book *storage.Book, sourcePath string, storeErr error) {
+	if book.CoverPath != "" && !coverFileDefinitelyGone(book.CoverPath) {
+		slog.Warn("embedded cover unusable but stored cover present", "book_id", book.ID, "cover_path", book.CoverPath, "error", storeErr)
+		return
+	}
+	recorded, err := db.RecordUnusableCover(ctx, book.ID, book.CoverPath, time.Now())
+	if err != nil {
+		slog.Warn("record unusable cover failed", "path", sourcePath, "error", err)
+		return
+	}
+	if recorded {
+		slog.Info("embedded cover unusable", "path", sourcePath, "error", storeErr)
+	} else {
+		slog.Debug("cover unchanged", "book_id", book.ID, "observed_path", book.CoverPath)
+	}
 }
 
 // readEmbeddedCover returns just the embedded cover bytes for path,
@@ -621,11 +668,20 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 	var coverRetry bool
 	if len(meta.Cover) > 0 {
 		p, err := cover.Store(coversDir, hash, meta.Cover)
-		if err != nil {
+		switch {
+		case err == nil:
+			coverPath = p
+		case errors.Is(err, cover.ErrUnsupportedCover):
+			// The image itself is the problem — a format nothing decodes,
+			// a corrupt file, one past the caps — so a retry would re-parse
+			// the book to reach the same refusal, on every sweep, forever.
+			// Recorded as no cover instead: the state a book without an
+			// embedded cover has, which is never retried. cover_retry is
+			// only for a store that failed on I/O
+			slog.Info("embedded cover unusable", "path", path, "error", err)
+		default:
 			slog.Warn("store cover failed", "path", path, "error", err)
 			coverRetry = true
-		} else {
-			coverPath = p
 		}
 	}
 

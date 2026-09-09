@@ -12,6 +12,14 @@ import (
 // before the bytes ever reach internal/cover.Store's image.Decode — the one
 // place handing a decoder an arbitrary remote image could make this feature
 // allocate without bound. Comfortably above a typical cover JPEG/PNG.
+//
+// It is deliberately smaller than cover.MaxCoverBytes, the cap the EPUB and
+// FB2 readers apply to an embedded cover, and stays a constant of its own
+// rather than an alias: this one is a network bound, and internal/googlebooks
+// chose which cover size to ask for by measuring against exactly this figure
+// (medium over extraLarge, since the latter runs past 512 KiB and would be
+// refused). Raising it here would silently make that choice wrong. A
+// downloaded cover is always under Store's own cap by construction
 const MaxCoverBytes = 512 * 1024
 
 // maxCoverRedirects bounds how far a cover URL may bounce before the fetch
