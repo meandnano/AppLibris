@@ -301,11 +301,32 @@ full design.
   (`queued`/`sending`/`delivered`/`failed`) DESIGN.md defines — a typo in a
   Go constant fails at the write rather than producing a job no worker
   ever claims. `EnqueueSend` inserts the `queued` row and bumps
-  `recipients.last_used_at` in one transaction (via package-internal
-  `…Tx` helpers, per the `DB.Write` composition rule above) — the bump
-  belongs at enqueue, not delivery, because "most recently used" means
-  "the one I last chose," and a failed send must not silently reset the
-  picker's default to a different address. `ListRecipients` orders
+  `recipients.last_used_at` in one transaction — the bump belongs at
+  enqueue, not delivery, because "most recently used" means "the one I
+  last chose," and a failed send must not silently reset the picker's
+  default to a different address. The insert is guarded against a double
+  submit (`INSERT … SELECT … WHERE NOT EXISTS`, `EnqueueEnrichment`'s own
+  shape): a `queued` or `sending` row already pending for the same
+  `(book_id, recipient_address)` makes the call a no-op that returns that
+  row's id instead of a second one, reporting `inserted = false` so a
+  caller can still bump `last_used_at` — the person did choose that
+  address just now — without treating the call as a fresh enqueue. Unlike
+  `EnqueueEnrichment`, which blocks only a `queued` job on the reasoning
+  that a `running` one doesn't block a fresh promise once it finishes, the
+  send guard covers both pending states: a `sending` row is a message
+  already in flight, and a second one queued behind it is exactly the
+  duplicate the guard exists to prevent. The address is part of the key
+  because sending one book to two devices is a legitimate action, not a
+  double submit; `recipient_address` is a plain string here (`COLLATE
+  NOCASE` lives on `recipients`), so the comparison is byte-for-byte
+  against the address as `QueueSend` already normalised it, which is what
+  both rows hold. No new index backs the guard's lookup: `EXPLAIN QUERY
+  PLAN` against the existing `send_log_book_id_queued_at(book_id,
+  queued_at)` index shows SQLite using it for the `book_id = ?` search and
+  filtering `recipient_address`/`status` in memory from there, which is
+  already bounded to one book's own sends rather than a table scan — a
+  covering `(book_id, recipient_address, status)` index would only trade
+  that in-memory filter for a slightly narrower index seek. `ListRecipients` orders
   `last_used_at DESC, address`; SQLite sorts `NULL` smaller than any
   value, so that ordering alone puts never-used addresses last with no
   `NULLS LAST` clause, and the picker's default becomes simply "the first
@@ -1562,7 +1583,12 @@ full design.
   reads the book directly via storage rather than through `GetBook` (whose
   authors/file-location joins a title snapshot has no use for), returning
   `nil, nil` on an unknown id, `GetBook`'s own contract; then saves the
-  recipient (idempotently) and calls `EnqueueSend`. `BookDetail.Sendable`
+  recipient (idempotently) and calls `EnqueueSend`, which reports whether
+  it actually queued a new row or returned an already-pending one (the
+  double-submit guard described under `internal/storage` above) —
+  `QueueSend` threads that through to `Notify` (below) and, either way,
+  renders whichever send's state came back, so a double click's second
+  response looks exactly like the first's. `BookDetail.Sendable`
   and `SendableNote` are whether Amazon's Send to Kindle accepts the
   book's format at all, decided by `sendableFormat` over a table of the
   formats Amazon lists that the scanner can index — today only `epub`.
@@ -1576,10 +1602,13 @@ full design.
   second rule to keep in step with the first for no visible gain.
   `Service.Notify
   func()`, set by `cmd/server` to the worker's `Notify` method (nil in
-  tests and whenever sending is unconfigured), is called once a send is
-  successfully queued — a function field rather than an interface, since
-  `internal/service` depending on `internal/sender` (which depends on
-  `storage`) would be a cycle. `SendState` collapses "when did this
+  tests and whenever sending is unconfigured), is called only when
+  `EnqueueSend` reports it actually queued a new row — a function field
+  rather than an interface, since `internal/service` depending on
+  `internal/sender` (which depends on `storage`) would be a cycle. A poke
+  for a send the worker already holds is harmless but pointless, and the
+  guard means a double submit never wakes the worker twice for one job.
+  `SendState` collapses "when did this
   happen" to one `At` field (`finished_at` once terminal, else
   `queued_at`) so the template branches on one shape regardless of which
   produced it, mirroring `BookDetail.FileSize`'s single-source-of-truth

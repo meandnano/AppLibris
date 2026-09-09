@@ -149,24 +149,59 @@ func (db *DB) DeleteRecipient(ctx context.Context, address string) (deleted bool
 // last_used_at, in one transaction. The bump happens at enqueue, not on
 // delivery: "most recently used" means "the one I last chose", and a send
 // that later fails should not send the picker back to a different address.
-func (db *DB) EnqueueSend(ctx context.Context, bookID int64, title, address string, now time.Time) (id int64, err error) {
+//
+// The insert is guarded against a double submit: a queued or sending row
+// already pending for the same (book_id, recipient_address) makes this a
+// no-op that returns that row's id instead of a second one — mirroring
+// EnqueueEnrichment's own dedup guard, but over both pending states rather
+// than one. A running enrichment job doesn't block a fresh promise once it
+// finishes, but a sending row is a message already in flight, and a second
+// one queued behind it is exactly the duplicate this guards against.
+// recipient_address is a plain string on send_log (COLLATE NOCASE lives on
+// recipients), so the comparison is byte-for-byte against the address as
+// QueueSend already normalised it — which is what both rows hold. inserted
+// reports whether this call actually queued a new row, so a caller can
+// still bump last_used_at (the person did choose that address just now)
+// without poking a worker that already holds the pending job.
+func (db *DB) EnqueueSend(ctx context.Context, bookID int64, title, address string, now time.Time) (id int64, inserted bool, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO send_log (book_id, book_title, recipient_address, status, queued_at)
-			VALUES (?, ?, ?, ?, ?)`,
-			bookID, title, address, string(SendQueued), formatTime(now))
+			SELECT ?, ?, ?, ?, ?
+			WHERE NOT EXISTS (
+				SELECT 1 FROM send_log
+				WHERE book_id = ? AND recipient_address = ? AND status IN (?, ?)
+			)`,
+			bookID, title, address, string(SendQueued), formatTime(now),
+			bookID, address, string(SendQueued), string(SendSending))
 		if err != nil {
 			return err
 		}
-		id, err = res.LastInsertId()
+		affected, err := res.RowsAffected()
 		if err != nil {
 			return err
+		}
+		inserted = affected > 0
+
+		if inserted {
+			id, err = res.LastInsertId()
+			if err != nil {
+				return err
+			}
+		} else {
+			err = tx.QueryRowContext(ctx, `
+				SELECT id FROM send_log
+				WHERE book_id = ? AND recipient_address = ? AND status IN (?, ?)`,
+				bookID, address, string(SendQueued), string(SendSending)).Scan(&id)
+			if err != nil {
+				return err
+			}
 		}
 
 		_, err = tx.ExecContext(ctx, `UPDATE recipients SET last_used_at = ? WHERE address = ?`, formatTime(now), address)
 		return err
 	})
-	return id, err
+	return id, inserted, err
 }
 
 // ClaimNextSend atomically claims the oldest queued send, flipping it to
