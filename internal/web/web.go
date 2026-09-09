@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"library/internal/service"
 	"library/internal/storage"
@@ -244,6 +243,12 @@ type libraryPage struct {
 	SearchSummary string
 	LibraryEmpty  bool
 
+	// SearchMaxLength is the search input's maxlength, carried rather than
+	// written into the template so the number lives only in
+	// storage.MaxSearchBytes. A zero here renders maxlength="0" and makes
+	// the box untypeable, which is why the wiring has a test.
+	SearchMaxLength int
+
 	// MoreLabel is empty on the last page, which is how the template
 	// decides to render no trigger at all rather than a line claiming
 	// zero more books. MoreURL is the plain navigation the no-JS path
@@ -305,12 +310,13 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
 
 		params := r.URL.Query()
-		// Clipped to the bound SanitizeFTSQuery applies anyway, so every
-		// copy this page renders — the input's value, the no-results
-		// heading, the paging URLs — names what was actually searched, and
-		// a pasted page of text stops round-tripping through hx-push-url
-		// into browser history once per keystroke.
-		query := clipToRuneBoundary(params.Get("q"), storage.MaxSearchBytes)
+		// The same normalization the service will apply on its way to a
+		// MATCH expression, so every copy this page renders — the input's
+		// value, the no-results heading, the paging URLs — is the string
+		// that was searched rather than the one that arrived. What bounds
+		// the arriving request is the input's own maxlength; this is only
+		// about what the page then says.
+		query := storage.NormalizeSearchQuery(params.Get("q"))
 		fragment := isHTMXFragment(r)
 		appending := params.Get(appendParam) != ""
 
@@ -378,8 +384,9 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 			// match set is in hand — a bounded page cannot say "4 of
 			// 1,284" about a search whose total it never asked for. See
 			// searchSummary.
-			SearchSummary: searchSummary(result.MatchCount, total, result.Fields),
-			LibraryEmpty:  total == 0,
+			SearchSummary:   searchSummary(result.MatchCount, total, result.Fields),
+			LibraryEmpty:    total == 0,
+			SearchMaxLength: storage.MaxSearchBytes,
 		}
 		remaining := total
 		if result.Searched {
@@ -508,18 +515,4 @@ func searchSummary(matched, total int, fields []string) string {
 		named[i] = f
 	}
 	return summary + " · matched " + strings.Join(named, ", ")
-}
-
-// clipToRuneBoundary returns s cut to at most n bytes without splitting a
-// rune. Storage cuts the query it searches the same way; this cut is about
-// what the page then says it searched, so a clipped value renders as text
-// rather than as a replacement character.
-func clipToRuneBoundary(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
 }

@@ -35,14 +35,18 @@ const (
 	// hyphen.
 	minPartialISBNDigits = 4
 
-	// MaxSearchBytes bounds how much of the input becomes an expression,
-	// measured after control characters are stripped and cut on a rune
-	// boundary. A title, an author and an ISBN together fit several times
-	// over, so only a paste or a generated URL ever reaches it. It is
-	// exported because internal/web clips the query it renders back — the
-	// input's value, the no-results heading, the paging URLs — to the same
-	// bound, the same reason service.MaxDescriptionBytes is exported for
-	// the request-body cap rather than restated there.
+	// MaxSearchBytes bounds how much of the input becomes an expression —
+	// NormalizeSearchQuery is where it is applied. A title, an author and
+	// an ISBN together fit several times over, so only a paste or a
+	// generated URL ever reaches it.
+	//
+	// Exported so internal/web can put the number in the search input's
+	// maxlength attribute, which is what stops a browser sending (and
+	// pushing into its history) more than this per keystroke. That
+	// attribute counts UTF-16 units rather than bytes, so it approximates
+	// this cap from above and never cuts anything the cap would keep;
+	// nothing about the bound depends on it, since NormalizeSearchQuery
+	// applies the real one to whatever arrives.
 	MaxSearchBytes = 256
 
 	// maxSearchTerms bounds how many prefix terms one expression carries,
@@ -99,21 +103,17 @@ const (
 // Both caps above are applied here rather than by each caller, because
 // this is the one place raw user input becomes a MATCH expression: the
 // programmatic API DESIGN.md defers is then bounded by construction rather
-// than by remembering to clip first.
+// than by remembering to clip first. The byte cap arrives through
+// NormalizeSearchQuery, which internal/web calls too so that what it
+// renders back is the string this searched rather than a same-numbered
+// clip of its own.
 //
 // Input with no non-whitespace content returns "", which callers treat as
 // "no search" (the full list) rather than a query that matches nothing.
 // So does input that is entirely control characters, since those are
 // stripped above — "no search" there too, not a search for nothing.
 func SanitizeFTSQuery(input string) string {
-	input = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, input)
-
-	input = clipToRuneBoundary(input, MaxSearchBytes)
+	input = NormalizeSearchQuery(input)
 
 	if isbn, ok := normalizeIfISBNShaped(input); ok {
 		return `"` + isbn + `"*`
@@ -227,11 +227,37 @@ func partialISBNShaped(input string) (string, bool) {
 	return digits.String(), true
 }
 
+// NormalizeSearchQuery is the raw query as it will actually be searched:
+// control characters stripped (a raw NUL from "?q=%00" would otherwise make
+// FTS5's parser reject the quoted string containing it), then cut to
+// MaxSearchBytes on a rune boundary. SanitizeFTSQuery builds its expression
+// from exactly this string.
+//
+// It is exported because internal/web renders the query back into the page
+// — the search input's value, the no-results heading, the paging URLs — and
+// calling this is what makes those copies the string that was searched
+// rather than a clip of its own applied at a different point in the
+// pipeline. Idempotent, so a caller normalizing before handing input on
+// costs nothing.
+func NormalizeSearchQuery(input string) string {
+	input = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, input)
+	return clipToRuneBoundary(input, MaxSearchBytes)
+}
+
 // clipToRuneBoundary returns s cut to at most n bytes without splitting a
-// rune: a multibyte character straddling the cut is dropped whole, since
-// half of one is an invalid sequence FTS5's own parser rejects — which
-// would make a cap meant to keep every input valid the one input that
-// isn't.
+// rune: a multibyte character straddling the cut is dropped whole.
+//
+// Not because FTS5 refuses half a character — it accepts such a term
+// happily and matches nothing with it, which was measured rather than
+// assumed. The boundary is for the two places the cut is observable: the
+// final term would search a token ending in a byte nobody's title contains,
+// and the same string is rendered back into the search input and every
+// paging URL, where half a character is a U+FFFD in front of the reader.
 func clipToRuneBoundary(s string, n int) string {
 	if len(s) <= n {
 		return s

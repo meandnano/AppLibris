@@ -243,10 +243,12 @@ func TestSanitizeFTSQueryDropsTokensPastTheTermCap(t *testing.T) {
 	assertValidFTS5Expression(t, got)
 }
 
-// The byte cap cuts on a rune boundary because half a multibyte character
-// is an invalid sequence, which FTS5's own parser rejects — so a plain byte
-// cut would make the cap itself the one input this function cannot render
-// valid, the property every other case here exists to hold.
+// The byte cap cuts on a rune boundary, dropping a straddling character
+// whole. Deliberately *not* asserted through FTS5: a term ending mid-rune
+// is one FTS5 accepts, matching nothing, so a round trip there would pass
+// either way. What the boundary buys is a final term that searches for
+// something typeable, and a value the page can render — which the
+// internal/web half of this asserts on the rendered body.
 func TestSanitizeFTSQueryCutsOnARuneBoundary(t *testing.T) {
 	filler := strings.Repeat("a", MaxSearchBytes-1)
 	got := SanitizeFTSQuery(filler + "é")
@@ -257,7 +259,6 @@ func TestSanitizeFTSQueryCutsOnARuneBoundary(t *testing.T) {
 	if !utf8.ValidString(got) {
 		t.Errorf("SanitizeFTSQuery produced invalid UTF-8: %q", got)
 	}
-	assertValidFTS5Expression(t, got)
 }
 
 // A three-byte rune straddles the cap from three different offsets, two of
@@ -269,17 +270,83 @@ func TestSanitizeFTSQueryCutsAMultibyteRuneWhole(t *testing.T) {
 		if !utf8.ValidString(got) {
 			t.Errorf("pad %d: SanitizeFTSQuery produced invalid UTF-8: %q", pad, got)
 		}
-		assertValidFTS5Expression(t, got)
 	}
 }
 
-// Every ISBN shape is far under the cap, so neither is affected by it —
-// checked against the space-separated complete form, the longest input
-// either shape accepts.
+// Both ISBN shapes are far shorter than the cap, so what the cap can still
+// do to one is decide whether it is on screen when the cut lands. Trailing
+// padding is harmless; leading padding past the cap takes the ISBN with it,
+// which is a real cost of cutting the input rather than the terms — and one
+// nobody can type, since the padding would have to be pasted ahead of the
+// number.
 func TestSanitizeFTSQueryISBNPathSurvivesTheCap(t *testing.T) {
-	got := SanitizeFTSQuery("   978 0 85705 998 5   ")
-	if want := `"9780857059985"*`; got != want {
-		t.Errorf("SanitizeFTSQuery = %q, want %q", got, want)
+	const isbn = "978 0 85705 998 5"
+	pad := strings.Repeat(" ", MaxSearchBytes)
+
+	if got, want := SanitizeFTSQuery(isbn+pad), `"9780857059985"*`; got != want {
+		t.Errorf("trailing padding past the cap: SanitizeFTSQuery = %q, want %q", got, want)
+	}
+	if got := SanitizeFTSQuery(pad + isbn); got != "" {
+		t.Errorf("leading padding past the cap: SanitizeFTSQuery = %q, want %q (the ISBN is cut away)", got, "")
+	}
+}
+
+func TestNormalizeSearchQuery(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"short input is returned as it stands", "har pot", "har pot"},
+		{"control characters are stripped", "hel\x00lo", "hello"},
+		{"nothing but control characters", "\x00\x01\x1f", ""},
+		{
+			"over the cap, cut to it",
+			strings.Repeat("a", MaxSearchBytes+10),
+			strings.Repeat("a", MaxSearchBytes),
+		},
+		{
+			// The stripping runs first, so an input whose bytes exceed the
+			// cap only because of control characters is not cut at all.
+			"control characters do not count toward the cap",
+			strings.Repeat("\x01", 100) + strings.Repeat("a", MaxSearchBytes),
+			strings.Repeat("a", MaxSearchBytes),
+		},
+		{
+			"a straddling rune is dropped whole",
+			strings.Repeat("a", MaxSearchBytes-1) + "é",
+			strings.Repeat("a", MaxSearchBytes-1),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := NormalizeSearchQuery(c.in)
+			if got != c.want {
+				t.Errorf("NormalizeSearchQuery(%.32q…) = %.32q…, want %.32q…", c.in, got, c.want)
+			}
+			if again := NormalizeSearchQuery(got); again != got {
+				t.Errorf("not idempotent: %.32q… normalizes again to %.32q…", got, again)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("NormalizeSearchQuery produced invalid UTF-8: %q", got)
+			}
+		})
+	}
+}
+
+// internal/web renders what this returns and internal/service searches what
+// SanitizeFTSQuery makes of it, so the two agreeing on the bound is the
+// whole point of the transport calling the same function rather than
+// clipping to the same number.
+func TestSanitizeFTSQueryIsBuiltFromTheNormalizedQuery(t *testing.T) {
+	for _, in := range []string{
+		"har pot",
+		"hel\x00lo",
+		strings.Repeat("a", MaxSearchBytes+10),
+		strings.Repeat("é", MaxSearchBytes),
+		"978 0 85705 998 5",
+	} {
+		if got, want := SanitizeFTSQuery(in), SanitizeFTSQuery(NormalizeSearchQuery(in)); got != want {
+			t.Errorf("SanitizeFTSQuery(%.24q…) = %q, but %q once normalized first", in, got, want)
+		}
 	}
 }
 
@@ -287,8 +354,15 @@ func TestSanitizeFTSQueryISBNPathSurvivesTheCap(t *testing.T) {
 // were still executing inside CountSearchBooks when a ten-minute test
 // timeout fired, holding one of the read pool's eight connections for the
 // whole time. All three queries one search request makes are driven here,
-// and the context deadline is what fails this rather than hanging the suite
-// if the term cap is ever lifted.
+// under a deadline, so the failure is a failure rather than a hung suite.
+//
+// What it does *not* pin is maxSearchTerms, and that is worth knowing
+// before trusting it: MaxSearchBytes is applied first and 256 bytes admits
+// at most 128 single-letter tokens, so with the term cap lifted to a
+// million this still passed in 0.25s. It fails (17s, deadline exceeded)
+// only with both caps gone. TestSanitizeFTSQueryDropsTokensPastTheTermCap
+// is what pins the term cap; this pins that a query nobody should be able
+// to send cannot cost the read pool a connection.
 func TestSearchWithAnAbsurdTokenCountCompletesPromptly(t *testing.T) {
 	db := openTestDB(t)
 	seedSearchableBooks(t, db, 200)
@@ -299,7 +373,13 @@ func TestSearchWithAnAbsurdTokenCountCompletesPromptly(t *testing.T) {
 	}
 	query := SanitizeFTSQuery(strings.Join(tokens, " "))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// One budget for both the deadline and the assertion, so the message
+	// cannot claim a threshold the check does not use. Generous against a
+	// measured ~20ms with both caps in place: the failure being caught is
+	// seconds-to-minutes, not milliseconds.
+	const budget = 2 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
 	start := time.Now()
@@ -312,8 +392,8 @@ func TestSearchWithAnAbsurdTokenCountCompletesPromptly(t *testing.T) {
 	if _, err := db.MatchedSearchFields(ctx, query); err != nil {
 		t.Fatalf("MatchedSearchFields: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("one search request's three queries took %v, want well under a second", elapsed)
+	if elapsed := time.Since(start); elapsed > budget {
+		t.Errorf("one search request's three queries took %v, want under %v", elapsed, budget)
 	}
 }
 

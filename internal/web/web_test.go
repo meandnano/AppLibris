@@ -450,6 +450,12 @@ func TestOverlongSearchQueryIsClippedInEveryRenderedCopy(t *testing.T) {
 	if strings.Contains(body, queryToken) {
 		t.Error("body carries the unclipped query somewhere")
 	}
+	// Against storage's own normalization rather than a number, since what
+	// makes the rendered copies trustworthy is that the handler and the
+	// service bound the query the same way, not that both spell 256.
+	if want := storage.NormalizeSearchQuery(queryToken); want != clipped {
+		t.Fatalf("fixture assumes the clip: NormalizeSearchQuery gives %.16q…", want)
+	}
 	if !strings.Contains(body, `value="`+clipped+`"`) {
 		t.Errorf("search input does not echo the clipped query; got %q", lineContaining(body, "search__input"))
 	}
@@ -459,6 +465,44 @@ func TestOverlongSearchQueryIsClippedInEveryRenderedCopy(t *testing.T) {
 	}
 	if !strings.Contains(trigger, "q="+clipped) {
 		t.Errorf("paging URL does not carry the clipped query: %q", trigger)
+	}
+}
+
+// The search input's maxlength is what keeps a paste from being sent and
+// pushed into history in full — the input is never swapped, so the
+// handler's clip cannot reach it between keystrokes. The number comes from
+// the view model, and a forgotten field renders maxlength="0", which makes
+// the box untypeable while every other test here stays green.
+func TestSearchInputCarriesTheByteCapAsMaxlength(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	rec := get(handler, "/", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", rec.Code)
+	}
+	input := lineContaining(rec.Body.String(), "search__input")
+	if want := fmt.Sprintf(`maxlength="%d"`, storage.MaxSearchBytes); !strings.Contains(input, want) {
+		t.Errorf("search input does not carry %s: %q", want, input)
+	}
+}
+
+// The handler normalizes through storage, so a control character is gone
+// before it can be rendered — a raw NUL in an attribute value otherwise
+// reaches the browser, and every later copy of the query (the paging URLs)
+// carries it too.
+func TestControlCharacterIsStrippedFromTheRenderedQuery(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	rec := get(handler, "/?q=hel%00lo", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /?q=hel%%00lo = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.ContainsRune(body, 0) {
+		t.Error("rendered body carries a raw NUL from the query")
+	}
+	if !strings.Contains(body, `value="hello"`) {
+		t.Errorf("search input does not echo the stripped query; got %q", lineContaining(body, "search__input"))
 	}
 }
 

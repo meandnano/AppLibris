@@ -88,6 +88,27 @@ The constant is exported from `storage` for this reason, the same way
 `service.MaxDescriptionBytes` is exported so `internal/web` sizes its
 body cap from it rather than restating the number.
 
+**Found in review, after implementing:** the second half of the first
+paragraph is false and cannot be made true by clipping anywhere in the
+handler. The vendored htmx 2.0.10 pushes the URL it requested unless the
+response carries `HX-Push-Url`, which this handler never sets, and the
+search input lives outside `#book-grid` and is therefore never swapped —
+so after a paste the box still holds the full text and every keystroke
+re-sends and re-pushes it. The clip reaches the input only on a full-page
+render, which is exactly what the test asserted, so the test was green
+while the claim was false on the one path that has `hx-push-url` at all.
+
+What was done instead: `maxlength` on the search input, fed from
+`MaxSearchBytes` through `libraryPage.SearchMaxLength`, which bounds what
+the browser can send and push (approximately — it counts UTF-16 units, so
+it approximates the byte cap from above and never cuts what the server
+would keep). That is also what the constant's export is now for. The
+handler's clip stays for the half of this decision that was true — every
+rendered copy consistent with what was searched — and now calls
+`storage.NormalizeSearchQuery` rather than clipping to the same number
+independently, since the handler sees `q` before control characters are
+stripped and a clip there is not the same cut.
+
 ## Changes
 
 - `internal/storage/ftsquery.go`: `MaxSearchBytes` and `maxSearchTerms`;
@@ -103,8 +124,26 @@ body cap from it rather than restating the number.
 - Input over `MaxSearchBytes` is cut on a rune boundary (a multibyte
   character straddling the cut is dropped whole, never split into an
   invalid sequence that FTS5 would choke on).
+
+  **Found in review:** FTS5 does not choke on one. A term ending mid-rune
+  goes through `SearchBooks`, `CountSearchBooks` and `MatchedSearchFields`
+  with a nil error and matches nothing, which was then measured directly
+  rather than argued about. The boundary is still right, for two reasons
+  the plan does not give: the final term would search a token ending in a
+  byte no title contains, and the same string is rendered into the input
+  and the paging URLs, where half a character is a U+FFFD. The tests no
+  longer route the rune-boundary cases through FTS5, since that assertion
+  cannot fail either way and reads as a guarantee that does not exist.
 - A complete ISBN with surrounding whitespace still takes the ISBN path
   after the cut, since it is far under the cap.
+
+  **Found in review:** written that way the test never reaches the cap at
+  all — 23 bytes of input, so the clip is a no-op and the assertion
+  duplicates a case the sanitizer's own table already covers. The padding
+  has to exceed `MaxSearchBytes` for the clip to fire, and then the side
+  it is on matters: trailing padding is harmless, while leading padding
+  past the cap cuts the ISBN away entirely and the query becomes no search
+  at all. Both are asserted now.
 - A search of 100,000 tokens against a small fixture library completes in
   well under a second. This is the regression test for the reproduction
   and should carry a short deadline.
@@ -139,3 +178,12 @@ handler clips to the exported constant.
   loads are unaffected.
 - `curl` the same URL eight times concurrently and load the library page
   in a browser at the same time: it renders.
+
+**Found in review:** the first bullet would have failed as specified, on
+both the htmx and the no-JS paths, for the reason appended to Decision 2 —
+nothing the handler does can shorten a URL the browser has already
+requested. It holds now because `maxlength` keeps the box itself from ever
+holding more than the cap. The second bullet was run as a throwaway test
+rather than by hand: eight concurrent 100,000-token searches against a
+3,000-book library finish in 58ms, with a library page rendering in 20ms
+alongside them.
