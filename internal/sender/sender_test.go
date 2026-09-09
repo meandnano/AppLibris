@@ -490,6 +490,84 @@ func TestWorkerStorageFailureDoesNotClaimTheFileIsGone(t *testing.T) {
 	}
 }
 
+// A send whose own deadline expires has an unknown outcome — the upload
+// may have completed with only the response outstanding — but no restart
+// is coming to resolve it, so it is recorded failed with a reason that
+// says so, rather than with the raw error's URL and "context deadline
+// exceeded", and the log carries the send id.
+func TestWorkerTimeoutIsRecordedAsUnknownOutcome(t *testing.T) {
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	bookID := setupBookWithFile(t, db, libraryDir, "slow.epub", []byte("x"))
+	sendID, err := db.EnqueueSend(ctx, bookID, "Slow", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	stub := &stubTransport{sendFunc: func(ctx context.Context, to string, a resend.Attachment) (string, error) {
+		<-ctx.Done()
+		return "", fmt.Errorf("send request: %w", ctx.Err())
+	}}
+	w := New(db, stub, libraryDir)
+	w.sendTimeout = 50 * time.Millisecond
+	w.drain(ctx)
+
+	got, err := db.GetSend(ctx, sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.Status != storage.SendFailed {
+		t.Fatalf("Status = %q, want failed — a timeout has no restart coming to resolve a sending row", got.Status)
+	}
+	if got.FailureReason != timedOutReason {
+		t.Errorf("FailureReason = %q, want %q", got.FailureReason, timedOutReason)
+	}
+	if !strings.Contains(logged.String(), "send timed out") || !strings.Contains(logged.String(), fmt.Sprintf("send_id=%d", sendID)) {
+		t.Errorf("log does not name the timeout and the send:\n%s", logged.String())
+	}
+}
+
+// The per-send deadline grows with the attachment: a small file keeps the
+// floor, a large one gets its encoded upload time at the slowest uplink
+// the constant is sized for, plus half the floor as slack.
+func TestSendDeadlineScalesWithSize(t *testing.T) {
+	w := &Worker{sendTimeout: resend.SendTimeout}
+	encodedUpload := func(size int64) time.Duration {
+		return time.Duration((size+2)/3*4) * time.Second / minUplinkBytesPerSecond
+	}
+	cases := []struct {
+		name string
+		size int64
+		want time.Duration
+	}{
+		{"empty", 0, resend.SendTimeout},
+		{"a typical epub", 2 << 20, resend.SendTimeout},
+		// Just below the point where upload plus slack overtakes the floor.
+		{"still under the floor", 10 << 20, resend.SendTimeout},
+		{"at the attachment cap", resend.MaxAttachmentSize, encodedUpload(resend.MaxAttachmentSize) + resend.SendTimeout/2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := w.sendDeadline(tc.size); got != tc.want {
+				t.Errorf("sendDeadline(%d) = %v, want %v", tc.size, got, tc.want)
+			}
+		})
+	}
+
+	// The cap case must actually exceed the floor, or the table above
+	// proves nothing about scaling.
+	if got := w.sendDeadline(resend.MaxAttachmentSize); got <= resend.SendTimeout {
+		t.Errorf("sendDeadline(MaxAttachmentSize) = %v, not above the %v floor", got, resend.SendTimeout)
+	}
+}
+
 // A file the index still lists but which has left the disk is the one
 // filesystem failure that genuinely means "gone".
 func TestWorkerDeletedFileIsGone(t *testing.T) {

@@ -19,19 +19,21 @@ import (
 
 const defaultBaseURL = "https://api.resend.com"
 
-// SendTimeout bounds the whole Send exchange, including the attachment
-// upload: net/http.Client.Timeout covers connect, write and read together,
-// not just a connect deadline, so it must not be re-tuned as if it were
-// one. A 28MB attachment (MaxAttachmentSize) inflates to ~37MB of base64,
-// which needs roughly four minutes to upload on a 1.5 Mbit/s domestic
-// uplink — five minutes is the smallest round number that doesn't fail a
-// legitimate large send on a slow line. Dial and TLS-handshake bounds
-// already come from http.DefaultTransport, which NewClient's Client keeps.
+// SendTimeout is the floor of the per-send deadline, not the deadline
+// itself: internal/sender's worker owns that, scaling it up from this
+// value by the attachment's size so a large file on a slow uplink is not
+// cut off mid-upload. Five minutes covers the small-attachment case with
+// room to spare — a 28MB attachment (MaxAttachmentSize) inflates to ~37MB
+// of base64, which needs roughly four minutes on a 1.5 Mbit/s domestic
+// uplink — and anything past that is the worker's arithmetic.
 //
-// internal/sender's worker derives its own per-job context deadline from
-// this same constant, which is what actually makes a send abandonable at
-// shutdown; the Client's Timeout here is the backstop for a caller that
-// passes context.Background().
+// The Client deliberately sets no http.Client.Timeout of its own: the
+// smaller of that and the request context's deadline wins, so a fixed
+// client-level timeout would silently cap exactly the large send the
+// worker's scaled deadline exists to allow. Dial and TLS-handshake bounds
+// still come from http.DefaultTransport, which NewClient's Client keeps.
+// A caller passing context.Background() therefore has no backstop at all;
+// the worker is the only caller and always passes a deadline.
 const SendTimeout = 5 * time.Minute
 
 // MaxAttachmentSize is the largest attachment Send will attempt. Resend
@@ -63,16 +65,16 @@ type Client struct {
 }
 
 // NewClient builds a Client that authenticates with apiKey and sends as
-// from. It owns its own *http.Client with SendTimeout set, rather than
-// using http.DefaultClient, which has no timeout at all — see SendTimeout's
-// doc comment for why that timeout covers the whole request, not just a
-// connect deadline.
+// from. It owns its own *http.Client rather than sharing http.DefaultClient,
+// so nothing else in the process can reconfigure the one this credential
+// travels through; the deadline is the caller's context's — see
+// SendTimeout for why no Timeout is set here.
 func NewClient(apiKey, from string) *Client {
 	return &Client{
 		apiKey:     apiKey,
 		from:       from,
 		baseURL:    defaultBaseURL,
-		httpClient: &http.Client{Timeout: SendTimeout},
+		httpClient: &http.Client{},
 	}
 }
 

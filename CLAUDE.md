@@ -508,12 +508,17 @@ full design.
   DESIGN.md derives before attempting a send, and setting a non-empty
   `text` body ("Sent from the library.") since Resend requires one of
   `text`/`html`/`react`. Its caller is `internal/sender`'s queue worker.
-  `NewClient` builds its own `*http.Client` with `SendTimeout` (5 minutes)
-  set, rather than `http.DefaultClient`, which has none — the exported
-  constant covers the *whole* request including the attachment upload, not
-  just a connect deadline, and `internal/sender` reuses it for the
-  worker's own per-job context deadline, the mechanism that actually makes
-  a send abandonable at shutdown. The whole attachment is still held in
+  `NewClient` builds its own `*http.Client` rather than sharing
+  `http.DefaultClient`, but sets **no** `Timeout` on it: the deadline is
+  the caller's context's, and `internal/sender` owns it. `SendTimeout`
+  (5 minutes) is exported as the *floor* of that deadline, not the
+  deadline itself — the worker scales it up with the attachment's size,
+  and since the smaller of a client-level timeout and the context wins, a
+  fixed `Timeout` here would silently cap exactly the large send that
+  scaling exists to allow. A caller passing `context.Background()` has no
+  backstop at all; the worker is the only caller and always passes a
+  deadline, and a test pins the absent `Timeout` so the old backstop is
+  not quietly restored. The whole attachment is still held in
   memory as raw bytes, a base64 string, the marshaled JSON body and a
   reader over it all at once (~3.3x `MaxAttachmentSize` at the ceiling) —
   deliberately unstreamed: `internal/sender` runs a single worker, so
@@ -555,7 +560,13 @@ full design.
   with both sizes named ("14.2 MB exceeds the 28 MB limit") so an
   oversized file is never loaded into memory and the failure reason always
   has the numbers; the transport call itself runs under a per-job
-  `context.WithTimeout(ctx, resend.SendTimeout)`. A transport error's text
+  deadline `sendDeadline` computes from that size — the base64-encoded
+  length over `minUplinkBytesPerSecond` (1 Mbit/s, a slow domestic line)
+  plus half of `resend.SendTimeout` as slack, floored at `SendTimeout`
+  itself, so a small file keeps five minutes and a 28 MB one gets about
+  seven and three-quarter rather than being cut off mid-upload. The floor
+  is a `Worker` field (`sendTimeout`), defaulted from the constant, so a
+  test can drive the timeout path in milliseconds. A transport error's text
   is recorded verbatim (truncated to `maxFailureReason`, 500 bytes, on a
   UTF-8 boundary) as the
   failure reason — Resend's API errors already read as sentences. Two
@@ -580,7 +591,21 @@ full design.
   rewrites a delivered book as failed and invites a duplicate send. Only
   the genuinely unknown case, a transport call abandoned mid-flight (its
   error arrives with `ctx` already cancelled), skips the write and leaves
-  the row `sending` for startup recovery to surface.
+  the row `sending` for startup recovery to surface. **A send whose own
+  deadline expired is the same unknown** — the upload may have completed
+  with only the response outstanding — but with no restart coming to
+  resolve it, so it is the one unknown that *is* written: `failed`, the
+  only terminal state that offers Retry, with `timedOutReason` ("timed out
+  before Resend answered — check the Kindle before sending again") in
+  place of the raw error's URL and `context deadline exceeded`, the
+  sentence carrying the doubt the state cannot. It is detected by
+  `errors.Is(err, context.DeadlineExceeded)` *after* the `ctx.Err()` check,
+  since a parent cancellation also expires the child context; a resend
+  test pins that `Client.Send` wraps the error so that check keeps
+  working. Leaving it `sending` was rejected because the UI would poll it
+  until the next restart; Resend's idempotency keys would make the retry
+  itself safe and are the right long-term answer, deliberately a plan of
+  their own.
 - `internal/enrich` is the metadata provider-enrichment queue: a single
   `Worker` over `enrichment_jobs`, the `Provider` interface
   `internal/openlibrary` and `internal/googlebooks` implement, and the `Resolve`

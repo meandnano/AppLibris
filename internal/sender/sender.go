@@ -61,6 +61,28 @@ const lookupFailedReason = "could not read the library index — try again"
 // the status box, since EACCES is not a sentence a person acts on.
 const fileUnreadableReason = "could not read the file — try again"
 
+// timedOutReason is recorded when the per-send deadline expired before
+// Resend answered. That outcome is unknown, not failed — the body may have
+// been fully uploaded and accepted with only the response outstanding, the
+// same ambiguity FailInterruptedSends hedges over — but unlike a shutdown,
+// a timeout leaves the process running, and a row left sending would sit
+// until the next restart with the UI polling it forever. failed is the one
+// terminal state that offers Retry, so the row takes it, and the sentence
+// carries the doubt the state cannot: a person who checks the device first
+// avoids the duplicate a raw "context deadline exceeded" invited.
+const timedOutReason = "timed out before Resend answered — check the Kindle before sending again"
+
+// minUplinkBytesPerSecond is the slowest uplink a send deadline is sized
+// for: 1 Mbit/s, a slow domestic line or a NAS behind one. The deadline
+// for an attachment is its base64-encoded length over this rate plus half
+// of resend.SendTimeout as slack, floored at SendTimeout itself — so a
+// small file gets five minutes as before, while a 28MB one (~37MB
+// encoded, ~313s at this rate) gets about seven and three-quarter minutes
+// instead of being cut off at five with the outcome unknown. Retune on
+// measurement, not instinct; the arithmetic is here so the measurement
+// has something to be compared against.
+const minUplinkBytesPerSecond = 125_000
+
 // Transport is what the worker needs from a mail provider. Declared here,
 // on the consumer side, rather than in internal/resend — which notes it
 // has no Sender interface "because nothing else implements one yet".
@@ -78,6 +100,11 @@ type Worker struct {
 	transport  Transport
 	libraryDir string
 	notify     chan struct{}
+
+	// sendTimeout is the floor of every per-send deadline — see
+	// sendDeadline. resend.SendTimeout in production; a field rather than
+	// the constant so a test can drive the timeout path in milliseconds.
+	sendTimeout time.Duration
 }
 
 // New returns a Worker that reads jobs from db, sends them via t, and
@@ -85,11 +112,26 @@ type Worker struct {
 // against libraryDir.
 func New(db *storage.DB, t Transport, libraryDir string) *Worker {
 	return &Worker{
-		db:         db,
-		transport:  t,
-		libraryDir: libraryDir,
-		notify:     make(chan struct{}, 1),
+		db:          db,
+		transport:   t,
+		libraryDir:  libraryDir,
+		notify:      make(chan struct{}, 1),
+		sendTimeout: resend.SendTimeout,
 	}
+}
+
+// sendDeadline is how long a send of size raw bytes is given before its
+// outcome is declared unknown: the encoded upload at minUplinkBytesPerSecond
+// plus half the floor as slack, never less than the floor. Sized on the
+// base64 length rather than the file's, since that is what crosses the
+// wire.
+func (w *Worker) sendDeadline(size int64) time.Duration {
+	encoded := (size + 2) / 3 * 4
+	upload := time.Duration(encoded) * time.Second / minUplinkBytesPerSecond
+	if d := upload + w.sendTimeout/2; d > w.sendTimeout {
+		return d
+	}
+	return w.sendTimeout
 }
 
 // Notify pokes the worker to check the queue immediately, instead of
@@ -187,7 +229,8 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 		return
 	}
 
-	sendCtx, cancel := context.WithTimeout(ctx, resend.SendTimeout)
+	deadline := w.sendDeadline(info.Size())
+	sendCtx, cancel := context.WithTimeout(ctx, deadline)
 	messageID, err := w.transport.Send(sendCtx, send.RecipientAddress, resend.Attachment{
 		Filename: filename,
 		Content:  content,
@@ -199,8 +242,19 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 		// the message — the request was abandoned, not answered. Leave
 		// the row sending for FailInterruptedSends to surface at the
 		// next startup, rather than recording a failure that might be a
-		// silent success. Every other transport error is an answer.
+		// silent success.
 		if ctx.Err() != nil {
+			return
+		}
+		// The per-send deadline expiring is the same unknown without a
+		// restart coming to resolve it, so it is recorded — see
+		// timedOutReason for why as failed, and with that sentence rather
+		// than the error's own text, which names a URL and a Go context
+		// and nothing a person can act on. Every other transport error
+		// is an answer.
+		if errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("send timed out", "send_id", send.ID, "deadline", deadline, "size", info.Size(), "error", err)
+			w.fail(ctx, send.ID, timedOutReason)
 			return
 		}
 		w.fail(ctx, send.ID, truncate(err.Error(), maxFailureReason))
@@ -262,12 +316,13 @@ func (w *Worker) resolveFile(ctx context.Context, send *storage.Send) (path, fil
 var errFileGone = errors.New(fileGoneReason)
 
 // fail records sendID's terminal failure. Like the delivered path, it
-// writes on a context detached from ctx: every caller has already
-// established that this send definitely failed — the file is gone, too
-// large, unreadable, or the transport answered with a rejection — and
-// losing that verdict to a shutdown would turn a definite failure into the
-// ambiguous sending row recovery has to hedge over. The one genuinely
-// ambiguous case, a transport call abandoned mid-flight, does not reach
+// writes on a context detached from ctx: every caller has reached a
+// verdict worth keeping — the file is gone, too large, unreadable, the
+// transport answered with a rejection, or the deadline expired and the
+// reason says so — and losing it to a shutdown would turn that into the
+// ambiguous sending row recovery has to hedge over. The one case that is
+// ambiguous *and* about to be resolved by a restart, a transport call
+// abandoned because the worker's own context was cancelled, does not reach
 // here at all.
 func (w *Worker) fail(ctx context.Context, sendID int64, reason string) {
 	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)

@@ -82,6 +82,15 @@ or removed in favour of the context, since the smaller of the two wins.
 The constant carries the arithmetic in its comment, the way `SendTimeout`
 already does, so it is retuned on measurement rather than instinct.
 
+> **Correction found while implementing.** The formula above divides the
+> attachment's *raw* size by the uplink rate, but its own worked figure —
+> "a 28 MB attachment about five and a half minutes" — only comes out for
+> the base64-encoded length (~37 MB, ~313 s at 125 KB/s; the raw size
+> gives under four). The encoded length is what crosses the wire, so
+> `sendDeadline` is computed on `(size + 2) / 3 * 4`, and the figure in
+> the code's comment is the encoded one. The floor and the slack are as
+> specified.
+
 ## Changes
 
 - `internal/sender/sender.go`: `timedOutReason`; deadline computed from
