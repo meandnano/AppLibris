@@ -63,6 +63,8 @@ type bookDetailPage struct {
 
 	ID                int64
 	SendEnabled       bool
+	Sendable          bool
+	SendableNote      string
 	Recipients        []service.RecipientOption
 	Send              *service.SendState
 	SendPending       bool
@@ -161,7 +163,7 @@ func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.B
 		ID:                detail.ID,
 	}
 	applyFieldViews(&page, detail, edit)
-	if err := populateSendControl(r.Context(), svc, sendEnabled, &page); err != nil {
+	if err := populateSendControl(r.Context(), svc, sendEnabled, detail, &page); err != nil {
 		return nil, err
 	}
 	if err := populateEnrichControl(r.Context(), svc, enrichEnabled, &page); err != nil {
@@ -300,8 +302,9 @@ func makeFieldViews(detail *service.BookDetail, edit string) map[storage.Metadat
 // detail-page render and the standalone send-control fragment handlers in
 // send.go, so the three routes derive the picker and status box the same
 // way.
-func populateSendControl(ctx context.Context, svc *service.Service, sendEnabled bool, page *bookDetailPage) error {
+func populateSendControl(ctx context.Context, svc *service.Service, sendEnabled bool, detail *service.BookDetail, page *bookDetailPage) error {
 	page.SendEnabled = sendEnabled
+	applySendability(page, detail)
 	if !sendEnabled {
 		return nil
 	}
@@ -318,6 +321,17 @@ func populateSendControl(ctx context.Context, svc *service.Service, sendEnabled 
 	}
 	applySendState(page, send)
 	return nil
+}
+
+// applySendability copies the service's per-book decision about whether
+// this format can be sent to a Kindle onto page. Every route that renders
+// the send control calls it, so a fragment can never offer a button the
+// full page withholds: the fragment handlers in send.go load the book for
+// this alone, where before they built the control from the send row and
+// the recipient list without one.
+func applySendability(page *bookDetailPage, detail *service.BookDetail) {
+	page.Sendable = detail.Sendable
+	page.SendableNote = detail.SendableNote
 }
 
 // applySendState fills page's derived send-status fields from send (nil

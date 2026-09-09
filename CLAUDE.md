@@ -1465,7 +1465,19 @@ full design.
   reads the book directly via storage rather than through `GetBook` (whose
   authors/file-location joins a title snapshot has no use for), returning
   `nil, nil` on an unknown id, `GetBook`'s own contract; then saves the
-  recipient (idempotently) and calls `EnqueueSend`. `Service.Notify
+  recipient (idempotently) and calls `EnqueueSend`. `BookDetail.Sendable`
+  and `SendableNote` are whether Amazon's Send to Kindle accepts the
+  book's format at all, decided by `sendableFormat` over a table of the
+  formats Amazon lists that the scanner can index — today only `epub`.
+  Amazon **drops** an FB2 or ZIP attachment silently, so a send Resend
+  accepted reads "Delivered" for a book that never reached the device;
+  until DESIGN.md's deferred format conversion exists, the honest surface
+  is a control that says why it is not offered, and the decision lives
+  here because a future API answers the same question. `QueueSend` does
+  **not** refuse an unsendable book: the button is not rendered, and a
+  hand-crafted POST queueing a send is harmless, where a 4xx would be a
+  second rule to keep in step with the first for no visible gain.
+  `Service.Notify
   func()`, set by `cmd/server` to the worker's `Notify` method (nil in
   tests and whenever sending is unconfigured), is called once a send is
   successfully queued — a function field rather than an interface, since
@@ -1749,7 +1761,12 @@ full design.
   `GET /books/{id}/sends/{sendID}` build one mostly-zero-valued
   `bookDetailPage` rather than a parallel type. Plate 06's four states
   (idle, sending, delivered, failed) plus a fifth for
-  `RESEND_API_KEY`/`RESEND_FROM` being unset are driven by fields
+  `RESEND_API_KEY`/`RESEND_FROM` being unset, and a sixth for a format
+  Kindle does not accept (`Sendable` false, from `service.BookDetail` —
+  no form at all in the `send__disabled` treatment, the `SendableNote`
+  sentence in its place, while a status box for a send made before the
+  refusal still renders beneath it, since history is not edited), are
+  driven by fields
   `book.go`'s `applySendState` computes once — `SendPending`,
   `SendButtonLabel`, `SendButtonPrimary`, `SendAt`, `SendPollURL` — the
   same discipline `searchSummary` applies to the results line, so the
@@ -1757,6 +1774,15 @@ full design.
   it. `send.Status` of `queued` or `sending` are one visual state
   ("Sending"): the UI has no separate treatment for the gap between
   enqueue and claim, which the worker's `Notify` poke keeps short anyway.
+  Every route that renders the control — the full page, the send POST,
+  the status poll and the recipient removal — passes through
+  `applySendability`, so a fragment can never offer a button the full
+  page withholds; the three fragment handlers load the book
+  (`loadSendDetail`) for that alone, which they did not before. That
+  helper returns no error on purpose: `sendHandler` still holds
+  `QueueSend`'s, which may be the rejected-address one the rest of the
+  handler branches on, and a second `err` in that scope is how it was
+  overwritten in the first attempt — the invalid-address test caught it.
   The whole control is one swap target (`id="send"`, the class
   `detail__send` kept alongside it for positioning) — form and status
   share a region because the states replace each other rather than

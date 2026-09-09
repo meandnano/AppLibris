@@ -28,11 +28,16 @@ var sendTestBookSeq int
 
 func createSendTestBook(t *testing.T, db *storage.DB) int64 {
 	t.Helper()
+	return createSendTestBookWithFormat(t, db, "epub")
+}
+
+func createSendTestBookWithFormat(t *testing.T, db *storage.DB, format string) int64 {
+	t.Helper()
 	sendTestBookSeq++
 	hash := "hash-" + itoa(int64(sendTestBookSeq))
 	id, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
-		ContentHash: hash, Title: "Piranesi", SortTitle: "Piranesi", Format: "epub",
-	}, []string{"Susanna Clarke"}, hash+".epub", 1024, time.Now())
+		ContentHash: hash, Title: "Piranesi", SortTitle: "Piranesi", Format: format,
+	}, []string{"Susanna Clarke"}, hash+"."+format, 1024, time.Now())
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -482,5 +487,82 @@ func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) 
 	}
 	if !strings.Contains(body, `value="not-an-address"`) || !strings.Contains(body, `value="Spare Kindle"`) {
 		t.Errorf("the typed address and label were not carried back; body = %q", body)
+	}
+}
+
+// Amazon drops an FB2 attachment silently, so for a book in that format the
+// control offers no button at all and says why, on the full page and on
+// every fragment route alike; an EPUB's control is untouched.
+func TestSendControlWithholdsTheButtonForAnUnsendableFormat(t *testing.T) {
+	db := newSendTestDB(t)
+	ctx := context.Background()
+	fb2 := createSendTestBookWithFormat(t, db, "fb2")
+	epub := createSendTestBook(t, db)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
+
+	const note = "Kindle doesn&#39;t accept FB2 — convert to EPUB to send."
+
+	get := func(path string) string {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", path, rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	body := get("/books/" + itoa(fb2))
+	if strings.Contains(body, `class="send__form"`) {
+		t.Errorf("FB2 detail page renders a send form; body = %q", body)
+	}
+	if !strings.Contains(body, note) {
+		t.Errorf("FB2 detail page missing the reason; body = %q", body)
+	}
+
+	body = get("/books/" + itoa(epub))
+	if !strings.Contains(body, `class="send__form"`) {
+		t.Errorf("EPUB detail page missing its send form; body = %q", body)
+	}
+	if strings.Contains(body, "Kindle doesn") {
+		t.Errorf("EPUB detail page carries a format refusal; body = %q", body)
+	}
+
+	// A send made before the format was refused is history: the poll
+	// route still shows its status box, beside the note and without a
+	// form.
+	sendID, err := db.EnqueueSend(ctx, fb2, "Piranesi", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+	if _, err := db.ClaimNextSend(ctx, time.Now()); err != nil {
+		t.Fatalf("ClaimNextSend: %v", err)
+	}
+	if err := db.MarkSendDelivered(ctx, sendID, "msg_1", time.Now()); err != nil {
+		t.Fatalf("MarkSendDelivered: %v", err)
+	}
+	body = get("/books/" + itoa(fb2) + "/sends/" + itoa(sendID))
+	if !strings.Contains(body, "Delivered") {
+		t.Errorf("FB2 poll fragment missing its historical status; body = %q", body)
+	}
+	if !strings.Contains(body, note) || strings.Contains(body, `class="send__form"`) {
+		t.Errorf("FB2 poll fragment does not withhold the form with the note; body = %q", body)
+	}
+
+	// The remove-recipient fragment re-renders the same control and must
+	// agree with it.
+	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
+		t.Fatalf("CreateRecipient: %v", err)
+	}
+	form := url.Values{"book": {itoa(fb2)}, "address": {"reader@kindle.com"}}
+	req := httptest.NewRequest(http.MethodPost, "/recipients/remove", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST remove status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), note) || strings.Contains(rec.Body.String(), `class="send__form"`) {
+		t.Errorf("remove-recipient fragment for an FB2 book offers the form; body = %q", rec.Body.String())
 	}
 }

@@ -813,3 +813,55 @@ func TestGetBookCarriesFieldSources(t *testing.T) {
 		t.Errorf("FieldSources[title] = %q, want embedded — the scanner set it at creation", got)
 	}
 }
+
+func TestSendableFormat(t *testing.T) {
+	cases := []struct {
+		format   string
+		sendable bool
+		note     string
+	}{
+		{"epub", true, ""},
+		{"fb2", false, "Kindle doesn't accept FB2 — convert to EPUB to send."},
+		{"mobi", false, "Kindle doesn't accept this format."},
+		{"", false, "Kindle doesn't accept this format."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.format, func(t *testing.T) {
+			sendable, note := sendableFormat(tc.format)
+			if sendable != tc.sendable || note != tc.note {
+				t.Errorf("sendableFormat(%q) = (%v, %q), want (%v, %q)", tc.format, sendable, note, tc.sendable, tc.note)
+			}
+		})
+	}
+}
+
+func TestGetBookReportsSendability(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	svc := New(db)
+
+	epubID, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-epub", Title: "Epub", SortTitle: "Epub", Format: "epub"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook epub: %v", err)
+	}
+	fb2ID, err := db.CreateBook(ctx, storage.Book{ContentHash: "hash-fb2", Title: "Fb2", SortTitle: "Fb2", Format: "fb2"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook fb2: %v", err)
+	}
+
+	epub, err := svc.GetBook(ctx, epubID)
+	if err != nil || epub == nil {
+		t.Fatalf("GetBook epub: %+v, %v", epub, err)
+	}
+	if !epub.Sendable || epub.SendableNote != "" {
+		t.Errorf("epub Sendable = %v, note %q; want sendable with no note", epub.Sendable, epub.SendableNote)
+	}
+
+	fb2, err := svc.GetBook(ctx, fb2ID)
+	if err != nil || fb2 == nil {
+		t.Fatalf("GetBook fb2: %+v, %v", fb2, err)
+	}
+	if fb2.Sendable || fb2.SendableNote == "" {
+		t.Errorf("fb2 Sendable = %v, note %q; want not sendable with a note", fb2.Sendable, fb2.SendableNote)
+	}
+}

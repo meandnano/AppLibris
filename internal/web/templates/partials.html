@@ -194,6 +194,14 @@
   {{if not .SendEnabled}}
   <p class="send__disabled">Sending is not configured</p>
   {{else}}
+  {{if not .Sendable}}
+  {{/* No form at all, not a disabled button: there is nothing a poll
+       could swap in, and a button that cannot do what it says is worse
+       than a sentence saying why. A status box below still renders for a
+       send made before the format was refused — that is history, and
+       history is not edited. */}}
+  <p class="send__disabled">{{.SendableNote}}</p>
+  {{else}}
   <form class="send__form" method="post" action="/books/{{.ID}}/send" hx-post="/books/{{.ID}}/send" hx-target="#send" hx-swap="outerHTML">
     {{if .SendError}}
     <p class="send__error">{{.SendError}}</p>
@@ -253,6 +261,7 @@
   <form id="recipient-form" method="post" action="/recipients/remove" hx-post="/recipients/remove" hx-target="#send" hx-swap="outerHTML">
     <input type="hidden" name="book" value="{{.ID}}">
   </form>
+  {{end}}
 
   {{if .Send}}
   {{if eq .Send.Status "delivered"}}
