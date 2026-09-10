@@ -249,11 +249,11 @@ func run(ctx context.Context) error {
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
-		runScan(scanCtx, db, libraryDir, coversDir, missingGrace)
+		reported := runScan(scanCtx, db, libraryDir, coversDir, missingGrace, nil)
 		if watcher != nil {
 			watcher.Refresh()
 		}
-		periodicScan(scanCtx, db, libraryDir, coversDir, scanInterval, missingGrace, scanTrigger, watcher)
+		periodicScan(scanCtx, db, libraryDir, coversDir, scanInterval, missingGrace, scanTrigger, watcher, reported)
 	}()
 
 	var watcherDone chan struct{}
@@ -456,7 +456,14 @@ func waitForBackground(cancel context.CancelFunc, done <-chan struct{}, deadline
 // changes when a sweep happens and never what one does (docs/notes/scanner.md),
 // with the ticker as the safety net that runs whether or not any event ever
 // arrives.
-func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration, trigger <-chan struct{}, watcher *scanner.Watcher) {
+// It also carries the set of directories the previous sweep reported as
+// unconfirmed from one iteration to the next, which is all the memory
+// runScan's Warn-then-Info rule needs. A loop variable rather than a
+// column: losing it on a restart costs one Warn per unconfirmed directory,
+// which is the right thing to say to someone who has just started the
+// server. reported is the startup sweep's set, so that first line is not
+// repeated by the first periodic sweep.
+func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration, trigger <-chan struct{}, watcher *scanner.Watcher, reported map[string]bool) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -474,7 +481,7 @@ func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir str
 		if ctx.Err() != nil {
 			return
 		}
-		runScan(ctx, db, libraryDir, coversDir, missingGrace)
+		reported = runScan(ctx, db, libraryDir, coversDir, missingGrace, reported)
 		if watcher != nil {
 			// After the sweep, so a directory the sweep just discovered is
 			// watched before the next change lands in it.
@@ -483,13 +490,20 @@ func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir str
 	}
 }
 
-func runScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, missingGrace time.Duration) {
+// runScan sweeps once and logs what it found, including one line per
+// top-level directory whose rows it refused to prune. reported is the set
+// of directories the previous sweep named; the set this sweep named is
+// returned for the next one.
+func runScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, missingGrace time.Duration, reported map[string]bool) map[string]bool {
 	slog.Debug("scan starting", "library_dir", libraryDir)
 
 	result, err := scanner.Scan(ctx, db, libraryDir, coversDir, missingGrace)
 	if err != nil {
 		slog.Error("scan", "error", err)
-		return
+		// The sweep said nothing about any directory, so the previous
+		// sweep's set stands: a failed scan must not make the next
+		// successful one Warn about directories it has already warned about.
+		return reported
 	}
 
 	attrs := []any{"scanned", result.Scanned, "new", result.New, "moved", result.Moved,
@@ -500,6 +514,46 @@ func runScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, 
 	} else {
 		slog.Info("scan complete", attrs...)
 	}
+
+	if result.Scanned == 0 {
+		// Reconciliation was skipped entirely, so this sweep reported on no
+		// directory at all — an empty UnconfirmedDirs here means "did not
+		// look", not "nothing to say". Replacing the set with it would make
+		// the next real sweep Warn afresh about residue it has already
+		// named, and a library root that blinks out is exactly when that
+		// guard fires.
+		return reported
+	}
+	return logUnconfirmedDirs(reported, result.UnconfirmedDirs)
+}
+
+// logUnconfirmedDirs reports each top-level directory whose rows this sweep
+// refused to prune, and returns the set for the next sweep to compare
+// against. Every directory is named on every sweep, because the count is how
+// many phantom locations are waiting to be forgotten from a book's page, but
+// only one that was not in the previous sweep's set is news.
+func logUnconfirmedDirs(reported map[string]bool, dirs map[string]int) map[string]bool {
+	now := make(map[string]bool, len(dirs))
+	for dir, rows := range dirs {
+		now[dir] = true
+		slog.Log(context.Background(), unconfirmedLevel(reported, dir),
+			"directory yielded no files, refusing to prune its rows", "dir", dir, "rows", rows)
+	}
+	return now
+}
+
+// unconfirmedLevel is Warn the first sweep a directory goes unconfirmed and
+// Info while it stays that way. The Warn exists to point at residue nothing
+// else surfaces, and a person now has an affordance for clearing it
+// (POST /books/{id}/locations/forget); repeating the same warning every
+// fifteen minutes for the life of a renamed folder is how a log stops being
+// read. A directory that recovers and later empties again is absent from
+// the set by then and Warns afresh.
+func unconfirmedLevel(reported map[string]bool, dir string) slog.Level {
+	if reported[dir] {
+		return slog.LevelInfo
+	}
+	return slog.LevelWarn
 }
 
 // metadataProviderNames reads METADATA_PROVIDERS. Unlike envOrDefault's

@@ -34,7 +34,12 @@ type Result struct {
 	// Unconfirmed counts rows absent this sweep whose top-level directory
 	// yielded no files, so they were marked missing but not trusted for
 	// deletion: their absence may be an offline sub-mount
-	Unconfirmed       int
+	Unconfirmed int
+	// UnconfirmedDirs breaks Unconfirmed down by top-level directory.
+	// Reported rather than logged here because the level the line deserves
+	// depends on whether the same directory was unconfirmed last sweep,
+	// which a stateless Scan cannot know and its one caller already tracks
+	UnconfirmedDirs   map[string]int
 	CoversRegenerated int
 	Errors            int
 }
@@ -110,7 +115,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 	}
 
 	seen := make(map[string]bool)
-	var skippedDirs []string
+	var skippedDirs, linkedDirs []string
 
 	err := filepath.WalkDir(libraryDir, func(walkPath string, d fs.DirEntry, err error) error {
 		// Checked first, ahead of everything below: a per-file error (this
@@ -153,6 +158,17 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 				}
 				slog.Warn("symlinked directory is not followed", attrs...)
 				result.Errors++
+				// Recorded so reconciliation can refuse to prune the rows
+				// under it. Their Lstat resolves every component but the
+				// leaf, so it succeeds through the link and, under the rule
+				// above, would otherwise mark them and then delete them
+				// after the grace period — deleting a book whose file is
+				// sitting there, readable through the link the walk
+				// declined to follow. Not skippedDirs: those rows are left
+				// entirely alone, where these deserve the annotation.
+				if rel := relSlash(libraryDir, walkPath); rel != "" {
+					linkedDirs = append(linkedDirs, rel)
+				}
 				return nil
 			case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
 				// A cycle (ELOOP), a target that may not be stat'd
@@ -186,7 +202,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 		return result, fmt.Errorf("walk %s: %w", libraryDir, err)
 	}
 
-	reconcileMissing(ctx, db, libraryDir, skippedDirs, seen, missingGrace, &result)
+	reconcileMissing(ctx, db, libraryDir, skippedDirs, linkedDirs, seen, missingGrace, &result)
 
 	return result, nil
 }
@@ -228,7 +244,10 @@ func relSlash(libraryDir, path string) string {
 // row sorts first in ListBookFiles and fails every send of its book, which
 // a renamed top-level folder would otherwise do to every book in it. They
 // are never pruned, however old the mark; they are counted in
-// Result.Unconfirmed and named in one Warn per sweep, not one per row.
+// Result.Unconfirmed and broken down in Result.UnconfirmedDirs, which
+// cmd/server logs — there rather than here because a directory unconfirmed
+// for the fortieth sweep running is not news, and only the caller keeps the
+// previous sweep's set to tell the two apart.
 // The test is the top-level directory rather than the row's own because
 // "some ancestor of the row has a seen file under it" reduces to exactly
 // that (a file under a nested directory is under its top-level ancestor
@@ -237,24 +256,32 @@ func relSlash(libraryDir, path string) string {
 // under a/ at any depth. A mount nested one level down beside a populated
 // sibling is therefore not protected. The cost is that the last book file
 // deleted from a top-level directory stays marked missing until the
-// directory gains a file again — a phantom card is recoverable, a pruned
-// book's manual edits and provenance are not. A renamed top-level folder
-// pays the same cost on every book in it, a live Moved row beside a dead
-// one marked for good, since the old name never regains a file. A
+// directory gains a file again, or until a person forgets the row from the
+// book's page (storage.ForgetMissingFile) — a phantom card is recoverable,
+// a pruned book's manual edits and provenance are not. A renamed top-level
+// folder pays the same cost on every book in it, a live Moved row beside a
+// dead one, since the old name never regains a file. A
 // root-level row has no top-level directory and is covered by the
 // Scanned == 0 guard alone, the root case of the same rule kept for its
 // specific message
 //
+// The same refusal covers a directory the walk declined to follow because
+// it is a symlink. It yielded no files at any depth, exactly as an offline
+// sub-mount does, but the top-level test misses it wherever the link is
+// nested under a directory that still holds books — and its rows' Lstat
+// resolves through the link and succeeds, so the rule below would mark
+// them and then delete them, destroying a book whose file is sitting there
+// and readable.
+//
 // Every unseen, non-excluded row is re-checked with os.Lstat this same
 // sweep — including one already marked missing from an earlier sweep.
 // Deletion eligibility (past missingGrace) is necessary but never
-// sufficient on its own: only a row this exact sweep's Lstat confirms
-// fs.ErrNotExist for is ever handed to PruneMissingFiles, so a path whose
-// failure mode changes while it waits out its grace period (say, from
-// ErrNotExist to EACCES, or to a directory sitting where the file used to
-// be) can never be deleted on the strength of a confirmation that's since
-// gone stale.
-func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, skippedDirs []string, seen map[string]bool, missingGrace time.Duration, result *Result) {
+// sufficient on its own: only a row this exact sweep's Lstat answers for,
+// with fs.ErrNotExist or with success, is ever handed to PruneMissingFiles,
+// so a path whose failure mode changes while it waits out its grace period
+// (say, from ErrNotExist to EACCES) can never be deleted on the strength of
+// a confirmation that's since gone stale.
+func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, skippedDirs, linkedDirs []string, seen map[string]bool, missingGrace time.Duration, result *Result) {
 	if result.Scanned == 0 {
 		slog.Warn("library appeared empty, skipping missing-file reconciliation", "library_dir", libraryDir)
 		return
@@ -283,18 +310,24 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 			continue
 		}
 
-		// Not seen this sweep, in a subtree we did read successfully — but
-		// os.Lstat directly on the path, not just absence from the walk, is
-		// what decides "gone" versus "couldn't tell": only ErrNotExist
-		// counts, and it's checked here every sweep regardless of whether
-		// the row is already marked, precisely so a stale confirmation can
-		// never carry a row all the way to deletion on its own.
+		// Not seen this sweep, in a subtree we did read successfully. An
+		// os.Lstat error other than ErrNotExist is the only "couldn't tell"
+		// here, and it's checked every sweep regardless of whether the row
+		// is already marked, precisely so a stale confirmation can never
+		// carry a row all the way to deletion on its own. A *successful*
+		// Lstat is not an unknown: the walk read that directory cleanly and
+		// did not report this exact byte sequence as a name, so either the
+		// filesystem matched the recorded spelling to a file the walk
+		// recorded under another one (a case-only rename on SMB or macOS),
+		// or the file arrived between the walk and this check, which the
+		// next sweep sees and clears. Neither leaves the row live under a
+		// spelling the walk disagrees with, so it falls through to marking
+		// like an absence does — and the two guards below are what keep that
+		// safe where the success is legitimately ambiguous, a real directory
+		// since replaced by a symlink resolving every component but the leaf.
 		absPath := filepath.Join(libraryDir, filepath.FromSlash(f.FilePath))
-		_, statErr := os.Lstat(absPath)
-		if statErr == nil || !errors.Is(statErr, fs.ErrNotExist) {
-			if statErr != nil {
-				slog.Warn("could not confirm missing file", "path", absPath, "error", statErr)
-			}
+		if _, statErr := os.Lstat(absPath); statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+			slog.Warn("could not confirm missing file", "path", absPath, "error", statErr)
 			continue
 		}
 
@@ -304,13 +337,24 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 		if top := topLevelDir(f.FilePath); top != "" && !populated[top] {
 			unconfirmed[top]++
 			unconfirmedDir = true
+		} else if dir := matchingPrefix(f.FilePath, linkedDirs); dir != "" {
+			// A directory the walk declined to follow because it is now a
+			// symlink yielded no files at any depth, exactly as an offline
+			// sub-mount does, but the top-level test above misses it when
+			// the link is nested under a directory that still holds books.
+			// Its rows' Lstat succeeds through the link, so without this
+			// they would be marked and then deleted after the grace period,
+			// destroying a book whose file is sitting there and readable.
+			unconfirmed[dir]++
+			unconfirmedDir = true
 		}
 		switch {
 		case !f.MissingSince.Valid:
 			toMark = append(toMark, f.ID)
 		case unconfirmedDir:
-			// Marked, but an empty top-level directory is not evidence its
-			// books are gone, so the prune is refused whatever the mark's age
+			// Marked, but a directory that yielded no files is not evidence
+			// its books are gone, so the prune is refused whatever the
+			// mark's age
 		case f.MissingSince.Time.Before(cutoff):
 			toPrune = append(toPrune, f.ID)
 		}
@@ -320,7 +364,7 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 		for _, n := range unconfirmed {
 			result.Unconfirmed += n
 		}
-		slog.Warn("directories yielded no files, refusing to prune their rows", "rows_by_dir", unconfirmed, "rows", result.Unconfirmed)
+		result.UnconfirmedDirs = unconfirmed
 	}
 	if len(toMark) > 0 {
 		if err := db.SetFilesMissing(ctx, toMark, now); err != nil {
@@ -358,6 +402,52 @@ func topLevelDir(relPath string) string {
 	return ""
 }
 
+// TopLevelDirHasBooks reports whether the top-level directory under
+// libraryDir that relPath sits in exists and holds at least one supported
+// book file at any depth. A root-level relPath has no such directory and
+// reports true, matching reconcileMissing's own rule that a root-level file
+// is not a mount shape.
+//
+// This is the sweep's unconfirmed-directory test, asked one path at a time,
+// for a caller with no walk of its own: internal/sender uses it to decide
+// whether an ENOENT under a book's path means the book is gone or the
+// volume it sits on is offline, the shape an unmounted mountpoint presenting
+// as an empty directory takes. Exported rather than copied there, because
+// two statements of one rule about the same directory drift and this is the
+// one with tests.
+//
+// A directory that is not there is (false, nil). Any other walk error is
+// returned rather than folded into false: an unknown is not evidence, and
+// the caller has a third answer for it.
+func TopLevelDirHasBooks(libraryDir, relPath string) (bool, error) {
+	top := topLevelDir(relPath)
+	if top == "" {
+		return true, nil
+	}
+
+	found := false
+	err := filepath.WalkDir(filepath.Join(libraryDir, filepath.FromSlash(top)), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && matchedSuffix(d.Name()) != "" {
+			found = true
+			// The answer is "at least one", so the first match ends the
+			// walk: on a populated directory this costs a handful of stats
+			// rather than a traversal of the whole subtree.
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
 // populatedTopLevelDirs is the set of top-level directories with at least
 // one seen file under them, at any depth
 func populatedTopLevelDirs(seen map[string]bool) map[string]bool {
@@ -372,12 +462,19 @@ func populatedTopLevelDirs(seen map[string]bool) map[string]bool {
 
 // underAny reports whether relPath is nested under any of prefixes.
 func underAny(relPath string, prefixes []string) bool {
+	return matchingPrefix(relPath, prefixes) != ""
+}
+
+// matchingPrefix returns whichever of prefixes relPath is nested under, or
+// "" if none is. Callers that need to name the directory in a log line or a
+// per-directory count take this; underAny is the boolean form.
+func matchingPrefix(relPath string, prefixes []string) string {
 	for _, p := range prefixes {
 		if relPath == p || strings.HasPrefix(relPath, p+"/") {
-			return true
+			return p
 		}
 	}
-	return false
+	return ""
 }
 
 func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) error {
@@ -435,11 +532,11 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 	}
 
 	if book == nil {
-		orphanedID, orphanedTitle, err := createBook(ctx, db, path, rel, hash, coversDir, size, mtime)
+		orphanedID, orphanedTitle, inherited, err := createBook(ctx, db, path, rel, hash, coversDir, size, mtime)
 		if err != nil {
 			return fmt.Errorf("create book: %w", err)
 		}
-		logOrphan(path, orphanedID, orphanedTitle, result)
+		logOrphan(path, orphanedID, orphanedTitle, inherited, result)
 		result.New++
 		return nil
 	}
@@ -447,12 +544,15 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 	maybeRegenerateCover(ctx, db, book, path, coversDir, result)
 
 	// known content at a path with no (or a stale) book_files row: a move,
-	// a rename, or an additional location for byte-identical content
+	// a rename, or an additional location for byte-identical content.
+	// Nothing is inherited here: the book this can orphan is a different
+	// book that happened to lose its last copy, not this one under new
+	// bytes, so there is nothing of its owner's to carry across.
 	_, orphanedID, orphanedTitle, err := db.ReassignFileAndPruneOrphan(ctx, book.ID, rel, size, mtime)
 	if err != nil {
 		return fmt.Errorf("attach file location: %w", err)
 	}
-	logOrphan(path, orphanedID, orphanedTitle, result)
+	logOrphan(path, orphanedID, orphanedTitle, nil, result)
 	result.Moved++
 	return nil
 }
@@ -688,17 +788,28 @@ func readEmbeddedCover(path, suffix string) ([]byte, error) {
 // doesn't (CreateBookWithFile): upsertBookFileTx reassigns a path
 // unconditionally either way, so either path can orphan whoever owned it
 // before. orphanedID is 0 when nothing was orphaned.
-func logOrphan(path string, orphanedID int64, orphanedTitle string, result *Result) {
+//
+// inherited names the fields the replacement carried over from the book it
+// replaced, empty for every caller that cannot inherit. It is logged because
+// a value appearing on a book whose file was just rewritten is otherwise
+// unexplained: the page shows an edited title with no marker beside it,
+// which is exactly what a hand-edited value looks like, and only this line
+// says the edit was made against different bytes.
+func logOrphan(path string, orphanedID int64, orphanedTitle string, inherited []storage.MetadataField, result *Result) {
 	if orphanedID == 0 {
 		return
 	}
-	slog.Info("book orphaned", "path", path, "orphaned_book_id", orphanedID, "orphaned_title", orphanedTitle)
+	attrs := []any{"path", path, "orphaned_book_id", orphanedID, "orphaned_title", orphanedTitle}
+	if len(inherited) > 0 {
+		attrs = append(attrs, "inherited", inherited)
+	}
+	slog.Info("book orphaned", attrs...)
 	result.Orphaned++
 }
 
 // createBook reads metadata from the file at the absolute path and stores
 // the book under rel, its path relative to the library root.
-func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir string, size int64, mtime time.Time) (orphanedID int64, orphanedTitle string, err error) {
+func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir string, size int64, mtime time.Time) (orphanedID int64, orphanedTitle string, inherited []storage.MetadataField, err error) {
 	suffix := matchedSuffix(path)
 	meta := extractMetadata(path, suffix)
 
@@ -736,8 +847,8 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 		CoverRetry:    coverRetry,
 		Format:        bookFormat(suffix),
 	}
-	_, orphanedID, orphanedTitle, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
-	return orphanedID, orphanedTitle, err
+	_, orphanedID, orphanedTitle, inherited, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
+	return orphanedID, orphanedTitle, inherited, err
 }
 
 type bookMeta struct {

@@ -233,7 +233,7 @@ func newTestHandlerWithLocations(t *testing.T, title string, n int) http.Handler
 
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
-	bookID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
 		ContentHash: "hash-1",
 		Title:       title,
 		SortTitle:   title,

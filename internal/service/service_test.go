@@ -84,7 +84,7 @@ func TestListBooksReportsLocations(t *testing.T) {
 		t.Fatalf("UpsertBookFile one: %v", err)
 	}
 
-	twoID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-two", Title: "Two Locations", SortTitle: "Two Locations", Format: "epub"}, nil, "/two-a.epub", 100, mtime)
+	twoID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-two", Title: "Two Locations", SortTitle: "Two Locations", Format: "epub"}, nil, "/two-a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile two: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSearchBooksReportsLocations(t *testing.T) {
 	svc := New(db)
 	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 
-	matchID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Piranesi", SortTitle: "Piranesi", Format: "epub"}, nil, "/a.epub", 100, mtime)
+	matchID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Piranesi", SortTitle: "Piranesi", Format: "epub"}, nil, "/a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestGetBookAssemblesFullDetail(t *testing.T) {
 	svc := New(db)
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	id, orphanedID, _, err := db.CreateBookWithFile(ctx, storage.Book{
+	id, orphanedID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
 		ContentHash:   "hash-1",
 		Title:         "The Left Hand of Darkness",
 		SortTitle:     "Left Hand of Darkness, The",
@@ -320,7 +320,7 @@ func TestGetBookReportsZeroByteLocationAsAKnownSize(t *testing.T) {
 	ctx := context.Background()
 	svc := New(db)
 
-	id, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
+	id, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
 		ContentHash: "hash-1", Title: "Empty File", SortTitle: "Empty File", Format: "epub",
 	}, nil, "empty.epub", 0, time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
 	if err != nil {

@@ -11,7 +11,7 @@ func TestEnqueueAndClaimSend(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestEnqueueSendIsIdempotentForTheSamePendingBookAndAddress(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestEnqueueSendAllowsTheSameBookToDifferentAddresses(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestEnqueueSendGuardCoversSendingButNotTerminalRows(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Piranesi", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestClaimNextSendClaimsOldestFirst(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestMarkSendDeliveredSetsFinishedAt(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestMarkSendDeliveredRefusesANonSendingRow(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestMarkSendFailedRefusesANonSendingRow(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestSendLogStatusCheckRejectsUnknownStatus(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestPruneMissingFilesLeavesSendLogRowWithNullBookID(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Vanishing Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Vanishing Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestListRecipientsOrdersMostRecentlyUsedFirst(t *testing.T) {
 		t.Fatalf("CreateRecipient used: %v", err)
 	}
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, now)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, now)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestFailInterruptedSendsFailsOnlySendingRows(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestLatestSendForBookOrdersMostRecentFirst(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestListSendsSinceOrdersNewestFirstAndRespectsSinceAndLimit(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -610,7 +610,7 @@ func TestListSendsSinceIncludesSendForADeletedBook(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Vanishing Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Vanishing Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -654,7 +654,7 @@ func TestListSendsSinceIncludesSendToARemovedRecipient(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -720,7 +720,7 @@ func TestDeleteRecipientLeavesSendLogUntouched(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}

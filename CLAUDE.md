@@ -52,7 +52,8 @@ here. See Documentation below for what these files may and may not say.
 - `internal/web` — `html/template` pages and htmx fragments, CSS and the
   vendored htmx under `static/`, all `go:embed`ded. Routes: `GET /{$}`
   (grid, search, paging), `GET /books/{id}`, `GET`/`POST
-  /books/{id}/metadata/{field}`, `POST /books/{id}/send`, `GET
+  /books/{id}/metadata/{field}`, `POST /books/{id}/locations/forget`,
+  `POST /books/{id}/send`, `GET
   /books/{id}/sends/{sendID}`, `POST /books/{id}/enrich`, `GET
   /books/{id}/enrichment/{jobID}`, `POST /recipients/remove`,
   `GET /history`, `/static/`, `/covers/`. The UI is translated from mockups
@@ -101,7 +102,8 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - `send_log.book_id` is `ON DELETE SET NULL` with `book_title`
   denormalised, and `recipient_address` is a plain string. Every other FK
   cascades. History reads those columns and never joins `books` or
-  `recipients`.
+  `recipients`. A same-path replacement re-points those rows rather than
+  letting them go `NULL`.
 - `EnqueueSend` dedups against `queued` *and* `sending`;
   `EnqueueEnrichment` dedups against `queued` only.
 - `Mark*` terminal writes are scoped to the in-progress status and are a
@@ -140,7 +142,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
   on an event arriving.
 - **An unknown is not evidence.** Only `fs.ErrNotExist` means gone, for
   missing rows, cover files and symlink targets alike; any other error
-  leaves the row or book untouched and warns.
+  leaves the row or book untouched and warns. A *successful* `Lstat` on an
+  unseen row is not an unknown: the walk did not see that spelling, so the
+  row is marked.
+- A same-path replacement inherits `manual` fields, their provenance and
+  `send_log` rows; reassignment across paths never does.
 - `readEmbeddedCover` runs first; `field_sources` is consulted only after
   re-extraction has come back empty. Both cover-forgetting writes are
   guarded on the `cover_path` this sweep observed.
@@ -148,9 +154,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
   (`cover.ErrUnsupportedCover`) is recorded as no cover and never retried.
 - `PruneMissingFiles` filters nothing; every prune guard lives in the
   scanner. A row under a top-level directory that yielded no book files
-  this sweep is marked but never pruned; a sweep that saw zero files
-  reconciles nothing; a row under a directory the walk could not read is
-  left alone at both phases.
+  this sweep, or under a symlinked directory the walk declined to follow,
+  is marked but never pruned, until a person forgets the row; a sweep that
+  saw zero files reconciles nothing; a row under a directory the walk could
+  not read is left alone at both phases.
+- `ForgetMissingFile` is the person's delete, so its guards are clauses on
+  the `DELETE`, never a read before it.
 - Symlinked directories are not followed; they are named at Warn and
   counted in `Result.Errors`. Symlinked files are indexed like any other.
 - `Refresh` checks both `(dev, ino)` and `WatchList()` membership, and
@@ -170,9 +179,10 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `ctx.Err()` check.
 - `resend.Client` sets no `http.Client.Timeout`; the worker's size-scaled
   context deadline is the only bound and `SendTimeout` is its floor.
-- Only `fs.ErrNotExist` means the file is gone; other stat or read errors
-  record "could not read the file", and an index error records its own
-  reason. Never fold the three together.
+- Only `fs.ErrNotExist` under a populated top-level directory
+  (`scanner.TopLevelDirHasBooks`) means the file is gone; other stat or
+  read errors record "could not read the file", and an index error records
+  its own reason. Never fold the three together.
 - `last_used_at` is bumped at enqueue, not delivery. `Service.Notify` fires
   only when `EnqueueSend` reports `inserted`.
 - Only formats Amazon accepts are offered (`sendableFormat`, today `epub`);

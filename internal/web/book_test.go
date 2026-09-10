@@ -22,7 +22,7 @@ func TestBookDetailHandlerRendersFullMetadata(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	ctx := context.Background()
-	id, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
+	id, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
 		ContentHash:   "hash-1",
 		Title:         "The Left Hand of Darkness",
 		SortTitle:     "Left Hand of Darkness, The",
@@ -90,7 +90,7 @@ func TestBookDetailHandlerRendersNoCoverBox(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	id, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
+	id, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: "hash-1", Title: "No Cover", SortTitle: "No Cover", Format: "fb2",
 	}, nil, "no-cover.fb2", 2048, time.Now())
 	if err != nil {
@@ -125,7 +125,7 @@ func TestBookDetailHandlerRendersEveryAuthorInSourceOrder(t *testing.T) {
 	// Deliberately not alphabetical, so a sort is distinguishable from the
 	// source order the file credited.
 	authors := []string{"Zoe Quinn", "Adam Bell", "Mary Shelley"}
-	id, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
+	id, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: "hash-1", Title: "Three Authors", SortTitle: "Three Authors", Format: "epub",
 	}, authors, "three.epub", 4096, time.Now())
 	if err != nil {
@@ -158,7 +158,7 @@ func TestBookDetailHandlerSparseMetadataShowsEmDashRows(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	id, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
+	id, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: "hash-1",
 		Title:       "Sparse Book",
 		SortTitle:   "Sparse Book",
@@ -248,7 +248,7 @@ func TestBookDetailHandlerShowsLocationsAndMissingAnnotation(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Now()
 
-	id, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
+	id, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
 		ContentHash: "hash-1", Title: "Two Locations", SortTitle: "Two Locations", Format: "epub",
 	}, nil, "b/second.epub", 100, mtime)
 	if err != nil {
@@ -280,10 +280,12 @@ func TestBookDetailHandlerShowsLocationsAndMissingAnnotation(t *testing.T) {
 		t.Errorf("body missing the location count %q; body = %q", want, body)
 	}
 
-	// Whole list items, so the annotation has to land on the marked path
-	// and only on it — asserting the class appears somewhere would pass
-	// with it attached to every path, or to the wrong one.
-	if want := `<li>a/first.epub <span class="locations__missing">missing</span></li>`; !strings.Contains(body, want) {
+	// The annotation has to land on the marked path and only on it —
+	// asserting the class appears somewhere would pass with it attached to
+	// every path, or to the wrong one. The row opens with the path and the
+	// annotation together, and the unmarked one is a whole list item, so
+	// nothing may follow it.
+	if want := `<li>a/first.epub <span class="locations__missing">missing</span>`; !strings.Contains(body, want) {
 		t.Errorf("body missing the annotated missing location %q; body = %q", want, body)
 	}
 	if want := `<li>b/second.epub</li>`; !strings.Contains(body, want) {
@@ -291,6 +293,13 @@ func TestBookDetailHandlerShowsLocationsAndMissingAnnotation(t *testing.T) {
 	}
 	if got := strings.Count(body, "locations__missing"); got != 1 {
 		t.Errorf("missing annotation appears %d times, want exactly 1 — only a/first.epub is missing", got)
+	}
+
+	// The <dd> is the forget form's swap target, so its id is contract too:
+	// without it the fragment has nothing to replace and htmx swaps into
+	// the body.
+	if !strings.Contains(body, `<dd id="locations">`) {
+		t.Errorf("locations block has no #locations swap target; body = %q", body)
 	}
 }
 
@@ -344,7 +353,7 @@ func TestBookDetailHandlerRendersZeroByteFileAsZeroBytes(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	id, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
+	id, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: "hash-1", Title: "Empty File", SortTitle: "Empty File", Format: "epub",
 	}, nil, "empty.epub", 0, time.Now())
 	if err != nil {

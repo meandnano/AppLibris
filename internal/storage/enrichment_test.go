@@ -320,7 +320,7 @@ func TestDeletingBookCascadesItsEnrichmentJobs(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
 
-	id, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "enrich-7", Title: "Book", Format: "epub"}, nil, "a.epub", 10, mtime)
+	id, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "enrich-7", Title: "Book", Format: "epub"}, nil, "a.epub", 10, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}

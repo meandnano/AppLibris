@@ -329,14 +329,14 @@ func TestListBookFiles(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookAID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-a", Title: "Book A", SortTitle: "Book A"}, nil, "b/second.epub", 100, mtime)
+	bookAID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-a", Title: "Book A", SortTitle: "Book A"}, nil, "b/second.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile A: %v", err)
 	}
 	if _, err := db.UpsertBookFile(ctx, bookAID, "a/first.epub", 100, mtime); err != nil {
 		t.Fatalf("UpsertBookFile A second location: %v", err)
 	}
-	bookBID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-b", Title: "Book B", SortTitle: "Book B"}, nil, "other.epub", 200, mtime)
+	bookBID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-b", Title: "Book B", SortTitle: "Book B"}, nil, "other.epub", 200, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile B: %v", err)
 	}
@@ -441,12 +441,12 @@ func TestCountFilesByBook(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 
-	oneID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-one", Title: "One Location", Format: "epub"}, nil, "/one.epub", 100, mtime)
+	oneID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-one", Title: "One Location", Format: "epub"}, nil, "/one.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile one: %v", err)
 	}
 
-	twoID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-two", Title: "Two Locations", Format: "epub"}, nil, "/two-a.epub", 100, mtime)
+	twoID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-two", Title: "Two Locations", Format: "epub"}, nil, "/two-a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile two: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestCountFilesByBook(t *testing.T) {
 		t.Fatalf("UpsertBookFile two-b: %v", err)
 	}
 
-	threeID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-three", Title: "Three Locations", Format: "epub"}, nil, "/three-a.epub", 100, mtime)
+	threeID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-three", Title: "Three Locations", Format: "epub"}, nil, "/three-a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile three: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestCountFilesByBookCountsMissingLocations(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestCountFilesByBookOmitsDeletedBook(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -839,7 +839,7 @@ func TestCreateBookWithFile(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Atomic Book", Format: "epub"},
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Atomic Book", Format: "epub"},
 		[]string{"Jane Doe"}, "/path.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
@@ -876,12 +876,12 @@ func TestCreateBookWithFileIsAtomic(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "First", Format: "epub"},
+	if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "First", Format: "epub"},
 		nil, "/first.epub", 100, mtime); err != nil {
 		t.Fatalf("CreateBookWithFile first: %v", err)
 	}
 
-	_, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Should Not Exist", Format: "epub"},
+	_, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Should Not Exist", Format: "epub"},
 		nil, "/second.epub", 100, mtime)
 	if err == nil {
 		t.Fatal("CreateBookWithFile with a duplicate content_hash: want an error, got nil")
@@ -901,7 +901,7 @@ func TestReassignFileAndPruneOrphanDeletesSingleLocationOwner(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	oldID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old Content", Format: "epub"},
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old Content", Format: "epub"},
 		[]string{"Jane Doe"}, "/x.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile old: %v", err)
@@ -946,7 +946,7 @@ func TestReassignFileAndPruneOrphanKeepsMultiLocationOwner(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	oldID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Duplicated Content", Format: "epub"}, nil,
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Duplicated Content", Format: "epub"}, nil,
 		"/a/copy.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
@@ -986,7 +986,7 @@ func TestReassignFileAndPruneOrphanNoopOnUnchangedOwner(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Touched Book", Format: "epub"}, nil,
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Touched Book", Format: "epub"}, nil,
 		"/path.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
@@ -1015,7 +1015,7 @@ func TestReassignFileAndPruneOrphanCascadesAuthorLinkButKeepsAuthor(t *testing.T
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	oldID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old Content", Format: "epub"},
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old Content", Format: "epub"},
 		[]string{"Jane Doe"}, "/x.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
@@ -1051,7 +1051,7 @@ func TestSetFilesMissingDoesNotRestartAnAlreadyMissingRowsTimer(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime); err != nil {
+	if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime); err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 	f, err := db.FindFileByPath(ctx, "/x.epub")
@@ -1086,7 +1086,7 @@ func TestClearFilesMissing(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime); err != nil {
+	if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "/x.epub", 100, mtime); err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 	f, err := db.FindFileByPath(ctx, "/x.epub")
@@ -1115,13 +1115,13 @@ func TestListFilesUnder(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-root", Title: "Root Book", Format: "epub"}, nil, "root.epub", 100, mtime); err != nil {
+	if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-root", Title: "Root Book", Format: "epub"}, nil, "root.epub", 100, mtime); err != nil {
 		t.Fatalf("CreateBookWithFile root: %v", err)
 	}
-	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-sub", Title: "Sub Book", Format: "epub"}, nil, "sub/book.epub", 100, mtime); err != nil {
+	if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-sub", Title: "Sub Book", Format: "epub"}, nil, "sub/book.epub", 100, mtime); err != nil {
 		t.Fatalf("CreateBookWithFile sub: %v", err)
 	}
-	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-sibling", Title: "Sibling Book", Format: "epub"}, nil, "subsequent.epub", 100, mtime); err != nil {
+	if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-sibling", Title: "Sibling Book", Format: "epub"}, nil, "subsequent.epub", 100, mtime); err != nil {
 		t.Fatalf("CreateBookWithFile sibling: %v", err)
 	}
 
@@ -1153,7 +1153,7 @@ func TestPruneMissingFilesDeletesOnlyTheGivenIDs(t *testing.T) {
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
 	setup := func(path, hash string) int64 {
-		if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: hash, Title: path, Format: "epub"}, nil, path, 100, mtime); err != nil {
+		if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: hash, Title: path, Format: "epub"}, nil, path, 100, mtime); err != nil {
 			t.Fatalf("CreateBookWithFile %s: %v", path, err)
 		}
 		f, err := db.FindFileByPath(ctx, path)
@@ -1195,7 +1195,7 @@ func TestPruneMissingFilesDeletesBookOnlyWhenLastLocationGoes(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Two Locations", Format: "epub"}, nil, "a.epub", 100, mtime)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Two Locations", Format: "epub"}, nil, "a.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -1267,7 +1267,7 @@ func TestPruneMissingFilesHandlesMoreIDsThanOneSQLChunk(t *testing.T) {
 	var fileIDs []int64
 	for i := 0; i < total; i++ {
 		path := fmt.Sprintf("book-%d.epub", i)
-		if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: fmt.Sprintf("hash-%d", i), Title: path, Format: "epub"}, nil, path, 100, mtime); err != nil {
+		if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: fmt.Sprintf("hash-%d", i), Title: path, Format: "epub"}, nil, path, 100, mtime); err != nil {
 			t.Fatalf("CreateBookWithFile %s: %v", path, err)
 		}
 		f, err := db.FindFileByPath(ctx, path)
@@ -1294,5 +1294,466 @@ func TestPruneMissingFilesHandlesMoreIDsThanOneSQLChunk(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Errorf("book_files rows remaining = %d, want 0", remaining)
+	}
+}
+
+// ForgetMissingFile is the one delete a person drives, so both halves of
+// its WHERE clause have to hold: a live row of the same book, and a marked
+// row of a different one, are refused. Neither refusal is an error — a
+// double click and a row a sweep has just cleared are slips.
+func TestForgetMissingFileDeletesOnlyAMarkedRowOfThatBook(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "live.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	markedID, err := db.UpsertBookFile(ctx, bookID, "gone.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("UpsertBookFile marked: %v", err)
+	}
+	if err := db.SetFilesMissing(ctx, []int64{markedID}, mtime); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+	liveRow, err := db.FindFileByPath(ctx, "live.epub")
+	if err != nil || liveRow == nil {
+		t.Fatalf("FindFileByPath live.epub = %+v, %v", liveRow, err)
+	}
+
+	otherID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-2", Title: "Other", Format: "epub"}, nil, "other.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile other: %v", err)
+	}
+	otherMarkedID, err := db.UpsertBookFile(ctx, otherID, "other-gone.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("UpsertBookFile other marked: %v", err)
+	}
+	if err := db.SetFilesMissing(ctx, []int64{otherMarkedID}, mtime); err != nil {
+		t.Fatalf("SetFilesMissing other: %v", err)
+	}
+
+	if forgotten, bookDeleted, err := db.ForgetMissingFile(ctx, bookID, liveRow.ID); err != nil || forgotten || bookDeleted {
+		t.Errorf("ForgetMissingFile on a live row = %v, %v, %v; want false, false, nil", forgotten, bookDeleted, err)
+	}
+	if forgotten, bookDeleted, err := db.ForgetMissingFile(ctx, bookID, otherMarkedID); err != nil || forgotten || bookDeleted {
+		t.Errorf("ForgetMissingFile on another book's row = %v, %v, %v; want false, false, nil", forgotten, bookDeleted, err)
+	}
+
+	for _, path := range []string{"live.epub", "other-gone.epub"} {
+		if f, err := db.FindFileByPath(ctx, path); err != nil || f == nil {
+			t.Errorf("FindFileByPath(%q) = %+v, %v; want it to survive a refused forget", path, f, err)
+		}
+	}
+
+	forgotten, bookDeleted, err := db.ForgetMissingFile(ctx, bookID, markedID)
+	if err != nil {
+		t.Fatalf("ForgetMissingFile: %v", err)
+	}
+	if !forgotten {
+		t.Error("forgotten = false, want the marked row of this book to go")
+	}
+	if bookDeleted {
+		t.Error("bookDeleted = true, want the book to survive: live.epub is still a location")
+	}
+	if f, err := db.FindFileByPath(ctx, "gone.epub"); err != nil || f != nil {
+		t.Errorf("FindFileByPath(gone.epub) = %+v, %v; want it deleted", f, err)
+	}
+
+	// The same call again, now matching nothing at all.
+	if forgotten, bookDeleted, err := db.ForgetMissingFile(ctx, bookID, markedID); err != nil || forgotten || bookDeleted {
+		t.Errorf("second ForgetMissingFile = %v, %v, %v; want false, false, nil", forgotten, bookDeleted, err)
+	}
+}
+
+// Forgetting the last location takes the book, through the same
+// pruneOrphanedBookTx everything else uses — so the cascade runs and the
+// send log keeps its evidence with book_id NULL, which is exactly the
+// pruned-book case the denormalisation exists for.
+func TestForgetMissingFileLastLocationPrunesBook(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Only Copy", Format: "epub"},
+		[]string{"Jane Doe"}, "gone.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile: %v", err)
+	}
+	if _, err := db.UpdateBookField(ctx, bookID, FieldPublisher, "Gollancz", mtime); err != nil {
+		t.Fatalf("UpdateBookField: %v", err)
+	}
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Only Copy", "reader@kindle.com", mtime)
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+	file, err := db.FindFileByPath(ctx, "gone.epub")
+	if err != nil || file == nil {
+		t.Fatalf("FindFileByPath = %+v, %v", file, err)
+	}
+	if err := db.SetFilesMissing(ctx, []int64{file.ID}, mtime); err != nil {
+		t.Fatalf("SetFilesMissing: %v", err)
+	}
+
+	forgotten, bookDeleted, err := db.ForgetMissingFile(ctx, bookID, file.ID)
+	if err != nil {
+		t.Fatalf("ForgetMissingFile: %v", err)
+	}
+	if !forgotten || !bookDeleted {
+		t.Fatalf("ForgetMissingFile = %v, %v; want true, true", forgotten, bookDeleted)
+	}
+
+	if book, err := db.FindBookByID(ctx, bookID); err != nil || book != nil {
+		t.Errorf("FindBookByID = %+v, %v; want the book gone", book, err)
+	}
+	for _, table := range []string{"book_authors", "field_sources"} {
+		var count int
+		if err := db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE book_id = ?`, bookID).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Errorf("%s rows = %d, want 0 (the delete cascades)", table, count)
+		}
+	}
+
+	send, err := db.GetSend(ctx, sendID)
+	if err != nil || send == nil {
+		t.Fatalf("GetSend = %+v, %v", send, err)
+	}
+	if send.BookID.Valid {
+		t.Errorf("send.BookID = %v, want NULL for a book that is genuinely gone", send.BookID)
+	}
+	if send.BookTitle != "Only Copy" {
+		t.Errorf("send.BookTitle = %q, want the denormalised title retained", send.BookTitle)
+	}
+}
+
+// A path's content changing is one path's only view of the same book
+// rewritten, so the hand-edited fields follow it onto the replacement —
+// including a cleared one, which is a decision someone made and not an
+// absence to be refilled from the file.
+func TestCreateBookWithFileInheritsManualFields(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{
+		ContentHash: "hash-old", Title: "Wrong Title", SortTitle: "wrong title",
+		Publisher: "Wrong Publisher", Format: "epub",
+	}, []string{"Wrong Author"}, "x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile old: %v", err)
+	}
+	if _, err := db.UpdateBookField(ctx, oldID, FieldTitle, "Piranesi", mtime); err != nil {
+		t.Fatalf("UpdateBookField title: %v", err)
+	}
+	if _, err := db.UpdateBookField(ctx, oldID, FieldPublisher, "", mtime); err != nil {
+		t.Fatalf("UpdateBookField publisher: %v", err)
+	}
+	if _, err := db.UpdateBookAuthors(ctx, oldID, []string{"Susanna Clarke"}, mtime); err != nil {
+		t.Fatalf("UpdateBookAuthors: %v", err)
+	}
+
+	newID, orphanedID, _, inherited, err := db.CreateBookWithFile(ctx, Book{
+		ContentHash: "hash-new", Title: "Rewritten Title", SortTitle: "rewritten title",
+		Publisher: "Embedded Publisher", Format: "epub",
+	}, []string{"Embedded Author"}, "x.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile new: %v", err)
+	}
+	if orphanedID != oldID {
+		t.Fatalf("orphanedID = %d, want %d", orphanedID, oldID)
+	}
+	want := []MetadataField{FieldTitle, FieldAuthors, FieldPublisher}
+	if !slices.Equal(inherited, want) {
+		t.Errorf("inherited = %v, want %v", inherited, want)
+	}
+
+	book, err := db.FindBookByID(ctx, newID)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID = %+v, %v", book, err)
+	}
+	if book.Title != "Piranesi" {
+		t.Errorf("Title = %q, want the edited title carried over", book.Title)
+	}
+	if book.SortTitle != SortTitle("Piranesi") {
+		t.Errorf("SortTitle = %q, want it derived from the inherited title", book.SortTitle)
+	}
+	if book.Publisher != "" {
+		t.Errorf("Publisher = %q, want the cleared value carried over rather than the file's", book.Publisher)
+	}
+	if book.ContentHash != "hash-new" {
+		t.Errorf("ContentHash = %q, want the new file's", book.ContentHash)
+	}
+
+	authors, err := db.ListAuthorsForBook(ctx, newID)
+	if err != nil {
+		t.Fatalf("ListAuthorsForBook: %v", err)
+	}
+	if !slices.Equal(authors, []string{"Susanna Clarke"}) {
+		t.Errorf("authors = %v, want the edited list", authors)
+	}
+
+	sources, err := db.FieldSourcesForBook(ctx, newID)
+	if err != nil {
+		t.Fatalf("FieldSourcesForBook: %v", err)
+	}
+	for _, field := range want {
+		if sources[field] != "manual" {
+			t.Errorf("sources[%s] = %q, want manual", field, sources[field])
+		}
+	}
+
+	// The FTS row has to see the inherited title, not the one the row was
+	// created with — the sync runs after inheritance for exactly this.
+	found, err := db.SearchBooks(ctx, "Piranesi", BookPage{Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchBooks: %v", err)
+	}
+	if len(found) != 1 || found[0].ID != newID {
+		t.Errorf("SearchBooks(Piranesi) = %+v, want the replacement book", found)
+	}
+
+	// The stamp comes from the row's own modified_at, read back inside the
+	// transaction. Taking it from the Book the caller passed writes the
+	// zero time, since neither the scanner nor createBookTx sets it.
+	if book.ModifiedAt.IsZero() {
+		t.Error("modified_at is the zero time, so the inheritance stamp came from an unset field")
+	}
+}
+
+// enrichment_jobs are the deliberate exception to inheritance: a pending
+// intention about the old content says nothing about the new bytes, so
+// those rows cascade with the book rather than following it.
+func TestCreateBookWithFileDoesNotCarryEnrichmentJobs(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Book", SortTitle: "book", Format: "epub"},
+		nil, "x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile old: %v", err)
+	}
+	if queued, err := db.EnqueueEnrichment(ctx, oldID, mtime); err != nil || !queued {
+		t.Fatalf("EnqueueEnrichment = %v, %v", queued, err)
+	}
+
+	newID, orphanedID, _, _, err := db.CreateBookWithFile(ctx, Book{
+		ContentHash: "hash-new", Title: "Book", SortTitle: "book", Format: "epub",
+	}, nil, "x.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile new: %v", err)
+	}
+	if orphanedID != oldID {
+		t.Fatalf("orphanedID = %d, want %d", orphanedID, oldID)
+	}
+
+	for _, id := range []int64{oldID, newID} {
+		var count int
+		if err := db.Read().QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&count); err != nil {
+			t.Fatalf("count enrichment_jobs: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("enrichment_jobs for book %d = %d, want 0 — the job cascades, it does not follow", id, count)
+		}
+	}
+}
+
+// Only what a person is the author of moves. An embedded value is read
+// afresh out of the new file, and a provider's guess about the old bytes is
+// not a fact about the new ones — a Fetch recreates it from the same
+// catalogues if it still applies.
+func TestCreateBookWithFileDoesNotInheritEmbeddedOrProviderFields(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{
+		ContentHash: "hash-old", Title: "Book", SortTitle: "book",
+		Description: "Embedded description", Format: "epub",
+	}, nil, "x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile old: %v", err)
+	}
+	if _, _, err := db.ApplyEnrichedFields(ctx, oldID,
+		map[MetadataField]string{FieldLanguage: "en"},
+		map[MetadataField]string{FieldLanguage: "openlibrary"}, mtime); err != nil {
+		t.Fatalf("ApplyEnrichedFields: %v", err)
+	}
+
+	newID, _, _, inherited, err := db.CreateBookWithFile(ctx, Book{
+		ContentHash: "hash-new", Title: "Book", SortTitle: "book", Format: "epub",
+	}, nil, "x.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile new: %v", err)
+	}
+	if len(inherited) != 0 {
+		t.Errorf("inherited = %v, want nothing", inherited)
+	}
+
+	book, err := db.FindBookByID(ctx, newID)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID = %+v, %v", book, err)
+	}
+	if book.Description != "" {
+		t.Errorf("Description = %q, want the new file's own (empty)", book.Description)
+	}
+	if book.Language != "" {
+		t.Errorf("Language = %q, want the provider's value left behind", book.Language)
+	}
+}
+
+// The send log follows a book that is still on the shelf under new bytes.
+// Going NULL is the right answer for a book that is genuinely gone and the
+// wrong one here: the detail page's status box and the "did I already send
+// this?" answer both read book_id.
+func TestCreateBookWithFileRepointsSendLog(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Book", SortTitle: "book", Format: "epub"},
+		nil, "x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile old: %v", err)
+	}
+	sendID, _, err := db.EnqueueSend(ctx, oldID, "Book", "reader@kindle.com", mtime)
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+	if _, err := db.ClaimNextSend(ctx, mtime); err != nil {
+		t.Fatalf("ClaimNextSend: %v", err)
+	}
+	if err := db.MarkSendDelivered(ctx, sendID, "msg-1", mtime); err != nil {
+		t.Fatalf("MarkSendDelivered: %v", err)
+	}
+
+	newID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-new", Title: "Book", SortTitle: "book", Format: "epub"},
+		nil, "x.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile new: %v", err)
+	}
+
+	send, err := db.GetSend(ctx, sendID)
+	if err != nil || send == nil {
+		t.Fatalf("GetSend = %+v, %v", send, err)
+	}
+	if !send.BookID.Valid || send.BookID.Int64 != newID {
+		t.Errorf("send.BookID = %v, want %d", send.BookID, newID)
+	}
+	if send.Status != SendDelivered {
+		t.Errorf("send.Status = %q, want the outcome untouched", send.Status)
+	}
+}
+
+// Reassignment across paths orphans a different book that happened to lose
+// its last copy, not this one under new bytes, so there is nothing of its
+// owner's to carry across.
+func TestReassignFileAndPruneOrphanDoesNotInherit(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old", SortTitle: "old", Format: "epub"},
+		nil, "x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile old: %v", err)
+	}
+	if _, err := db.UpdateBookField(ctx, oldID, FieldPublisher, "Gollancz", mtime); err != nil {
+		t.Fatalf("UpdateBookField: %v", err)
+	}
+	sendID, _, err := db.EnqueueSend(ctx, oldID, "Old", "reader@kindle.com", mtime)
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	survivorID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-survivor", Title: "Survivor", SortTitle: "survivor", Format: "epub"},
+		nil, "y.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile survivor: %v", err)
+	}
+
+	if _, orphanedID, _, err := db.ReassignFileAndPruneOrphan(ctx, survivorID, "x.epub", 100, mtime); err != nil {
+		t.Fatalf("ReassignFileAndPruneOrphan: %v", err)
+	} else if orphanedID != oldID {
+		t.Fatalf("orphanedID = %d, want %d", orphanedID, oldID)
+	}
+
+	survivor, err := db.FindBookByID(ctx, survivorID)
+	if err != nil || survivor == nil {
+		t.Fatalf("FindBookByID = %+v, %v", survivor, err)
+	}
+	if survivor.Publisher != "" {
+		t.Errorf("Publisher = %q, want the surviving book untouched", survivor.Publisher)
+	}
+	sources, err := db.FieldSourcesForBook(ctx, survivorID)
+	if err != nil {
+		t.Fatalf("FieldSourcesForBook: %v", err)
+	}
+	if _, ok := sources[FieldPublisher]; ok {
+		t.Errorf("sources[publisher] = %q, want no provenance carried across paths", sources[FieldPublisher])
+	}
+	send, err := db.GetSend(ctx, sendID)
+	if err != nil || send == nil {
+		t.Fatalf("GetSend = %+v, %v", send, err)
+	}
+	if send.BookID.Valid {
+		t.Errorf("send.BookID = %v, want NULL: the orphaned book was genuinely deleted", send.BookID)
+	}
+}
+
+// A duplicate's path being taken over leaves its owner with the other copy,
+// so nothing was replaced and nothing is inherited — the same
+// still-has-locations test pruneOrphanIfEmptyTx makes, asked before it.
+func TestCreateBookWithFileNoInheritanceWhenPreviousOwnerKeepsALocation(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Duplicated", SortTitle: "duplicated", Format: "epub"},
+		nil, "a/copy.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile old: %v", err)
+	}
+	if _, err := db.UpsertBookFile(ctx, oldID, "b/copy.epub", 100, mtime); err != nil {
+		t.Fatalf("UpsertBookFile: %v", err)
+	}
+	if _, err := db.UpdateBookField(ctx, oldID, FieldPublisher, "Gollancz", mtime); err != nil {
+		t.Fatalf("UpdateBookField: %v", err)
+	}
+	sendID, _, err := db.EnqueueSend(ctx, oldID, "Duplicated", "reader@kindle.com", mtime)
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	newID, orphanedID, _, inherited, err := db.CreateBookWithFile(ctx, Book{
+		ContentHash: "hash-new", Title: "New", SortTitle: "new", Format: "epub",
+	}, nil, "a/copy.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile new: %v", err)
+	}
+	if orphanedID != 0 {
+		t.Errorf("orphanedID = %d, want 0 (the old book still owns b/copy.epub)", orphanedID)
+	}
+	if len(inherited) != 0 {
+		t.Errorf("inherited = %v, want nothing", inherited)
+	}
+
+	book, err := db.FindBookByID(ctx, newID)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID = %+v, %v", book, err)
+	}
+	if book.Publisher != "" {
+		t.Errorf("Publisher = %q, want nothing inherited", book.Publisher)
+	}
+	send, err := db.GetSend(ctx, sendID)
+	if err != nil || send == nil {
+		t.Fatalf("GetSend = %+v, %v", send, err)
+	}
+	if !send.BookID.Valid || send.BookID.Int64 != oldID {
+		t.Errorf("send.BookID = %v, want it left on %d", send.BookID, oldID)
 	}
 }

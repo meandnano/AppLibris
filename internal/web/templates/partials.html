@@ -189,6 +189,36 @@
 {{end}}
 {{end}}
 
+{{/* The whole <dd> is the partial, not just the list inside it, because it
+     is also the swap target the forget form posts into: an outerHTML swap
+     has to replace an element that carries the id. Rendered from the full
+     page and standalone by the forget route, one markup path, the same
+     arrangement send-control has. */}}
+{{define "book-locations"}}
+<dd id="locations">
+  <details class="locations">
+    <summary>{{len .Locations}} {{if eq (len .Locations) 1}}path{{else}}paths{{end}}</summary>
+    <ul class="locations__list">
+      {{range .Locations}}
+      <li>{{.Path}}{{if .Missing}} <span class="locations__missing">missing</span>
+        {{/* Offered only for a marked row: a path that is there is not
+             something to forget, and the next sweep would re-add it. The
+             same rule is a condition on the delete, so a page left open
+             across a sweep that cleared the mark cannot act on it. */}}
+        <form class="locations__forget-form" method="post"
+              action="/books/{{$.ID}}/locations/forget"
+              hx-post="/books/{{$.ID}}/locations/forget" hx-target="#locations" hx-swap="outerHTML">
+          <input type="hidden" name="file" value="{{.ID}}">
+          <button class="button button--tertiary locations__forget" type="submit"
+                  aria-label="Forget {{.Path}}">forget</button>
+        </form>
+        {{end}}</li>
+      {{end}}
+    </ul>
+  </details>
+</dd>
+{{end}}
+
 {{define "send-control"}}
 <div class="send detail__send" id="send">
   {{if not .SendEnabled}}

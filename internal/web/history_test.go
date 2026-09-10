@@ -100,7 +100,7 @@ func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	deliveredID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Delivered Book", Format: "epub"}, nil, "a.epub", 100, now)
+	deliveredID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Delivered Book", Format: "epub"}, nil, "a.epub", 100, now)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile delivered: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
 		t.Fatalf("MarkSendDelivered: %v", err)
 	}
 
-	failedID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-2", Title: "Failed Book", Format: "epub"}, nil, "b.epub", 100, now)
+	failedID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-2", Title: "Failed Book", Format: "epub"}, nil, "b.epub", 100, now)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile failed: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
 		t.Fatalf("MarkSendFailed: %v", err)
 	}
 
-	sendingID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-3", Title: "Sending Book", Format: "epub"}, nil, "c.epub", 100, now)
+	sendingID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-3", Title: "Sending Book", Format: "epub"}, nil, "c.epub", 100, now)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile sending: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestHistoryRowForDeletedBookRendersWithoutALink(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Vanishing Book", Format: "epub"}, nil, "a.epub", 100, now)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Vanishing Book", Format: "epub"}, nil, "a.epub", 100, now)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestHistoryScopeLineNamesTheCapOnlyWhenTruncated(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, now)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, now)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestHistoryScopeLineIsPlainWhenNotTruncated(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, now)
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-1", Title: "Book", Format: "epub"}, nil, "a.epub", 100, now)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}

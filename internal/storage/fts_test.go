@@ -145,7 +145,7 @@ func TestDeletingBookViaOrphanPruneRemovesFTSRow(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	oldID, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old Content", SortTitle: "Old Content", Format: "epub"},
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Old Content", SortTitle: "Old Content", Format: "epub"},
 		[]string{"Jane Doe"}, "/x.epub", 100, mtime)
 	if err != nil {
 		t.Fatalf("CreateBookWithFile old: %v", err)
@@ -181,7 +181,7 @@ func TestDeletingBookViaPruneMissingFilesRemovesFTSRow(t *testing.T) {
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 
-	if _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Target Book", SortTitle: "Target Book", Format: "epub"}, nil, "target.epub", 100, mtime); err != nil {
+	if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-1", Title: "Target Book", SortTitle: "Target Book", Format: "epub"}, nil, "target.epub", 100, mtime); err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
 	f, err := db.FindFileByPath(ctx, "target.epub")

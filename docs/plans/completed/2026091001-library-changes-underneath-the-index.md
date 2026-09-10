@@ -155,6 +155,14 @@ directory absent from that set logs at Warn with its row count; one present
 logs at Info. The set is replaced with this sweep's after logging, so a
 directory that recovers and later empties again is Warned again.
 
+**Correction, found while implementing.** A set born inside `periodicScan`
+Warns twice per restart, because the startup sweep at `main.go:252` runs
+outside that loop and its set is discarded. `runScan` therefore takes the
+previous sweep's set and returns its own, and the startup call's return
+value is passed into `periodicScan`. A scan that *errors* returns the set
+it was given unchanged, so a failed sweep cannot make the next successful
+one re-Warn about directories it has already named.
+
 The memory is a loop variable in the process, not a column: it costs
 nothing to lose on restart (the first sweep after a restart Warns once,
 which is right), and it is invisible to `Scan`'s tests, which keep
@@ -177,6 +185,15 @@ owner is a different book that now has zero locations:
   are written through `updateBookAuthorsTx(…, "manual", …)`. The
   `modified_at` stamp is `b.ModifiedAt`, the instant the scanner already
   stamps on the new row.
+
+  **Correction, found while implementing.** There is no such instant.
+  `scanner.createBook` never sets `Book.ModifiedAt`, and `createBookTx`
+  does not insert the column at all — `books.modified_at` comes from its
+  schema default. Passing `b.ModifiedAt` writes the zero time onto every
+  inherited field. The implementation instead reads the just-inserted
+  row's `modified_at` back inside the same transaction
+  (`bookModifiedAtTx`) and stamps with that, so the whole creation carries
+  one instant and storage still reads no clock.
 - An **empty** `manual` value is inherited too. A cleared field stays
   `manual` (`CLAUDE.md`, Storage invariants); a person who cleared a wrong
   publisher does not want the file's wrong publisher back.

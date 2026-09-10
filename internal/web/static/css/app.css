@@ -606,6 +606,22 @@ a.masthead__link:hover {
   font-style: italic;
 }
 
+.locations__forget-form {
+  display: inline;
+}
+
+/* The size lives here rather than on a --sm modifier because there is no
+   --sm: .button's base is shaped for the inline metadata editors, and every
+   other call site names --md or --lg. This is the third size and the one
+   that would become that modifier, so it clears the base's minimum the way
+   --md and --lg do and states its own padding. */
+.locations__forget {
+  min-height: 0;
+  padding: 1px 6px;
+  font-size: 10px;
+  vertical-align: baseline;
+}
+
 .detail__main {
   display: flex;
   flex-direction: column;
