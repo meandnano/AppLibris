@@ -36,6 +36,7 @@ func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled b
 	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled, enrichEnabled))
 	mux.HandleFunc("GET /books/{id}/metadata/{field}", metadataHandler(svc, sendEnabled, enrichEnabled))
 	mux.HandleFunc("POST /books/{id}/metadata/{field}", sameSiteOnly(metadataHandler(svc, sendEnabled, enrichEnabled)))
+	mux.HandleFunc("POST /books/{id}/locations/forget", sameSiteOnly(forgetLocationHandler(svc)))
 	mux.HandleFunc("POST /books/{id}/send", sameSiteOnly(sendHandler(svc, sendEnabled)))
 	mux.HandleFunc("GET /books/{id}/sends/{sendID}", sendStatusHandler(svc, sendEnabled))
 	mux.HandleFunc("POST /books/{id}/enrich", sameSiteOnly(enrichHandler(svc, enrichEnabled)))

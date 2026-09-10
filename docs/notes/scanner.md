@@ -34,6 +34,34 @@ Both `ReassignFileAndPruneOrphan` and `CreateBookWithFile` reassign a path
 unconditionally, so either can orphan the previous owner; the deletion is
 logged at Info.
 
+**A same-path replacement carries the old book's `manual` fields, their
+provenance and its `send_log` rows onto the new one**, in that same
+transaction (`inheritFromReplacedBookTx`). One path sees two different
+events as the same state — the same book rewritten (Calibre's metadata
+write-back, `ebook-polish`, `kepubify`, a re-zipped re-download) and a
+different book dropped at the same filename — and no test tells them apart.
+A title-similarity guard is wrong in both directions: write-back is
+precisely the case where the file's title has just changed to match the
+edit, and a re-download's has not changed at all. The population reaching
+this path is overwhelmingly the same book, and the asymmetry decides it:
+an inherited value is visible on the detail page with an edit affordance
+beside it, where a lost one is gone. Empty is recoverable, wrong is
+editable, lost is neither.
+
+Only what a person is the author of moves. A provider-sourced value is
+recreated by a Fetch from the same catalogues, and a provider's guess about
+the old file is not a fact about the new one; `enrichment_jobs` cascade,
+since a pending intention about the old content is meaningless for the new;
+the new file's embedded cover is extracted as for any other new book. An
+*empty* `manual` value is inherited like any other, because a cleared field
+stays `manual`. The fields that moved are named at Info beside the orphan
+line, since a value on a book whose file was just rewritten is otherwise
+unexplained — `manual` renders no marker, so the page cannot say it.
+
+Reassignment across paths never inherits. The book `ReassignFileAndPruneOrphan`
+can orphan is a different book that happened to lose its last copy, not
+this one under new bytes.
+
 Supported files are matched on filename *suffix*, not `filepath.Ext`,
 because `.fb2.zip` is two extensions. `.fb2` and `.fb2.zip` both record
 `format` as `fb2`: how a book is packaged on disk is not something the
@@ -86,10 +114,10 @@ takes the ordinary route, so a symlinked *file* is indexed like any other
 per-file error only if its name carries a supported suffix.
 
 The cost of not following: a real directory later replaced by a link is
-never re-indexed, and `reconcileMissing`'s `Lstat` follows it (only the
-leaf is not resolved), so where the target holds the files the rows stay
-live and are never re-hashed, and where it does not they are marked and
-never pruned, since that directory yielded no files (see below).
+never re-indexed. `reconcileMissing`'s `Lstat` follows the link (only the
+leaf is not resolved), so those rows pass it and are marked missing, which
+is the honest annotation for a path the walk no longer names; they are
+never pruned, since that top-level directory yielded no files (see below).
 
 ## Covers and regeneration
 
@@ -161,14 +189,30 @@ The guards, each against reading a transient failure as a deletion:
   sweep, including for a row already marked, so a row whose failure mode
   changes (`ErrNotExist` to `EACCES`, or a directory now at that path) is
   never deleted on a confirmation that has gone stale.
+- A **successful** `Lstat` on an unseen row is not an unknown, and is
+  treated exactly as an absence: marked, and prunable under the guards
+  below. The walk is the authority on names — it read that directory
+  cleanly and did not report that exact byte sequence — so a success means
+  either the filesystem matched the recorded spelling to a file the walk
+  recorded under another one, the case-only rename an SMB share or macOS
+  allows, or the file arrived between the walk and the check, which the
+  next sweep sees and clears. Leaving the row live under a spelling the
+  walk disagrees with is what a case-only rename would otherwise cost for
+  good: two live rows, "2 paths" on every card, no annotation, no log line,
+  and `internal/sender` free to send from the stale spelling. Marking is
+  reversible, which is why it beats a case-insensitive comparison against
+  the walk's `seen` set: that identifies the alias precisely, says nothing
+  about the between-walk-and-check file, and needs a rule for which
+  spelling is canonical in a package whose identity story is "the path is
+  what the walk said".
 - A row under a directory the sweep could not read *this* sweep is left
   untouched at both mark and prune time. `Scan` tracks these as
   `skippedDirs`, a negative list, because `WalkDir` only ever reports a
   directory-read failure as a second, error-bearing callback; a positive
   "cleanly read" list is not obtainable from the API.
 - A row whose **top-level directory yielded no book files this sweep** is
-  marked but never pruned, counted in `Result.Unconfirmed` and named, with
-  a per-directory row count, in one Warn per sweep. That is what an
+  marked but never pruned, counted in `Result.Unconfirmed` and broken down
+  per directory in `Result.UnconfirmedDirs`. That is what an
   offline sub-mount looks like (a second bind mount, an NFS share in a
   subfolder, a disk mid-rebuild): the directory reads cleanly, so nothing
   lands in `skippedDirs`, and every row under it fails `Lstat` with
@@ -199,13 +243,42 @@ zero-files guard alone; a root-level file is not a mount shape. Storing
 adds the very column the mover section below argues against.
 
 The accepted cost: the last book file deleted from a top-level directory
-stays marked missing, a phantom card annotated "missing", until that
-directory gains a book again. The most ordinary way to pay it is a renamed
-top-level folder: every book under it gains a live row and keeps its old
-one marked for good, with the Warn firing on every sweep. A phantom card is
-recoverable where a pruned book's edits are not. The "forget this location"
-affordance that would be the honest fix is planned in
-`docs/plans/2026091001-library-changes-underneath-the-index.md`.
+stays marked missing, a phantom location annotated "missing", until that
+directory gains a book again or a person forgets the row. The most ordinary
+way to pay it is a renamed top-level folder, where every book under it
+gains a live row and keeps its old one marked. A phantom card is
+recoverable where a pruned book's edits are not.
+
+Forgetting is `POST /books/{id}/locations/forget` over
+`storage.ForgetMissingFile`, offered on the detail page beside a location
+**that is currently marked missing and no other**. A path that is there is
+not something to forget; deleting its row would only make the next sweep
+re-add it. The same rule is a condition on the `DELETE` rather than a read
+taken before it, together with the row belonging to that book, because a
+sweep clearing the mark inside the window between such a read and the
+delete would forget a path that had just come back, and forgetting is not
+reversible. `PruneMissingFiles` is not reused for the same reason: it
+verifies nothing by design, on the understanding that its caller confirmed
+each absence with a live `Lstat` this sweep, which a click has not. A row
+matching neither condition is `(false, false, nil)` — a double click is a
+slip, not an error. It is one location at a time rather than "forget all of
+this book's missing locations", which is one click fewer for the renamed
+folder and wrong for a book with two missing rows for two different
+reasons, the state a person opens the list to disambiguate.
+
+`cmd/server` logs one line per unconfirmed directory with its row count,
+at Warn the first sweep that directory appears and Info while it stays
+there (`unconfirmedLevel`, against a set `periodicScan` carries between
+iterations). The Warn exists to point at residue nothing else surfaces; now
+that a person can clear it, repeating the same warning every fifteen
+minutes for the life of a renamed folder is how a log stops being read.
+The set is a loop variable, not a column: losing it on a restart Warns once
+more, which is the right thing to say to someone who has just started the
+server, and it keeps `Scan` stateless and its tests indifferent.
+
+`TopLevelDirHasBooks` is the exported, one-path-at-a-time form of the same
+rule, for a caller with no walk of its own; `internal/sender` is its second
+caller (`sending.md`).
 
 ## Watcher
 

@@ -562,9 +562,19 @@ func (db *DB) CreateBook(ctx context.Context, b Book, authorNames []string) (id 
 // Returns the id and title of any book this deleted (both zero if none
 // was), same contract as ReassignFileAndPruneOrphan and for the same
 // reason: the row is gone by the time this returns, so a caller can't look
-// it up afterward.
-func (db *DB) CreateBookWithFile(ctx context.Context, b Book, authorNames []string, path string, size int64, mtime time.Time) (id int64, orphanedID int64, orphanedTitle string, err error) {
+// it up afterward. Before that deletion, whatever the previous owner
+// carried that a person put there moves onto the new book — see
+// inheritFromReplacedBookTx — and inherited names the fields that did.
+//
+// The FTS row is synced last, once inheritance has settled the title,
+// description, ISBN and authors it indexes.
+func (db *DB) CreateBookWithFile(ctx context.Context, b Book, authorNames []string, path string, size int64, mtime time.Time) (id int64, orphanedID int64, orphanedTitle string, inherited []MetadataField, err error) {
 	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Reset on every attempt, for the reason ApplyEnrichedFields resets
+		// its own: appending to a slice from an outer scope would otherwise
+		// report a field twice.
+		inherited = nil
+
 		previousOwner, err := previousFileOwnerTx(ctx, tx, path)
 		if err != nil {
 			return err
@@ -574,17 +584,203 @@ func (db *DB) CreateBookWithFile(ctx context.Context, b Book, authorNames []stri
 		if err != nil {
 			return err
 		}
-		if err := syncBookFTSTx(ctx, tx, id); err != nil {
-			return err
-		}
 		if _, err := upsertBookFileTx(ctx, tx, id, path, size, mtime); err != nil {
 			return err
 		}
 
+		inherited, err = inheritFromReplacedBookTx(ctx, tx, previousOwner, id)
+		if err != nil {
+			return err
+		}
+
 		orphanedID, orphanedTitle, err = pruneOrphanIfEmptyTx(ctx, tx, previousOwner, id)
-		return err
+		if err != nil {
+			return err
+		}
+		return syncBookFTSTx(ctx, tx, id)
 	})
-	return id, orphanedID, orphanedTitle, err
+	return id, orphanedID, orphanedTitle, inherited, err
+}
+
+// inheritFromReplacedBookTx carries what a person put into the book that
+// previously owned a path onto the book that now does. It runs only when
+// previousOwner is a real, different book the caller's upsert has just left
+// with no locations at all — the same test pruneOrphanIfEmptyTx makes, and
+// it must run before that deletion.
+//
+// That state is one path's whole view of two different events: the same
+// book rewritten (Calibre's metadata write-back, ebook-polish, kepubify, a
+// sync tool re-downloading a re-zipped file) and a different book dropped at
+// the same filename. Nothing distinguishes them, and the obvious guard —
+// inherit only where the file's embedded title still matches — is wrong in
+// both directions, since write-back is precisely the case where the title in
+// the file has just changed to match the edit. The population reaching here
+// is overwhelmingly the same book, and an inherited value is visible on the
+// detail page with an edit affordance beside it, where a lost one is gone.
+//
+// Only what a person is the author of moves. A provider-sourced value is
+// recreated by a Fetch from the same catalogues, and a provider's guess
+// about the old file is not a fact about the new one; enrichment_jobs
+// cascade, since a pending intention about the old content is meaningless
+// for the new. An empty manual value is inherited like any other — a cleared
+// field stays manual, and someone who cleared a wrong publisher does not
+// want the file's wrong publisher back.
+//
+// The stamp is the new book's own modified_at, read back rather than taken
+// from a clock: createBookTx leaves that column to its schema default, so
+// this is the instant the row was created and the whole creation carries
+// one.
+//
+// It must be called from inside a DB.Write callback — see DB.Write's
+// contract.
+func inheritFromReplacedBookTx(ctx context.Context, tx *sql.Tx, previousOwner sql.NullInt64, newOwnerID int64) ([]MetadataField, error) {
+	if !previousOwner.Valid || previousOwner.Int64 == newOwnerID {
+		return nil, nil
+	}
+	oldID := previousOwner.Int64
+
+	var stillHasFiles bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM book_files WHERE book_id = ?)`, oldID).Scan(&stillHasFiles); err != nil {
+		return nil, err
+	}
+	if stillHasFiles {
+		return nil, nil
+	}
+
+	if err := repointSendLogTx(ctx, tx, oldID, newOwnerID); err != nil {
+		return nil, err
+	}
+
+	fields, err := manualFieldSourcesTx(ctx, tx, oldID)
+	if err != nil || len(fields) == 0 {
+		return nil, err
+	}
+	modifiedAt, err := bookModifiedAtTx(ctx, tx, newOwnerID)
+	if err != nil {
+		return nil, err
+	}
+
+	inherited := make([]MetadataField, 0, len(fields))
+	for _, field := range fields {
+		if field == FieldAuthors {
+			names, err := bookAuthorNamesTx(ctx, tx, oldID)
+			if err != nil {
+				return nil, err
+			}
+			if err := updateBookAuthorsTx(ctx, tx, newOwnerID, names, "manual", modifiedAt); err != nil {
+				return nil, err
+			}
+			inherited = append(inherited, field)
+			continue
+		}
+		value, err := bookScalarFieldTx(ctx, tx, oldID, field)
+		if err != nil {
+			return nil, err
+		}
+		if err := updateBookColumnTx(ctx, tx, newOwnerID, field, value, modifiedAt); err != nil {
+			return nil, err
+		}
+		if err := setFieldSourceTx(ctx, tx, newOwnerID, field, "manual"); err != nil {
+			return nil, err
+		}
+		inherited = append(inherited, field)
+	}
+	return inherited, nil
+}
+
+// manualFieldSourcesTx lists the fields bookID records as hand-edited, in
+// metadataFieldOrder rather than the query's order so the same book reads
+// the same way twice. cover is excluded here rather than at the call site,
+// since no caller has a use for a cover row claiming to be manual: the field
+// is unreachable from UpdateBookField, and its value is a path keyed to one
+// book's content hash. It must be called from inside a DB.Write callback —
+// see DB.Write's contract.
+func manualFieldSourcesTx(ctx context.Context, tx *sql.Tx, bookID int64) ([]MetadataField, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT field FROM field_sources WHERE book_id = ? AND source = 'manual'`, bookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	manual := make(map[MetadataField]bool)
+	for rows.Next() {
+		var field MetadataField
+		if err := rows.Scan(&field); err != nil {
+			return nil, err
+		}
+		manual[field] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var fields []MetadataField
+	for _, field := range metadataFieldOrder {
+		if field != FieldCover && manual[field] {
+			fields = append(fields, field)
+		}
+	}
+	return fields, nil
+}
+
+// bookScalarFieldTx reads the single books column field backs. It must be
+// called from inside a DB.Write callback — see DB.Write's contract.
+func bookScalarFieldTx(ctx context.Context, tx *sql.Tx, bookID int64, field MetadataField) (string, error) {
+	column, ok := scalarColumnName(field)
+	if !ok {
+		return "", ErrInvalidMetadataField
+	}
+	var value string
+	err := tx.QueryRowContext(ctx, `SELECT `+column+` FROM books WHERE id = ?`, bookID).Scan(&value)
+	return value, err
+}
+
+// bookAuthorNamesTx reads bookID's author names in the order the book
+// credits them, the form updateBookAuthorsTx takes. It must be called from
+// inside a DB.Write callback — see DB.Write's contract.
+func bookAuthorNamesTx(ctx context.Context, tx *sql.Tx, bookID int64) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT a.name
+		FROM book_authors ba
+		JOIN authors a ON a.id = ba.author_id
+		WHERE ba.book_id = ?
+		ORDER BY ba.position`, bookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+// bookModifiedAtTx reads bookID's current modified_at. It must be called
+// from inside a DB.Write callback — see DB.Write's contract.
+func bookModifiedAtTx(ctx context.Context, tx *sql.Tx, bookID int64) (time.Time, error) {
+	var at time.Time
+	err := tx.QueryRowContext(ctx, `SELECT modified_at FROM books WHERE id = ?`, bookID).Scan(&at)
+	return at, err
+}
+
+// repointSendLogTx moves every send_log row from one book to another.
+// send_log.book_id is the schema's one ON DELETE SET NULL key, with
+// book_title denormalised beside it, which is the right fallback for a book
+// that is genuinely gone; a book replaced in place is still on the shelf, so
+// its history follows it and both the detail page's status box and the "did
+// I already send this?" answer survive the rewrite. book_title is left as it
+// stands: it records what was sent, not what the book is called now. It must
+// be called from inside a DB.Write callback — see DB.Write's contract.
+func repointSendLogTx(ctx context.Context, tx *sql.Tx, from, to int64) error {
+	_, err := tx.ExecContext(ctx, `UPDATE send_log SET book_id = ? WHERE book_id = ?`, to, from)
+	return err
 }
 
 func findOrCreateAuthor(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
@@ -799,6 +995,46 @@ func (db *DB) ClearFilesMissing(ctx context.Context, fileIDs []int64) error {
 		}
 		return nil
 	})
+}
+
+// ForgetMissingFile deletes one of bookID's locations, and the book with it
+// if that was the last one. It is a person's answer to a row the scanner
+// will not prune on its own: a row whose top-level directory yielded no
+// files is refused forever, because that is also what an offline sub-mount
+// looks like, and only someone who can see the shelf knows which of the two
+// it is.
+//
+// The membership and missing checks are conditions on the DELETE rather than
+// a read taken before it. A sweep clearing missing_since in the window
+// between such a read and the delete would forget a path that had just come
+// back, and forgetting is not reversible. PruneMissingFiles is not reused
+// for the same reason: it verifies nothing by design, on the understanding
+// that its caller confirmed each absence with a live Lstat this sweep, which
+// a click has not.
+//
+// A row that matches neither book nor mark returns (false, false, nil) — a
+// double click, or a row a sweep has since cleared, is a slip and not an
+// error, the same contract DeleteRecipient holds.
+func (db *DB) ForgetMissingFile(ctx context.Context, bookID, fileID int64) (forgotten bool, bookDeleted bool, err error) {
+	err = db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		forgotten, bookDeleted = false, false
+
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM book_files
+			WHERE id = ? AND book_id = ? AND missing_since IS NOT NULL`, fileID, bookID)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil || affected == 0 {
+			return err
+		}
+		forgotten = true
+
+		bookDeleted, _, err = pruneOrphanedBookTx(ctx, tx, bookID)
+		return err
+	})
+	return forgotten, bookDeleted, err
 }
 
 // PruneMissingFiles deletes exactly the book_files rows named by fileIDs,

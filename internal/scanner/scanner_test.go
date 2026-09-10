@@ -3150,3 +3150,373 @@ func TestScanReportsASymlinkItCannotResolve(t *testing.T) {
 		t.Errorf("a link that does not resolve was reported as a directory:\n%s", got)
 	}
 }
+
+func TestTopLevelDirHasBooks(t *testing.T) {
+	libDir := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(libDir, "populated", "nested"), 0o755); err != nil {
+		t.Fatalf("mkdir populated/nested: %v", err)
+	}
+	writeTestEPUB(t, filepath.Join(libDir, "populated", "nested", "book.epub"), "Book", "Author", nil)
+	if err := os.MkdirAll(filepath.Join(libDir, "empty"), 0o755); err != nil {
+		t.Fatalf("mkdir empty: %v", err)
+	}
+	sidecars := filepath.Join(libDir, "sidecars")
+	if err := os.MkdirAll(sidecars, 0o755); err != nil {
+		t.Fatalf("mkdir sidecars: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sidecars, "cover.jpg"), []byte("not a book"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+	writeTestEPUB(t, filepath.Join(libDir, "root.epub"), "Root Book", "Author", nil)
+
+	cases := []struct {
+		name    string
+		relPath string
+		want    bool
+	}{
+		// Deliberately a path that is not there itself: the question is
+		// about the directory, and the caller only ever asks it about a
+		// file that has just gone missing.
+		{"populated, at depth", "populated/nested/gone.epub", true},
+		{"empty", "empty/gone.epub", false},
+		{"absent", "never-existed/gone.epub", false},
+		{"only sidecars", "sidecars/gone.epub", false},
+		{"root-level path has no top-level directory", "root.epub", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := TopLevelDirHasBooks(libDir, tc.relPath)
+			if err != nil {
+				t.Fatalf("TopLevelDirHasBooks: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("TopLevelDirHasBooks(%q) = %v, want %v", tc.relPath, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("unreadable directory returns the error", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: directory mode bits aren't enforced")
+		}
+		restricted := filepath.Join(libDir, "restricted")
+		if err := os.MkdirAll(restricted, 0o755); err != nil {
+			t.Fatalf("mkdir restricted: %v", err)
+		}
+		writeTestEPUB(t, filepath.Join(restricted, "book.epub"), "Hidden", "Author", nil)
+		if err := os.Chmod(restricted, 0o000); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		t.Cleanup(func() { os.Chmod(restricted, 0o755) })
+
+		// An unknown is not evidence: the caller has a third answer for
+		// this and must not be handed "no books" for "could not look".
+		got, err := TopLevelDirHasBooks(libDir, "restricted/book.epub")
+		if err == nil {
+			t.Fatalf("TopLevelDirHasBooks = %v, nil; want the read failure returned", got)
+		}
+		if got {
+			t.Error("TopLevelDirHasBooks = true beside an error, want false")
+		}
+	})
+}
+
+// The per-directory counts Scan reports are what cmd/server logs, at a
+// level it picks from whether the directory was unconfirmed last sweep. The
+// count itself is the scanner's, so it is pinned here.
+func TestReconcileMissingReportsUnconfirmedDirs(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	for _, dir := range []string{"fiction", "keep"} {
+		if err := os.MkdirAll(filepath.Join(libDir, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	writeTestEPUB(t, filepath.Join(libDir, "fiction", "one.epub"), "One", "Author A", nil)
+	writeTestEPUB(t, filepath.Join(libDir, "fiction", "two.epub"), "Two", "Author B", nil)
+	// A sibling that stays put, so the sweep is not the empty-library case
+	// and "fiction" is the only directory in question.
+	writeTestEPUB(t, filepath.Join(libDir, "keep", "three.epub"), "Three", "Author C", nil)
+
+	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	} else if first.New != 3 {
+		t.Fatalf("first scan = %+v, want New=3", first)
+	}
+	if len(mustScanResult(t, ctx, db, libDir, coversDir).UnconfirmedDirs) != 0 {
+		t.Error("UnconfirmedDirs is non-empty for a library nothing has left")
+	}
+
+	if err := os.Rename(filepath.Join(libDir, "fiction"), filepath.Join(libDir, "novels")); err != nil {
+		t.Fatalf("rename fiction: %v", err)
+	}
+
+	result := mustScanResult(t, ctx, db, libDir, coversDir)
+	if result.Unconfirmed != 2 {
+		t.Errorf("Unconfirmed = %d, want 2", result.Unconfirmed)
+	}
+	if got := result.UnconfirmedDirs["fiction"]; got != 2 {
+		t.Errorf("UnconfirmedDirs = %v, want fiction:2", result.UnconfirmedDirs)
+	}
+	if len(result.UnconfirmedDirs) != 1 {
+		t.Errorf("UnconfirmedDirs = %v, want only fiction", result.UnconfirmedDirs)
+	}
+}
+
+func mustScanResult(t *testing.T, ctx context.Context, db *storage.DB, libDir, coversDir string) Result {
+	t.Helper()
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	return result
+}
+
+// A file rewritten in place is a new content hash at a known path, which
+// creates a book and orphans the old one. The edit has to survive that,
+// end to end: it is the whole reason Calibre's write-back is not a data
+// loss event.
+func TestScanInPlaceRewriteKeepsManualEdits(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	path := filepath.Join(libDir, "book.epub")
+	writeTestEPUB(t, path, "Embedded Title", "Embedded Author", nil)
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+
+	book := bookByPath(t, ctx, db, "book.epub")
+	if _, err := db.UpdateBookField(ctx, book.ID, storage.FieldTitle, "The Title I Typed", time.Now()); err != nil {
+		t.Fatalf("UpdateBookField: %v", err)
+	}
+
+	// Different bytes at the same path: a metadata write-back, a re-zip, a
+	// re-download.
+	writeTestEPUB(t, path, "Rewritten Embedded Title", "Embedded Author", testCoverImage(t))
+
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if result.New != 1 || result.Orphaned != 1 {
+		t.Fatalf("second scan = %+v, want New=1 Orphaned=1", result)
+	}
+
+	replacement := bookByPath(t, ctx, db, "book.epub")
+	if replacement.ID == book.ID {
+		t.Fatal("the rewrite did not create a new book, so this test proves nothing")
+	}
+	if replacement.Title != "The Title I Typed" {
+		t.Errorf("Title = %q, want the hand-edited one carried onto the replacement", replacement.Title)
+	}
+	sources, err := db.FieldSourcesForBook(ctx, replacement.ID)
+	if err != nil {
+		t.Fatalf("FieldSourcesForBook: %v", err)
+	}
+	if sources[storage.FieldTitle] != "manual" {
+		t.Errorf("sources[title] = %q, want manual", sources[storage.FieldTitle])
+	}
+}
+
+// A row the walk did not name whose Lstat nevertheless succeeds is a
+// spelling the walk disagrees with, not an unknown: the walk is the
+// authority on names. A row whose path names a directory reproduces that on
+// every filesystem, where the case-alias shape it stands in for needs a
+// case-insensitive one.
+func TestReconcileMarksUnseenRowWhoseLstatSucceeds(t *testing.T) {
+	cases := []struct {
+		name           string
+		topLevelKeepsA bool
+		wantPruned     bool
+	}{
+		{"top-level directory still holds a book", true, true},
+		{"top-level directory holds nothing", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			libDir := t.TempDir()
+			coversDir := t.TempDir()
+			db := openTestDB(t)
+			ctx := context.Background()
+
+			// A file elsewhere, so the sweep is never the empty-library case.
+			writeTestEPUB(t, filepath.Join(libDir, "elsewhere.epub"), "Elsewhere", "Author", nil)
+			if err := os.MkdirAll(filepath.Join(libDir, "top"), 0o755); err != nil {
+				t.Fatalf("mkdir top: %v", err)
+			}
+			if tc.topLevelKeepsA {
+				writeTestEPUB(t, filepath.Join(libDir, "top", "sibling.epub"), "Sibling", "Author", nil)
+			}
+			// The row's path is a real directory, which WalkDir visits and
+			// never records in seen, and which Lstat resolves happily.
+			if err := os.MkdirAll(filepath.Join(libDir, "top", "shelf"), 0o755); err != nil {
+				t.Fatalf("mkdir top/shelf: %v", err)
+			}
+
+			if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+				t.Fatalf("seed Scan: %v", err)
+			}
+			if _, _, _, _, err := db.CreateBookWithFile(ctx,
+				storage.Book{ContentHash: "hash-phantom", Title: "Phantom", SortTitle: "phantom", Format: "epub"},
+				nil, "top/shelf", 100, time.Now()); err != nil {
+				t.Fatalf("CreateBookWithFile: %v", err)
+			}
+
+			marked, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+			if err != nil {
+				t.Fatalf("marking Scan: %v", err)
+			}
+			if marked.Missing != 1 {
+				t.Fatalf("marking scan = %+v, want Missing=1 (a successful Lstat on an unseen row is a spelling mismatch)", marked)
+			}
+			f, err := db.FindFileByPath(ctx, "top/shelf")
+			if err != nil || f == nil || !f.MissingSince.Valid {
+				t.Fatalf("FindFileByPath = %+v, %v; want it marked", f, err)
+			}
+
+			if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+				_, err := tx.ExecContext(ctx, `UPDATE book_files SET missing_since = ? WHERE file_path = ?`,
+					"2020-01-01T00:00:00.000000000Z", "top/shelf")
+				return err
+			}); err != nil {
+				t.Fatalf("backdate missing_since: %v", err)
+			}
+
+			pruning, err := Scan(ctx, db, libDir, coversDir, time.Hour)
+			if err != nil {
+				t.Fatalf("pruning Scan: %v", err)
+			}
+			gone, err := db.FindFileByPath(ctx, "top/shelf")
+			if err != nil {
+				t.Fatalf("FindFileByPath: %v", err)
+			}
+			if tc.wantPruned {
+				if pruning.Pruned != 1 || gone != nil {
+					t.Errorf("pruning scan = %+v, row = %+v; want the overdue row pruned", pruning, gone)
+				}
+				return
+			}
+			if pruning.Pruned != 0 || gone == nil {
+				t.Errorf("pruning scan = %+v, row = %+v; want the row kept: its directory yielded no files", pruning, gone)
+			}
+			if pruning.Unconfirmed != 1 {
+				t.Errorf("pruning scan = %+v, want Unconfirmed=1", pruning)
+			}
+		})
+	}
+}
+
+// The other half of the rule above: a *failed* Lstat is still an unknown,
+// and an unknown is not evidence. Only success became a spelling mismatch.
+func TestReconcileLstatErrorStillLeavesRowAlone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory mode bits aren't enforced")
+	}
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// top/ keeps a file throughout, so the row reaches Lstat rather than
+	// the unconfirmed-directory guard, and elsewhere.epub keeps the sweep
+	// out of the empty-library case even once top/ is unreadable.
+	locked := filepath.Join(libDir, "top", "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("mkdir top/locked: %v", err)
+	}
+	writeTestEPUB(t, filepath.Join(libDir, "elsewhere.epub"), "Elsewhere", "Author", nil)
+	writeTestEPUB(t, filepath.Join(libDir, "top", "sibling.epub"), "Sibling", "Author", nil)
+	writeTestEPUB(t, filepath.Join(locked, "book.epub"), "Locked Book", "Author", nil)
+
+	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	} else if first.New != 3 {
+		t.Fatalf("first scan = %+v, want New=3", first)
+	}
+
+	// EACCES on the leaf's parent: the walk reports the directory itself as
+	// unreadable, and Lstat on the file under it fails with EACCES rather
+	// than ErrNotExist.
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if result.Missing != 0 {
+		t.Errorf("second scan = %+v, want Missing=0 (EACCES is not proof of absence)", result)
+	}
+	f, err := db.FindFileByPath(ctx, "top/locked/book.epub")
+	if err != nil || f == nil {
+		t.Fatalf("FindFileByPath = %+v, %v; want the row untouched", f, err)
+	}
+	if f.MissingSince.Valid {
+		t.Errorf("missing_since = %v, want NULL", f.MissingSince)
+	}
+}
+
+// Renaming a folder by case only is a rename the filesystem then hides: the
+// walk records the new spelling, and Lstat on the old one succeeds because
+// the filesystem matches it to the new name. Without Decision 5's rule the
+// old row stays live for good, with no annotation and nothing in the log.
+func TestScanCaseOnlyRenameMarksOldSpelling(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if err := os.MkdirAll(filepath.Join(libDir, "Books"), 0o755); err != nil {
+		t.Fatalf("mkdir Books: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(libDir, "books")); err != nil {
+		t.Skip("case-sensitive filesystem: the old spelling fails Lstat with ErrNotExist, which TestScanMarksMissingFileWithoutDeleting already covers")
+	}
+
+	writeTestEPUB(t, filepath.Join(libDir, "Books", "book.epub"), "Book", "Author", nil)
+	// Outside the renamed folder, so the sweep is never the empty-library
+	// case and the rename is the only thing under test.
+	writeTestEPUB(t, filepath.Join(libDir, "elsewhere.epub"), "Elsewhere", "Author B", nil)
+
+	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	} else if first.New != 2 {
+		t.Fatalf("first scan = %+v, want New=2", first)
+	}
+
+	if err := os.Rename(filepath.Join(libDir, "Books"), filepath.Join(libDir, "books")); err != nil {
+		t.Fatalf("rename Books to books: %v", err)
+	}
+
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	if result.Moved != 1 {
+		t.Errorf("second scan = %+v, want Moved=1 (the new spelling is a new path for known content)", result)
+	}
+	if result.Missing != 1 {
+		t.Errorf("second scan = %+v, want Missing=1 (the old spelling must be marked, not left live)", result)
+	}
+
+	old, err := db.FindFileByPath(ctx, "Books/book.epub")
+	if err != nil || old == nil {
+		t.Fatalf("FindFileByPath(Books/book.epub) = %+v, %v", old, err)
+	}
+	if !old.MissingSince.Valid {
+		t.Error("the old spelling's row is still live, so the book shows two paths with no annotation")
+	}
+	fresh, err := db.FindFileByPath(ctx, "books/book.epub")
+	if err != nil || fresh == nil || fresh.MissingSince.Valid {
+		t.Errorf("FindFileByPath(books/book.epub) = %+v, %v; want a live row", fresh, err)
+	}
+}

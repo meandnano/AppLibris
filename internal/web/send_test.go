@@ -35,7 +35,7 @@ func createSendTestBookWithFormat(t *testing.T, db *storage.DB, format string) i
 	t.Helper()
 	sendTestBookSeq++
 	hash := "hash-" + itoa(int64(sendTestBookSeq))
-	id, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
+	id, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: hash, Title: "Piranesi", SortTitle: "Piranesi", Format: format,
 	}, []string{"Susanna Clarke"}, hash+"."+format, 1024, time.Now())
 	if err != nil {

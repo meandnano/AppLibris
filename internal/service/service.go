@@ -273,9 +273,13 @@ type EnrichmentState struct {
 }
 
 // FileLocation is one of a book's physical file locations, as the detail
-// page needs it — just enough to list it and flag it if it's within its
-// missing-file grace period.
+// page needs it — just enough to list it, flag it if it's within its
+// missing-file grace period, and name it to the route that forgets one.
+// ID is the book_files row, which is what that route takes: a path is not
+// a stable name for a row, and posting one would put a filesystem string
+// through a form to identify a record the database already numbers.
 type FileLocation struct {
+	ID      int64
 	Path    string
 	Missing bool
 }
@@ -331,7 +335,7 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 		if i == 0 {
 			fileSize = f.FileSize
 		}
-		locations[i] = FileLocation{Path: f.FilePath, Missing: f.MissingSince.Valid}
+		locations[i] = FileLocation{ID: f.ID, Path: f.FilePath, Missing: f.MissingSince.Valid}
 	}
 
 	return &BookDetail{
@@ -353,6 +357,19 @@ func (s *Service) GetBook(ctx context.Context, id int64) (*BookDetail, error) {
 		Locations:     locations,
 		FieldSources:  fieldSources,
 	}, nil
+}
+
+// ForgetLocation drops one of a book's locations, reporting whether a row
+// went and whether the book went with it. Only a location currently marked
+// missing can be forgotten, and only one belonging to bookID; neither
+// condition is checked here, because both are conditions on the delete
+// itself — see storage.ForgetMissingFile, which also explains why a row
+// that matches neither is (false, false, nil) rather than an error.
+//
+// bookDeleted is what the transport needs to know it has nowhere to send
+// the reader back to.
+func (s *Service) ForgetLocation(ctx context.Context, bookID, fileID int64) (forgotten bool, bookDeleted bool, err error) {
+	return s.db.ForgetMissingFile(ctx, bookID, fileID)
 }
 
 // summarize attaches authors and a location count to books and shapes both

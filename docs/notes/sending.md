@@ -63,7 +63,24 @@ things to the person reading the status box:
 - A filesystem error other than `fs.ErrNotExist` (`EACCES`, `EIO`, `ESTALE`,
   a path component that is no longer a directory) is "could not read the
   file", with the OS error and path logged at Error, since the status box
-  carries a sentence rather than an errno. Only `ErrNotExist` means gone.
+  carries a sentence rather than an errno.
+- An `fs.ErrNotExist` **under a top-level directory that no longer holds
+  any books** is "could not read the file" too, logged at Warn with the
+  path. A volume that unmounts and leaves its mountpoint as an empty
+  directory fails every stat beneath it with `ENOENT`, which is the
+  ordinary shape and the one a single errno gets wrong: "no longer in the
+  library" would be written into `send_log` for every book on that disk and
+  kept by the history page for a month, where "try again" is true of a disk
+  that is coming back. A root-level file has no such directory and keeps
+  the plain answer, the exception `reconcileMissing` makes for the same
+  reason.
+
+Only an `ErrNotExist` that survives that directory test means gone. The
+test is `scanner.TopLevelDirHasBooks`, borrowed rather than restated here:
+it is the same rule the sweep applies before refusing to prune, two copies
+of a rule about the same directory drift, and the scanner's is the one with
+tests. The test failing is itself an unknown and takes the same branch as a
+directory that came back empty.
 
 The transport call runs under a deadline `sendDeadline` computes from the
 attachment: its base64 length over `minUplinkBytesPerSecond` (1 Mbit/s, a

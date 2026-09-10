@@ -260,6 +260,22 @@ reveal through a native `<details>`, since no JavaScript is guaranteed to
 have loaded, with a location inside its missing-file grace period
 annotated.
 
+A marked location also carries a "forget" form, posting to
+`POST /books/{id}/locations/forget` with the `book_files` id in `file`,
+wrapped in `sameSiteOnly` like every other state-changing route. It exists
+because the scanner refuses to prune a row whose top-level directory
+yielded no files — that being equally what an offline sub-mount looks like
+— so a renamed folder otherwise leaves a dead path on every book in it for
+good (`scanner.md`, which also carries the rule for when it is offered).
+The whole `<dd>` is the `book-locations` partial with `id="locations"`,
+rendered by the full page and by the route alike: an `outerHTML` swap has
+to replace the element carrying the id, so the partial cannot be just the
+list inside it. That is the `send-control` arrangement, one markup path.
+Forgetting a book's last location prunes the book, and the response then
+has nowhere to go: `303` to `/` without htmx, `HX-Redirect: /` with it,
+since a fragment cannot be swapped into a page whose subject no longer
+exists either.
+
 Inline editing is `GET`/`POST /books/{id}/metadata/{field}`, one route
 per field rather than one form per page, so each field is its own swap
 target and a keystroke in one never re-renders another. `makeFieldViews`
@@ -394,9 +410,9 @@ setting.
 
 ## Cross-site protection and the HTTPS requirement
 
-The send POST, every metadata POST, the enrich POST and recipient removal
-are the only state-changing routes, and each is wrapped in
-`sameSiteOnly`, which rejects a request whose `Sec-Fetch-Site` is anything
+The send POST, every metadata POST, the enrich POST, recipient removal and
+forgetting a location are the only state-changing routes, and each is
+wrapped in `sameSiteOnly`, which rejects a request whose `Sec-Fetch-Site` is anything
 but `same-origin` or `none`. There is no login, so the network position of
 the request is the only thing between the collection and everyone else.
 Any page in the user's browser can reach a LAN or localhost server its
@@ -484,7 +500,11 @@ share; the history page puts its scope line in the same slot.
 There is one button system in `app.css`: `.button` with `--md`/`--lg`
 sizes and `--primary`/`--secondary`/`--tertiary` intents, plus `.spinner`
 and `.spinner--sm`, shared by the send control, the enrichment control and
-the inline editors. Two neighbours stay outside it on purpose:
+the inline editors. The locations list's forget button is in it too, at a
+size `.locations__forget` states itself: it is the third size and the one
+the backlog item below would turn into `--sm`, so it clears the base's
+`min-height` the way `--md` and `--lg` do rather than inheriting a minimum
+shaped for the editors. Two neighbours stay outside it on purpose:
 `.search__spinner` is toggled by `htmx-request` and coloured against the
 input, sharing only the keyframes, and `.send__remove` is a borderless
 text affordance rather than a button.

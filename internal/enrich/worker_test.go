@@ -139,7 +139,7 @@ func TestWorkerBookGoneFails(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	id, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "worker-3", Title: "Book", Format: "epub"}, nil, "a.epub", 10, time.Now())
+	id, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "worker-3", Title: "Book", Format: "epub"}, nil, "a.epub", 10, time.Now())
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}

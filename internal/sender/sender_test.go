@@ -61,7 +61,7 @@ func setupBookWithFile(t *testing.T, db *storage.DB, libraryDir, path string, co
 	if err := os.WriteFile(filepath.Join(libraryDir, path), content, 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
-	bookID, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
+	bookID, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: "hash-" + path, Title: "Book: " + path, Format: "epub",
 	}, nil, path, int64(len(content)), time.Now())
 	if err != nil {
@@ -185,7 +185,7 @@ func TestWorkerOversizedFileFailsWithoutCallingTransport(t *testing.T) {
 	}
 	f.Close()
 
-	bookID, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-huge", Title: "Huge", Format: "epub"}, nil, path, size, time.Now())
+	bookID, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "hash-huge", Title: "Huge", Format: "epub"}, nil, path, size, time.Now())
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
@@ -681,5 +681,120 @@ func TestWorkerUnreadableFileIsNotGone(t *testing.T) {
 				t.Errorf("log does not name the failure and its path:\n%s", logged.String())
 			}
 		})
+	}
+}
+
+// An ENOENT under a top-level directory that holds no books is what an
+// unmounted volume looks like, not a deleted file: the mountpoint reads as
+// an empty directory and every stat beneath it fails the same way. Writing
+// "no longer in the library" there is a false statement the history page
+// keeps for a month, so the sender asks the scanner's own question first.
+func TestSendUnderEmptyTopLevelDirRecordsUnreadable(t *testing.T) {
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if err := os.Mkdir(filepath.Join(libraryDir, "vol"), 0o755); err != nil {
+		t.Fatalf("mkdir vol: %v", err)
+	}
+	bookID := setupBookWithFile(t, db, libraryDir, "vol/book.epub", []byte("x"))
+	if err := os.Remove(filepath.Join(libraryDir, "vol", "book.epub")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Offline", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	stub := &stubTransport{sendFunc: func(context.Context, string, resend.Attachment) (string, error) {
+		t.Error("transport called for a file that is not there")
+		return "", nil
+	}}
+	New(db, stub, libraryDir).drain(ctx)
+
+	got, err := db.GetSend(ctx, sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.Status != storage.SendFailed {
+		t.Fatalf("Status = %q, want failed", got.Status)
+	}
+	if got.FailureReason != fileUnreadableReason {
+		t.Errorf("FailureReason = %q, want %q — an offline volume is not a deleted book", got.FailureReason, fileUnreadableReason)
+	}
+	if !strings.Contains(logged.String(), "vol/book.epub") {
+		t.Errorf("log does not name the path under the empty directory:\n%s", logged.String())
+	}
+}
+
+// The other side of the same test: a directory that still holds books is
+// evidence the volume is mounted, so an absent file there really is gone.
+func TestSendUnderPopulatedTopLevelDirRecordsGone(t *testing.T) {
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if err := os.Mkdir(filepath.Join(libraryDir, "vol"), 0o755); err != nil {
+		t.Fatalf("mkdir vol: %v", err)
+	}
+	bookID := setupBookWithFile(t, db, libraryDir, "vol/book.epub", []byte("x"))
+	setupBookWithFile(t, db, libraryDir, "vol/sibling.epub", []byte("y"))
+	if err := os.Remove(filepath.Join(libraryDir, "vol", "book.epub")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Deleted", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	stub := &stubTransport{sendFunc: func(context.Context, string, resend.Attachment) (string, error) {
+		t.Error("transport called for a deleted file")
+		return "", nil
+	}}
+	New(db, stub, libraryDir).drain(ctx)
+
+	got, err := db.GetSend(ctx, sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.FailureReason != fileGoneReason {
+		t.Errorf("FailureReason = %q, want %q — its directory still holds a book", got.FailureReason, fileGoneReason)
+	}
+}
+
+// A root-level file has no top-level directory to ask about, and is not a
+// mount shape either, so it keeps the plain answer — the same exception
+// reconcileMissing makes.
+func TestSendRootLevelMissingFileRecordsGone(t *testing.T) {
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
+	if err := os.Remove(filepath.Join(libraryDir, "book.epub")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Deleted", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	stub := &stubTransport{sendFunc: func(context.Context, string, resend.Attachment) (string, error) {
+		t.Error("transport called for a deleted file")
+		return "", nil
+	}}
+	New(db, stub, libraryDir).drain(ctx)
+
+	got, err := db.GetSend(ctx, sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.FailureReason != fileGoneReason {
+		t.Errorf("FailureReason = %q, want %q", got.FailureReason, fileGoneReason)
 	}
 }

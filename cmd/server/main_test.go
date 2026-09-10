@@ -200,7 +200,7 @@ func TestPeriodicScanDoesNotSweepOnACancelledContext(t *testing.T) {
 		trigger := make(chan struct{}, 1)
 		trigger <- struct{}{} // a poke still pending, exactly as at shutdown
 
-		periodicScan(ctx, db, libraryDir, coversDir, time.Hour, time.Hour, trigger, nil)
+		periodicScan(ctx, db, libraryDir, coversDir, time.Hour, time.Hour, trigger, nil, nil)
 	}
 
 	if got := logs.String(); strings.Contains(got, "level=ERROR") {
@@ -488,5 +488,42 @@ func TestRunRejectsADanglingLibraryDir(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), target) {
 		t.Errorf("error = %q, want both the configured link %q and its target %q named", err, link, target)
+	}
+}
+
+// The Warn is what points at residue nothing else surfaces, and the Info is
+// what stops it drowning the log every fifteen minutes for the life of a
+// renamed folder. Getting the two the wrong way round leaves both the
+// initial silence and the eventual noise, with every other test still green.
+func TestUnconfirmedDirLogLevel(t *testing.T) {
+	cases := []struct {
+		name     string
+		reported map[string]bool
+		dir      string
+		want     slog.Level
+	}{
+		{"first sweep of a restart", nil, "fiction", slog.LevelWarn},
+		{"new since the last sweep", map[string]bool{"other": true}, "fiction", slog.LevelWarn},
+		{"still unconfirmed", map[string]bool{"fiction": true}, "fiction", slog.LevelInfo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unconfirmedLevel(tc.reported, tc.dir); got != tc.want {
+				t.Errorf("unconfirmedLevel(%v, %q) = %v, want %v", tc.reported, tc.dir, got, tc.want)
+			}
+		})
+	}
+}
+
+// The set handed to the next sweep is this sweep's, not a union: a
+// directory that recovers and later empties again is news the second time.
+func TestLogUnconfirmedDirsReturnsThisSweepsSet(t *testing.T) {
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	got := logUnconfirmedDirs(map[string]bool{"recovered": true}, map[string]int{"fiction": 2})
+	if len(got) != 1 || !got["fiction"] {
+		t.Errorf("logUnconfirmedDirs = %v, want only fiction", got)
 	}
 }

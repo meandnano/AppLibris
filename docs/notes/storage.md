@@ -83,6 +83,18 @@ the whole book back. `authors.name` has a unique index.
 book's locations and author links are meaningless without it; the author
 row survives.
 
+Two methods delete locations, and they differ in who is trusted.
+`PruneMissingFiles` deletes exactly the ids it is given and verifies
+nothing, because its caller is the scanner, the only place with live
+filesystem state. `ForgetMissingFile` deletes one row for a person, and so
+carries its own conditions — the row belongs to that book, and is currently
+marked missing — as clauses on the `DELETE` rather than a read before it: a
+sweep clearing `missing_since` inside the window between such a read and
+the delete would forget a path that had just come back. Both then run
+`pruneOrphanedBookTx`, so a bookless book cannot be created either way. A
+row matching neither condition is `(false, false, nil)`, the same
+absent-isn't-an-error contract `DeleteRecipient` holds.
+
 ## Provenance
 
 `field_sources` records per field where the current value came from:
@@ -95,6 +107,18 @@ recorded".
 The rule that is easiest to get backwards: **a cleared field stays
 `manual`.** An empty value with a `manual` source is a decision someone
 made, and a resolver that inferred provenance from emptiness would undo it.
+
+`CreateBookWithFile` carries the `manual` fields of a book it is about to
+orphan onto the book replacing it, when the two share the path and the old
+one is left with no locations at all (`inheritFromReplacedBookTx`, the
+reasoning in `scanner.md`). The empty `manual` value comes across with the
+rest, by the rule above: someone who cleared a wrong publisher does not
+want the file's wrong publisher back. `cover` never does, even where a row
+claims to be `manual`, since its value is a path keyed to one book's
+content hash. The stamp is the new book's own `modified_at`, read back
+inside the transaction rather than taken from a clock, so the whole
+creation carries one instant — `createBookTx` leaves that column to its
+schema default and does not insert it.
 
 `cover` is the eighth field and behaves differently from the other seven.
 A `cover` row exists only when a provider supplied the image:
@@ -283,6 +307,14 @@ Kindle?". `ListSendsSince` reads both denormalised columns straight off
 pruned-book and removed-recipient rows the denormalisation exists to
 keep. `status` is CHECK-constrained to the four states, so a typo in a Go
 constant fails at the write rather than producing a job no worker claims.
+
+`book_id` goes `NULL` only when the book is really gone. A same-path
+replacement re-points those rows onto the replacement instead
+(`repointSendLogTx`, called before the orphan is deleted): the book is
+still on the shelf under new bytes, and both the detail page's status box
+and the "did I already send this?" answer read `book_id`. `book_title`
+stays as it was, since it records what was sent rather than what the book
+is called now.
 
 `EnqueueSend` inserts the `queued` row and bumps `recipients.last_used_at`
 in one transaction. The bump belongs at enqueue, not delivery: "most

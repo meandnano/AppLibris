@@ -28,16 +28,7 @@
         </div>
         <div class="facts__row">
           <dt>locations</dt>
-          <dd>
-            <details class="locations">
-              <summary>{{len .Locations}} {{if eq (len .Locations) 1}}path{{else}}paths{{end}}</summary>
-              <ul class="locations__list">
-                {{range .Locations}}
-                <li>{{.Path}}{{if .Missing}} <span class="locations__missing">missing</span>{{end}}</li>
-                {{end}}
-              </ul>
-            </details>
-          </dd>
+          {{template "book-locations" .}}
         </div>
       </dl>
     </div>

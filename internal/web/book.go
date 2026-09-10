@@ -18,9 +18,12 @@ import (
 // HeaderNote are the masthead's shared fields — same contract as
 // libraryPage's, composed by navFor and headerBookCount so the two pages
 // can't render the masthead two different ways.
-// Locations is service.FileLocation as it comes: the template reads Path
-// and Missing under those names, so a per-page copy of the same two fields
-// would be a rename of nothing. FileSizeHuman is empty when the book has
+// Locations is service.FileLocation as it comes: the template reads ID,
+// Path and Missing under those names, so a per-page copy of the same three
+// fields would be a rename of nothing. It is also the "book-locations"
+// fragment's data, which the forget route renders standalone with the rest
+// of this struct zero, the reuse send-control already makes.
+// FileSizeHuman is empty when the book has
 // no location to take a size from — the template renders an em dash there
 // rather than "0 B", which is a size, and a wrong one.
 //

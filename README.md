@@ -18,7 +18,10 @@ is no JavaScript build step, and every page still works with JavaScript off.
 - **Keeps up with the directory.** New, changed and removed files are picked
   up by a filesystem watch within seconds, and by a periodic rescan
   regardless. A file that disappears is marked missing and only forgotten
-  after a grace period, so an unmounted disk does not delete your edits.
+  after a grace period, so an unmounted disk does not delete your edits; a
+  path that is gone for good — after renaming a folder, say — can be
+  forgotten from the book's own page. Rewriting a file in place, as
+  Calibre and friends do, keeps the edits you made to it.
 - **Merges byte-identical duplicates.** The same file at two paths is one
   book with two known locations, flagged on the grid and listed on the
   detail page.
