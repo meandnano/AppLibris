@@ -1827,10 +1827,25 @@ full design.
   results count, so it has to share the count's container and margins or
   the grid jumps on every keystroke. Plate 02e's empty-library state dims
   and disables the whole control — with nothing indexed there is nothing to
-  search. Its "Scan library" button and library path are the one part of
-  that plate not built, planned in
-  `2026090605-empty-library-scan-action` (a path that moves once it
-  ships, so the id is what to search for). With JavaScript
+  search. Its "Scan library" button and the mono line naming the library
+  path are the one part of that plate **deliberately not built**. The
+  startup sweep, the filesystem watcher and the `SCAN_INTERVAL` rescan
+  already pick a dropped file up without anyone asking, so the button's
+  only effect would be to make a sweep happen sooner than it already
+  will — and it could not simply call `scanner.Scan`, since two sweeps must
+  never run concurrently over the same database: it would have to poke
+  `cmd/server`'s existing `scanTrigger`, publish whether a sweep is in
+  flight (a running flag reaching the transport through a `Service`
+  function field beside `Notify`), and poll the grid until it clears, for a
+  screen a working install passes through once. The path line went with it
+  rather than shipping alone, so `web.Routes` still takes `coversDir` and
+  not `libraryDir`. What makes that half cheap to drop is that the
+  diagnosis it existed for now happens at startup instead: `run` names the
+  *resolved* `library_dir` on the `listening` line at Info, and a
+  `LIBRARY_DIR` symlinked to a volume that did not mount is a startup error
+  naming the link and its target. The cost, accepted: a directory that is
+  simply the wrong one still renders exactly like an empty one, and the log
+  rather than the page is where that is seen. With JavaScript
   off, the same `<form method="get">` degrades to a normal navigation
   hitting the identical handler, so there is no separate no-JS path to
   drift out of sync. Two separate things bound an overlong `q`, and it is

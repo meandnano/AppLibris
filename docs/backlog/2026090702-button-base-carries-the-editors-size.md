@@ -34,9 +34,9 @@ Nothing renders wrong today. All three call sites name their size
 explicitly except the one the base is shaped for, and every one names an
 intent, so the base's visual defaults are never actually observed. The
 cost is entirely to the *next* control, and there is no next control
-pending — `docs/plans/2026090605-empty-library-scan-action.md` adds a
-primary button, which names both an intent and (whichever it picks) a
-size.
+pending: the one that was — the empty-library "Scan library" button — is
+deliberately not being built (CLAUDE.md's `internal/web` paragraph records
+why), so nothing is queued that the base's defaults could catch out.
 
 It is also the same judgement PR #58's own Decision 1 made about the two
 disabled opacities: a difference that renders correctly is not worth a
