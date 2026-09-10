@@ -504,5 +504,5 @@ Two tests guard the class names in each direction: no retired name
 survives in any template or stylesheet, and every button or spinner class
 the markup names has a rule, since a mistyped modifier renders as a bare
 `.button` with every handler test still green. Known limits:
-`docs/backlog/2026090610-description-paragraphs-do-not-render.md` and
-`docs/backlog/2026090702-button-base-carries-the-editors-size.md`.
+`docs/plans/2026091002-enrichment-hardening.md` (description paragraphs)
+and `docs/backlog/2026090702-button-base-carries-the-editors-size.md`.

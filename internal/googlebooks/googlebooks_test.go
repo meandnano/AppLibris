@@ -940,9 +940,8 @@ func TestBaseLanguage(t *testing.T) {
 // rather than a fault in one: the gate refuses the cross-language
 // mismatches it can see (a transliterated title is a title mismatch), and
 // withholding language from search answers would cost four correct values
-// to avoid this one. Recorded in
-// docs/backlog/2026090609-provider-language-can-be-wrong.md and
-// deliberately not fixed.
+// to avoid this one. Deliberately not fixed; the decision is recorded in
+// docs/plans/2026091002-enrichment-hardening.md.
 //
 // The capture lives here because this package's lookup produced it.
 func TestSearchCanAnswerAMislabelledLanguage(t *testing.T) {

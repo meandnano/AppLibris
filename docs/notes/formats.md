@@ -59,8 +59,8 @@ points at, base64-decoded.
 `xml.Decoder.CharsetReader` that passes every charset through unchanged.
 The library's FB2 files are UTF-8 regardless of what they declare, and a
 bare decoder fails outright on any declared encoding it does not recognise.
-`docs/backlog/2026090713-fb2-declared-charset-is-ignored.md` records the
-cost for a file that really is in the encoding it declares.
+A file that really is in the encoding it declares fails to parse at all;
+`docs/plans/2026091003-first-sweep-fidelity.md` changes this.
 
 **Only the description is decoded through a struct.** `<binary>` elements
 are walked token by token and every one but the coverpage's target is
