@@ -6,7 +6,7 @@ README.md, imported above, says what the app does and how it is configured.
 This file maps the code and lists the rules that are easy to get backwards.
 The reasoning behind each area lives in `docs/notes/`; read the relevant
 note before changing that area, and put new rationale there rather than
-here. Notes describe the current design only, never its history.
+here. See Documentation below for what these files may and may not say.
 
 ## Code map
 
@@ -263,6 +263,39 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - `go test ./...` must pass; CI also runs `go vet` with `-race` and builds
   the image.
 
+## Documentation
+
+CLAUDE.md, README.md and `docs/notes/` describe the **current state of the
+code and why it is that way**. They are not a changelog. Git history,
+`docs/plans/completed/` and pull requests already record how the code got
+here, and a second copy of that record in prose goes stale, grows without
+bound and buries the rules a reader actually needs.
+
+Concretely, when writing or editing any of these files:
+
+- Describe what the code does now and the reason it must stay that way.
+  Never describe what it did before, what a plan proposed, what a review
+  found, or what was tried and removed. Phrases like "used to", "no longer",
+  "first built as", "the plan said", "was corrected", "before this change"
+  are the signal to delete the sentence or rewrite it in the present tense.
+- A rejected alternative may be mentioned only as a present-tense reason
+  the current design is right, and only when the code cannot show it:
+  "the comparison carries no explicit `COLLATE NOCASE`, since an explicitly
+  collated expression is no longer the indexed one" is a rule; "the
+  comparison used to carry `COLLATE NOCASE` until review found it scanned"
+  is history.
+- Do not cite plan files, PR numbers or commits from these documents. A
+  backlog file may be cited for a current known limit, since it describes
+  the code as it stands.
+- When a change makes a sentence untrue, replace the sentence. Do not
+  append a correction beneath it; that is the exception below, and it
+  belongs to plans only.
+
+The one place history is kept deliberately is `docs/plans/completed/`,
+where a correction found while implementing a plan is appended rather than
+rewritten (see Planning). A completed plan is a record of a decision at a
+point in time, which is exactly what these three documents are not.
+
 ## Planning
 
 Each implementation step is planned in its own file under
@@ -290,8 +323,7 @@ only thing separating them.
 block is the worked example.
 
 Where a completed plan and the code disagree, the code and `docs/notes/`
-are right. The notes record the current design, not the path to it, so a
-superseded plan decision is not carried into them.
+are right, and the disagreement is not recorded in the notes.
 
 ## Backlog
 
