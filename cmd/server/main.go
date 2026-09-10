@@ -423,10 +423,11 @@ func evalSymlinks(label, dir string) (string, error) {
 
 // mkdirError explains a directory the process was not allowed to create.
 // Permission denied on a mounted volume is the first thing a container run
-// meets and neither side of it is in the bare message: the image runs as
-// uid 65532 while a NAS bind mount is owned by the share's user, an Unraid
-// one by nobody, and a fresh named volume by root. Naming both uids turns
-// "mkdir /data/covers: permission denied" into an instruction.
+// meets and neither side of it is in the bare message: the container runs
+// as whatever uid it was given while a NAS bind mount is owned by the
+// share's user, an Unraid one by nobody, and a fresh named volume by root.
+// Naming both uids turns "mkdir /data/covers: permission denied" into an
+// instruction.
 //
 // The owner named is the nearest existing ancestor's, since the target
 // directory is precisely what MkdirAll could not make
@@ -442,12 +443,22 @@ func mkdirError(label, dir string, err error) error {
 }
 
 // nearestOwnerUID walks dir's components from the deepest down and reports
-// the owner of the first one that exists, along with the path it read
+// the owner of the first one that exists, along with the path it read.
+//
+// The path is made absolute for the message. The configured defaults are
+// relative and the container's working directory is /, so the ancestor of
+// "./data/covers" reads back as "data" — a name the person is then asked to
+// go and check the ownership of, and which does not appear in the mount
+// they wrote
 func nearestOwnerUID(dir string) (uid int, path string, ok bool) {
 	components := ancestors(dir)
 	for i := len(components) - 1; i >= 0; i-- {
 		if uid, ok := ownerUID(components[i]); ok {
-			return uid, components[i], true
+			named := components[i]
+			if abs, err := filepath.Abs(named); err == nil {
+				named = abs
+			}
+			return uid, named, true
 		}
 	}
 	return 0, "", false

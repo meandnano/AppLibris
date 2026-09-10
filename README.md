@@ -52,7 +52,8 @@ version you want and run it with two mounts:
 ```sh
 docker run -d \
   -p 127.0.0.1:8080:8080 \
-  -v /path/to/books:/library \
+  --user "$(id -u):$(id -g)" \
+  -v /path/to/books:/library:ro \
   -v /path/to/data:/data \
   -e RESEND_API_KEY=re_... \
   -e RESEND_FROM=library@yourdomain.example \
@@ -63,16 +64,35 @@ docker run -d \
 thumbnails. The covers directory is disposable: delete it and the next scan
 rebuilds what it can and forgets the rest.
 
-The container runs as uid 65532, so `/data` must be writable by that uid:
-`chown -R 65532:65532 /path/to/data` on the host, or run the container with
-`--user` matching whatever owns the directory already. A NAS bind mount is
-owned by the share's user, an Unraid one by `nobody`, and a fresh named
-volume by root, so this is the first thing to get wrong; when it is wrong,
-startup fails naming both the uid the process runs as and the uid that owns
-the directory. `/library` is only ever read and may be mounted `:ro`, but
-it must exist — a `LIBRARY_DIR` that is not there fails startup rather than
-being created, so a volume that did not mount shows up immediately instead
-of as an empty grid.
+### Which user to run as
+
+Give `--user` the uid and gid that already own your files. The image has
+nothing to set up for it — the binary looks no account up, so any uid works
+and none has to exist on the host or in the image. `$(id -u):$(id -g)` is
+right when the files are yours; on a NAS, use the uid and gid of the share's
+owner.
+
+That user needs:
+
+- **write** access to `/data`, which holds the database and the covers the
+  app writes;
+- **read** access to `/library`, which the app never writes to — mount it
+  `:ro`, as above, and a filesystem exported read-only works too.
+
+Getting it wrong is the first thing that goes wrong, because a NAS bind
+mount is owned by the share's user, an Unraid one by `nobody`, and a fresh
+named volume by root. Startup says so rather than half-working, naming both
+the uid it is running as and the uid that owns the directory it could not
+write:
+
+```
+create covers directory /data/covers: mkdir /data/covers: permission denied
+(running as uid 1000; /data is owned by uid 0)
+```
+
+`/library` must also exist: a `LIBRARY_DIR` that is not there fails startup
+rather than being created, so a volume that did not mount shows up
+immediately instead of as an empty grid.
 
 There is no `HEALTHCHECK` in the image: `distroless/static` ships no shell
 and no `curl`, so probe `/healthz` from your compose file or orchestrator
@@ -123,9 +143,9 @@ working directory, which is `/` in the container.
 | Variable | Default | Meaning |
 |---|---|---|
 | `ADDR` | `:8080` | Address the HTTP server listens on. |
-| `LIBRARY_DIR` | `./library` | Directory holding the books. It must already exist and may be read-only; it is never created. A symlink is followed; a dangling one fails startup. |
-| `COVERS_DIR` | `./data/covers` | Where cover thumbnails are written. Safe to delete. |
-| `DB_PATH` | `./data/library.db` | SQLite database file. Created on first run. |
+| `LIBRARY_DIR` | `./library` | Directory holding the books. Only ever read, so it may be read-only, but it must already exist — it is never created. A symlink is followed; a dangling one fails startup. |
+| `COVERS_DIR` | `./data/covers` | Where cover thumbnails are written. Created on first run, so its parent must be writable. Safe to delete. |
+| `DB_PATH` | `./data/library.db` | SQLite database file. Created on first run, so its directory must be writable. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR`. Logs go to stderr. |
 | `SCAN_INTERVAL` | `15m` | How often the library is rescanned regardless of filesystem events. |
 | `MISSING_GRACE` | `24h` | How long a file must stay missing before its record is removed. Must not be negative. |

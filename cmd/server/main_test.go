@@ -582,8 +582,8 @@ func TestRunWithAReadOnlyLibrary(t *testing.T) {
 
 // "mkdir /data/covers: permission denied" names neither side of the
 // mismatch it reports, and both are needed to fix it: the container runs as
-// uid 65532 while the mounted volume is owned by the share's user, by
-// nobody, or by root
+// whatever uid it was given while the mounted volume is owned by the
+// share's user, by nobody, or by root
 func TestMkdirPermissionErrorNamesBothUIDs(t *testing.T) {
 	requireModeEnforced(t)
 
@@ -605,6 +605,38 @@ func TestMkdirPermissionErrorNamesBothUIDs(t *testing.T) {
 	// is not there. Asserting on the bare path would pass either way, since
 	// the target contains the parent as a prefix
 	if want := parent + " is owned by uid"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
+	}
+}
+
+// COVERS_DIR and DB_PATH default to relative paths and the container's
+// working directory is /, so the ancestor of "./data/covers" is the
+// component "data". Naming that is naming something the person cannot go
+// and look at, and which does not appear in the mount they wrote
+func TestMkdirPermissionErrorNamesAnAbsolutePath(t *testing.T) {
+	requireModeEnforced(t)
+
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatalf("chmod the parent read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o755) })
+
+	// Relative to the parent, so resolveDir sees exactly the shape the
+	// container's defaults give it
+	t.Chdir(parent)
+
+	_, err := resolveDir("covers directory", filepath.Join(".", "data", "covers"))
+	if err == nil {
+		t.Fatal("resolveDir under an unwritable parent: want an error, got nil")
+	}
+	// t.Chdir's directory may itself sit behind a link (macOS /var), and
+	// the message reports the path as the process sees it
+	wd, wdErr := os.Getwd()
+	if wdErr != nil {
+		t.Fatalf("Getwd: %v", wdErr)
+	}
+	if want := wd + " is owned by uid"; !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %q, want it to contain %q", err, want)
 	}
 }

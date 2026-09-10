@@ -111,8 +111,12 @@ permission failure names both uids: the uid the process runs as and the
 owner of the nearest *existing* ancestor, since the target is what
 `MkdirAll` could not make. `mkdir /data/covers: permission denied` names
 neither side of the mismatch it reports, and both are needed to fix it —
-the image runs as uid 65532 while a NAS bind mount is owned by the share's
-user, an Unraid one by `nobody`, and a fresh named volume by root. The
+the container runs as whatever uid it was given while a NAS bind mount is
+owned by the share's user, an Unraid one by `nobody`, and a fresh named
+volume by root. The ancestor is named as an absolute path: the configured
+defaults are relative against a working directory of `/`, so the ancestor of
+`./data/covers` reads back as `data`, which is not the mount the person
+wrote and not a path they can go and look at. The
 owner comes from the platform's stat struct, so `ownerUID` is build-tagged
 `unix` — not `linux`, though the image is: `syscall.Stat_t` carries `Uid` on
 every unix, and the test asserting the message runs on the development
