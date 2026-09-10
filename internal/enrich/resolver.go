@@ -85,24 +85,6 @@ func missingFields(book storage.Book, authors []string, sources map[storage.Meta
 	return missing
 }
 
-// A provider's answer goes into the same columns internal/service's
-// normalizeField guards for a person's edit, but never passes through it —
-// ApplyEnrichedFields is a second writer to those columns. These bound
-// what a remote source can put there, mirroring that function's own limits
-// rather than importing them: internal/service sits above this package,
-// and a background worker asking it to validate would invert the layering.
-// They have to match internal/service's numbers, not merely be of the same
-// kind: a value this package writes but that one would reject is a field
-// the app itself can no longer edit — opening the editor and pressing Save
-// unchanged fails validation on a value nobody typed.
-const (
-	maxEnrichedScalarBytes      = 4096
-	maxEnrichedTitleBytes       = 1024
-	maxEnrichedAuthorNameBytes  = 1024
-	maxEnrichedAuthors          = 100
-	maxEnrichedDescriptionBytes = 64 * 1024
-)
-
 // sanitizeValue makes a provider's answer safe to store in the column
 // field backs: trimmed, capped, and — for every field but description —
 // stripped of the line breaks that would break its single-line rendering
@@ -110,6 +92,14 @@ const (
 // boundary rather than dropped: a description cut at 64 KiB is still worth
 // having, and the alternative is a book silently keeping nothing because a
 // provider was verbose.
+//
+// ApplyEnrichedFields is a second writer to the columns internal/service's
+// normalizeField guards for a person's edit, and a provider's answer never
+// passes through that function, so this is the only thing bounding what a
+// remote source can store. The caps come from internal/storage, which sits
+// below every writer of those columns: a number restated here could drift
+// from the one an edit is checked against, and a value this package writes
+// but normalizeField would reject is a field the app can no longer edit.
 func sanitizeValue(field storage.MetadataField, value string) string {
 	if field != storage.FieldDescription {
 		value = strings.Join(strings.Fields(value), " ")
@@ -118,16 +108,16 @@ func sanitizeValue(field storage.MetadataField, value string) string {
 	}
 	value = strings.TrimSpace(value)
 
-	limit := maxEnrichedScalarBytes
+	limit := storage.MaxScalarBytes
 	switch field {
 	case storage.FieldDescription:
-		limit = maxEnrichedDescriptionBytes
+		limit = storage.MaxDescriptionBytes
 	case storage.FieldTitle:
-		limit = maxEnrichedTitleBytes
+		limit = storage.MaxTitleBytes
 	case storage.FieldAuthors:
 		// One name at a time — metadataValues sanitises the list element
 		// by element, so this is the per-name limit, not the list's.
-		limit = maxEnrichedAuthorNameBytes
+		limit = storage.MaxAuthorNameBytes
 	}
 	if len(value) > limit {
 		value = strings.ToValidUTF8(value[:limit], "")
@@ -180,12 +170,12 @@ func metadataValues(m Metadata) map[storage.MetadataField]string {
 	// authorsJoin is itself a newline: sanitising the joined string would
 	// collapse a three-author list into one name.
 	//
-	// The list is cut at maxEnrichedAuthors for the same reason each name
+	// The list is cut at storage.MaxAuthors for the same reason each name
 	// is capped: a longer one is a list internal/service would refuse, so
 	// keeping it whole would cost the book its editable author field.
 	authors := make([]string, 0, len(m.Authors))
 	for _, name := range m.Authors {
-		if len(authors) == maxEnrichedAuthors {
+		if len(authors) == storage.MaxAuthors {
 			break
 		}
 		if name = sanitizeValue(storage.FieldAuthors, name); name != "" {

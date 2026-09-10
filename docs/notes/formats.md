@@ -22,11 +22,34 @@ Metadata comes from the OPF package document named by
 creation date is not that.
 
 **ISBN.** Recognised as `opf:scheme="ISBN"`, a `urn:isbn:` identifier, or a
-bare ISBN-shaped identifier, in that order, and returned normalised (hyphens
-and spaces stripped, prefix stripped, a trailing check digit upper-cased).
-Normalising on the way in is what lets the value round-trip as the lookup
-key the provider chain uses; `internal/storage` and the provider clients
-apply the same normalisation to their own inputs.
+bare ISBN-shaped identifier, in that order. Every branch derives its value
+through `storage.NormalizeISBN`, which is the one derivation every reader of
+an ISBN calls — these three branches, `internal/fb2`'s `<isbn>`, and both
+providers on the way into a lookup. It lives below all of them because the
+value is the lookup key the whole provider chain is asked with, it is what
+the detail page shows, and nothing re-derives it once the field is filled:
+`ISBN 978-0-00-000000-0 (ebook)` stored as written is a lookup nobody
+answers.
+
+It returns the first ISBN-shaped run in its input as bare digits with an
+upper-cased check digit. An `ISBN` or `urn:isbn:` marker is stripped first,
+groups may be separated by single hyphens or spaces, and a trailing `X`
+counts only as an ISBN-10's tenth character. Thirteen digits, a grouped run
+and a marked one are taken out of surrounding text; a bare ten-digit run is
+taken only when it is the whole value, since ten digits in a sentence are as
+likely an LCCN or a catalogue number as an ISBN.
+
+An `opf:scheme="ISBN"` value holding no ISBN-shaped run at all — "Not
+available" is what publishers write — falls through to the next identifier
+rather than ending the search, so the real number under a `urn:isbn:`
+identifier is still found. The bare branch adds the one rule the shared
+function deliberately lacks: a scheme-less identifier must be *wholly* an
+ISBN, since an identifier with no marker is evidence of nothing and must not
+be read as an ISBN on shape alone.
+
+The check digit is never validated: a malformed ISBN in a file is still the
+best identifier it offers, and a wrong check digit still keys a provider
+lookup that answers no-match cleanly.
 
 **Cover.** EPUB 3's `properties="cover-image"` manifest item, falling back
 to EPUB 2's `<meta name="cover">`. The href is percent-decoded and any
@@ -55,12 +78,28 @@ the schema keeps.
 **Cover** is whichever `<binary>` the coverpage's namespaced `l:href="#id"`
 points at, base64-decoded.
 
-**Declared encoding is ignored.** `ReadMetadata` installs an
-`xml.Decoder.CharsetReader` that passes every charset through unchanged.
-The library's FB2 files are UTF-8 regardless of what they declare, and a
-bare decoder fails outright on any declared encoding it does not recognise.
-A file that really is in the encoding it declares fails to parse at all;
-`docs/plans/2026091003-first-sweep-fidelity.md` changes this.
+**The declared encoding is honoured.** `ReadMetadata` installs an
+`xml.Decoder.CharsetReader` that maps the label through
+`golang.org/x/text/encoding/htmlindex` and wraps the document in that
+encoding's decoder. `encoding/xml` refuses bytes that are not valid UTF-8
+whatever `Strict` says, so an honestly labelled `windows-1251` document —
+which most of a legacy Russian collection is — parses only because of this,
+and would otherwise fail with `invalid UTF-8` and land under its filename.
+A parse error is one nothing re-asks.
+
+A label `htmlindex` does not know is passed through unchanged. So is,
+in effect, the label of a UTF-8 file that declares `windows-1251`: its bytes
+are read through the cp1251 table and its title becomes mojibake rather than
+the parse failing. That is the trade — the cost falls on a file that
+misdescribes itself, the benefit on every file that does not, and mojibake
+is one edit away from right where a parse failure is a book nobody finds.
+A byte-content sniff that ignored the label would not help: two encodings
+that are both plausible for a run of high bytes cannot be told apart by
+sniffing, and the label is the one piece of evidence the file offers.
+
+The `.fb2.zip` cap sits beneath the decoder untouched: the cap bounds the
+bytes read out of the archive, and a decoder over a capped reader stops
+where the reader does.
 
 **Only the description is decoded through a struct.** `<binary>` elements
 are walked token by token and every one but the coverpage's target is

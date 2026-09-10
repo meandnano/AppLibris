@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -106,7 +107,7 @@ func run(ctx context.Context) error {
 	// sender worker resolving a book's file. Relative file_path storage is
 	// unaffected, since every stored path is made relative to whatever
 	// root the scanner is handed
-	libraryDir, err = resolveDir("library directory", libraryDir)
+	libraryDir, err = requireExistingDir("library directory", "LIBRARY_DIR", libraryDir)
 	if err != nil {
 		return err
 	}
@@ -361,20 +362,95 @@ func run(ctx context.Context) error {
 // missing — which is the whole question when ~/Books points at a volume
 // that did not mount
 func resolveDir(label, dir string) (string, error) {
-	if link, target, ok := brokenLink(dir); ok {
-		if link == dir {
-			return "", fmt.Errorf("%s %s is a symlink to %s, which is not there", label, dir, target)
-		}
-		return "", fmt.Errorf("%s %s: %s is a symlink to %s, which is not there", label, dir, link, target)
+	if err := danglingLink(label, dir); err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create %s %s: %w", label, dir, err)
+		return "", mkdirError(label, dir, err)
 	}
+	return evalSymlinks(label, dir)
+}
+
+// requireExistingDir resolves dir the way resolveDir does but never creates
+// it, naming envVar when it is not there.
+//
+// The library is the one configured path nothing writes: the scanner only
+// reads it, so creating it is the single call that turns a legitimately
+// read-only mount into a startup failure, and a library that does not exist
+// is a misconfiguration rather than something to make empty. Creating it
+// and warning hides that under an empty grid — which is what LIBRARY_DIR
+// pointing at the wrong volume already looks like — leaving the log as the
+// only place the mistake shows.
+//
+// filepath.EvalSymlinks refuses a path that is not there anyway; the stat
+// is here so the message names the variable to fix rather than an
+// ENOENT from a resolver.
+func requireExistingDir(label, envVar, dir string) (string, error) {
+	if err := danglingLink(label, dir); err != nil {
+		return "", err
+	}
+	info, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", fmt.Errorf("%s %s is not there: %s must name a directory that already exists", label, dir, envVar)
+	case err != nil:
+		return "", fmt.Errorf("%s %s: %w", label, dir, err)
+	case !info.IsDir():
+		return "", fmt.Errorf("%s %s is not a directory: %s must name one", label, dir, envVar)
+	}
+	return evalSymlinks(label, dir)
+}
+
+func danglingLink(label, dir string) error {
+	link, target, ok := brokenLink(dir)
+	switch {
+	case !ok:
+		return nil
+	case link == dir:
+		return fmt.Errorf("%s %s is a symlink to %s, which is not there", label, dir, target)
+	default:
+		return fmt.Errorf("%s %s: %s is a symlink to %s, which is not there", label, dir, link, target)
+	}
+}
+
+func evalSymlinks(label, dir string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s %s: %w", label, dir, err)
 	}
 	return resolved, nil
+}
+
+// mkdirError explains a directory the process was not allowed to create.
+// Permission denied on a mounted volume is the first thing a container run
+// meets and neither side of it is in the bare message: the image runs as
+// uid 65532 while a NAS bind mount is owned by the share's user, an Unraid
+// one by nobody, and a fresh named volume by root. Naming both uids turns
+// "mkdir /data/covers: permission denied" into an instruction.
+//
+// The owner named is the nearest existing ancestor's, since the target
+// directory is precisely what MkdirAll could not make.
+func mkdirError(label, dir string, err error) error {
+	wrapped := fmt.Errorf("create %s %s: %w", label, dir, err)
+	if !errors.Is(err, fs.ErrPermission) {
+		return wrapped
+	}
+	if owner, path, ok := nearestOwnerUID(dir); ok {
+		return fmt.Errorf("%w (running as uid %d; %s is owned by uid %d)", wrapped, os.Getuid(), path, owner)
+	}
+	return fmt.Errorf("%w (running as uid %d)", wrapped, os.Getuid())
+}
+
+// nearestOwnerUID walks dir's components from the deepest down and reports
+// the owner of the first one that exists, along with the path it read
+func nearestOwnerUID(dir string) (uid int, path string, ok bool) {
+	components := ancestors(dir)
+	for i := len(components) - 1; i >= 0; i-- {
+		if uid, ok := ownerUID(components[i]); ok {
+			return uid, components[i], true
+		}
+	}
+	return 0, "", false
 }
 
 // brokenLink returns the first component of path that is a symlink whose

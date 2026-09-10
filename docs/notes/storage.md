@@ -71,6 +71,15 @@ column, the scanner on first sight and a title edit, and a second copy of
 the rule is a library that sorts differently depending on how a title
 arrived.
 
+`NormalizeISBN` and the `Max*` length constants are here for the same
+reason, one step further: this package sits below every writer of a
+metadata column. Three of them exist — `internal/service` for a person's
+edit, `internal/enrich` for a provider's answer, `internal/scanner` for
+what a file had embedded in it — and a rule or a number restated in one of
+them drifts. For the limits the drift is concrete: a value one writer
+stores but another's validation would reject is a field the app can no
+longer edit. `formats.md` carries what `NormalizeISBN` accepts and why.
+
 Authors are a table with a `book_authors` join, not a comma-separated
 column, so correcting a spelling and browsing by author both stay cheap.
 The join carries `position`: `author_id` order is first-sight-in-the-

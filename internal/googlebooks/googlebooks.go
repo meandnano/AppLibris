@@ -21,6 +21,7 @@ import (
 	"unicode"
 
 	"library/internal/enrich"
+	"library/internal/storage"
 )
 
 // Timeout is http.Client.Timeout, so it bounds one *request* rather than
@@ -82,14 +83,12 @@ func New(apiKey string) *Client {
 // field_sources records — a stable identifier, not a display string.
 func (c *Client) Name() string { return providerName }
 
-// ByISBN looks a book up by isbn, normalised the same way internal/epub
-// normalises a stored ISBN (hyphens and spaces stripped, a trailing
-// check-digit X upper-cased) — a book found by internal/fb2 stores its ISBN
-// with punctuation intact, and normalising here means that lookup key
-// reaches Google Books, and comes back out through toMetadata, in the same
-// shape internal/epub already stores.
+// ByISBN looks a book up by isbn, through the one normalisation every
+// reader of an ISBN shares (storage.NormalizeISBN), so the lookup key
+// reaches Google Books — and comes back out through toMetadata — in the
+// same shape the column already holds.
 func (c *Client) ByISBN(ctx context.Context, isbn string) (enrich.Metadata, error) {
-	normalized := normalizeISBN(isbn)
+	normalized := storage.NormalizeISBN(isbn)
 	if normalized == "" {
 		return enrich.Metadata{}, nil
 	}
@@ -528,31 +527,14 @@ func bestISBN(ids []industryIdentifier) string {
 	for _, id := range ids {
 		switch id.Type {
 		case "ISBN_13":
-			return normalizeISBN(id.Identifier)
+			return storage.NormalizeISBN(id.Identifier)
 		case "ISBN_10":
 			if isbn10 == "" {
-				isbn10 = normalizeISBN(id.Identifier)
+				isbn10 = storage.NormalizeISBN(id.Identifier)
 			}
 		}
 	}
 	return isbn10
-}
-
-// normalizeISBN mirrors internal/epub's own unexported normalizeISBN (and
-// internal/openlibrary's copy of the same rule): strips hyphens and spaces
-// and upper-cases a trailing check-digit X. Duplicated rather than
-// imported, for the same reason internal/openlibrary's copy is — the rule
-// is small, stable, and each caller applies it to a different shape of
-// input.
-func normalizeISBN(raw string) string {
-	v := strings.NewReplacer("-", "", " ", "").Replace(strings.TrimSpace(raw))
-	if v == "" {
-		return ""
-	}
-	if last := v[len(v)-1]; last == 'x' {
-		v = v[:len(v)-1] + "X"
-	}
-	return v
 }
 
 // blockTags are the tags whose boundary is a line break in the plain text

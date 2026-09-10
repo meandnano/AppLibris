@@ -9,8 +9,9 @@ RUN CGO_ENABLED=0 go build -o /server ./cmd/server
 # for this app — CA certificates (the HTTPS call to Resend needs a root
 # store), tzdata (so time.Local isn't always UTC), a writable /tmp, and a
 # non-root "nonroot" user (uid 65532) — while still shipping no shell and no
-# package manager. DB_PATH, COVERS_DIR and LIBRARY_DIR must be writable by
-# uid 65532 on whatever volumes are mounted over them.
+# package manager. DB_PATH and COVERS_DIR must be writable by uid 65532 on
+# whatever volumes are mounted over them; LIBRARY_DIR is only ever read, and
+# may be mounted read-only.
 FROM gcr.io/distroless/static-debian12:nonroot
 # The nonroot image sets WORKDIR /home/nonroot; cmd/server's defaults
 # (./library, ./data/library.db, ./data/covers) are relative paths that

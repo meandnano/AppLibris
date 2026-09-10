@@ -60,9 +60,23 @@ docker run -d \
 ```
 
 `/library` holds your books, `/data` holds the database and the cover
-thumbnails. The container runs as uid 65532 and needs write access to both.
-The covers directory is disposable: delete it and the next scan rebuilds
-what it can and forgets the rest.
+thumbnails. The covers directory is disposable: delete it and the next scan
+rebuilds what it can and forgets the rest.
+
+The container runs as uid 65532, so `/data` must be writable by that uid:
+`chown -R 65532:65532 /path/to/data` on the host, or run the container with
+`--user` matching whatever owns the directory already. A NAS bind mount is
+owned by the share's user, an Unraid one by `nobody`, and a fresh named
+volume by root, so this is the first thing to get wrong; when it is wrong,
+startup fails naming both the uid the process runs as and the uid that owns
+the directory. `/library` is only ever read and may be mounted `:ro`, but
+it must exist — a `LIBRARY_DIR` that is not there fails startup rather than
+being created, so a volume that did not mount shows up immediately instead
+of as an empty grid.
+
+There is no `HEALTHCHECK` in the image: `distroless/static` ships no shell
+and no `curl`, so probe `/healthz` from your compose file or orchestrator
+instead.
 
 To run a revision that has no release, build the image from the repository
 with `docker build -t applibris .` and use `applibris` in place of the
@@ -109,7 +123,7 @@ working directory, which is `/` in the container.
 | Variable | Default | Meaning |
 |---|---|---|
 | `ADDR` | `:8080` | Address the HTTP server listens on. |
-| `LIBRARY_DIR` | `./library` | Directory holding the books. A symlink is followed; a dangling one fails startup. |
+| `LIBRARY_DIR` | `./library` | Directory holding the books. It must already exist and may be read-only; it is never created. A symlink is followed; a dangling one fails startup. |
 | `COVERS_DIR` | `./data/covers` | Where cover thumbnails are written. Safe to delete. |
 | `DB_PATH` | `./data/library.db` | SQLite database file. Created on first run. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR`. Logs go to stderr. |

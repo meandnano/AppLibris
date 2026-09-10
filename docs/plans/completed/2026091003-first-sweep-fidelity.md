@@ -14,6 +14,10 @@ This plan replaces four backlog items, deleted in the same change:
 `2026090720-embedded-metadata-bypasses-length-caps`. Their re-validation
 against the code is in Context.
 
+> **Correction, found while implementing.** The four files were already
+> deleted, in the same change that wrote this plan and the two beside it,
+> so there is nothing to delete here.
+
 ## Context
 
 Everything here is what a person meets on the first run against a library
@@ -122,6 +126,14 @@ The owner comes from `os.Stat` plus `syscall.Stat_t`, behind a
 elsewhere. The nearest existing ancestor rather than the target, because
 the target is what `MkdirAll` could not make.
 
+> **Correction, found while implementing.** The build tag is `unix`, not
+> `linux`. `TestMkdirPermissionErrorNamesBothUIDs`, which this plan asks
+> for two sections below, asserts the message contains `owned by uid`; the
+> development machine and every non-Linux CI runner would take the fallback
+> and fail it. `syscall.Stat_t` carries `Uid` on every unix, so the
+> narrower tag buys nothing and costs the test. The files are
+> `cmd/server/owner_unix.go` and `cmd/server/owner_other.go`.
+
 `storage.Open`'s own `MkdirAll` (`db.go:46`) is reached only after
 `resolveDir` has created the directory, so it needs no change.
 
@@ -180,6 +192,26 @@ between groups, ten or thirteen digits, and a trailing `X` only in the
 tenth position of an ISBN-10. Anything before or after the run is ignored,
 so `ISBN 978-0-00-000000-0 (ebook)` yields `9780000000000` rather than
 being discarded, and `Not available` yields nothing.
+
+> **Correction, found while implementing.** "Anything before or after the
+> run is ignored" cannot hold together with the Tests section's case
+> "a ten-digit LCCN inside prose → empty": with surrounding text ignored,
+> `Library of Congress 2005012345 catalogue` yields a maximal run of
+> exactly ten digits and is accepted. Both were tried; the second is the
+> one worth keeping, because a bare ten-digit number in a sentence really
+> is as likely a control number as an ISBN.
+>
+> What shipped: a run standing in surrounding text must identify itself —
+> thirteen digits, a grouped run (`0-306-40615-2 (pbk.)`), or one behind an
+> `ISBN`/`urn:isbn:` marker. Only a bare ten-digit run needs to be the
+> whole value. Every example this plan names still holds, the LCCN case
+> included. The marker therefore carries evidence rather than being merely
+> stripped, which is also what admits `ISBN 0306406152 (ebook)`.
+>
+> The run is matched maximally over digits, separators and `X` and then
+> validated, rather than parsed as it is scanned: that is what makes
+> `030640615X7` one eleven-character run that is refused, instead of a
+> valid ISBN-10 with a stray digit after it.
 
 It is placed the way `SortTitle` is, because it now has five callers that
 must agree: `internal/epub`'s three branches, `internal/fb2`'s `<isbn>`,

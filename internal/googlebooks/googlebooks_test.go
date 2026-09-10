@@ -566,20 +566,6 @@ func TestBestISBNEmptyList(t *testing.T) {
 	}
 }
 
-func TestNormalizeISBN(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"978-0-262-01153-2", "9780262011532"},
-		{"0 306 40615 x", "030640615X"},
-		{"", ""},
-		{"9780306406157", "9780306406157"},
-	}
-	for _, c := range cases {
-		if got := normalizeISBN(c.in); got != c.want {
-			t.Errorf("normalizeISBN(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
 // isZeroMetadata reports whether m carries no answer at all — enrich.Metadata
 // holds a slice field, so a plain == against a zero-value literal doesn't
 // compile.

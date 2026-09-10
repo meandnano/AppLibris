@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -315,6 +317,61 @@ func TestResolveDir(t *testing.T) {
 		}
 	})
 
+	// The library is the one path nothing creates: making it turns a
+	// legitimately read-only mount into a startup failure, and an empty
+	// grid is what LIBRARY_DIR pointing at the wrong volume already looks
+	// like
+	t.Run("an absent library is a startup failure naming its variable", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "books")
+
+		_, err := requireExistingDir("library directory", "LIBRARY_DIR", dir)
+		if err == nil {
+			t.Fatal("requireExistingDir on an absent directory: want an error, got nil")
+		}
+		if !strings.Contains(err.Error(), "LIBRARY_DIR") || !strings.Contains(err.Error(), dir) {
+			t.Errorf("error = %q, want LIBRARY_DIR and the path %q named", err, dir)
+		}
+		if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Stat %q = %v, want it still absent", dir, err)
+		}
+	})
+
+	t.Run("an existing library resolves through its symlinks", func(t *testing.T) {
+		target := t.TempDir()
+		link := filepath.Join(t.TempDir(), "library")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+
+		got, err := requireExistingDir("library directory", "LIBRARY_DIR", link)
+		if err != nil {
+			t.Fatalf("requireExistingDir: %v", err)
+		}
+		want, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("requireExistingDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a dangling library link is reported as a link, not as absent", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "volume1", "books")
+		link := filepath.Join(t.TempDir(), "library")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+
+		_, err := requireExistingDir("library directory", "LIBRARY_DIR", link)
+		if err == nil {
+			t.Fatal("requireExistingDir on a dangling link: want an error, got nil")
+		}
+		if !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), target) {
+			t.Errorf("error = %q, want both the link %q and its target %q named", err, link, target)
+		}
+	})
+
 	t.Run("a dangling symlink names the link and its target", func(t *testing.T) {
 		target := filepath.Join(t.TempDir(), "volume1", "books")
 		link := filepath.Join(t.TempDir(), "library")
@@ -462,6 +519,98 @@ func waitFor(t *testing.T, done <-chan error, what string, ready func() bool) {
 			t.Fatalf("timed out after 10s waiting for %s", what)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The shape a NAS mount arrives in: the library is exported read-only and
+// nothing in the app ever writes to it. Creating the directory on the way
+// past is the one call that would turn this into a startup failure, which
+// is why the library is resolved without creating it
+func TestRunWithAReadOnlyLibrary(t *testing.T) {
+	requireModeEnforced(t)
+
+	libDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(libDir, "book.fb2"), []byte("book content"), 0o644); err != nil {
+		t.Fatalf("write book: %v", err)
+	}
+	if err := os.Chmod(libDir, 0o555); err != nil {
+		t.Fatalf("chmod the library read-only: %v", err)
+	}
+	// Restored so t.TempDir's cleanup can remove the book inside it
+	t.Cleanup(func() { os.Chmod(libDir, 0o755) })
+
+	addr := freeAddr(t)
+	dbPath := filepath.Join(t.TempDir(), "library.db")
+	t.Setenv("ADDR", addr)
+	t.Setenv("DB_PATH", dbPath)
+	t.Setenv("LIBRARY_DIR", libDir)
+	t.Setenv("COVERS_DIR", t.TempDir())
+	t.Setenv("METADATA_PROVIDERS", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("run: %v", err)
+		}
+	}()
+
+	// See TestRunIndexesALibraryBehindASymlink for why /healthz has to
+	// answer before the test opens the database itself
+	waitFor(t, done, "the server to answer /healthz", func() bool {
+		resp, err := http.Get("http://" + addr + "/healthz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	defer db.Close()
+
+	waitFor(t, done, "the first sweep to index the book in the read-only library", func() bool {
+		n, err := db.CountBooks(ctx)
+		return err == nil && n == 1
+	})
+}
+
+// "mkdir /data/covers: permission denied" names neither side of the
+// mismatch it reports, and both are needed to fix it: the container runs as
+// uid 65532 while the mounted volume is owned by the share's user, by
+// nobody, or by root
+func TestMkdirPermissionErrorNamesBothUIDs(t *testing.T) {
+	requireModeEnforced(t)
+
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatalf("chmod the parent read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o755) })
+
+	_, err := resolveDir("covers directory", filepath.Join(parent, "covers"))
+	if err == nil {
+		t.Fatal("resolveDir under an unwritable parent: want an error, got nil")
+	}
+	for _, want := range []string{"running as uid", "owned by uid", parent} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+// requireModeEnforced skips a test whose whole subject is a directory
+// permission. Root ignores the mode, so under it the write these tests
+// expect to fail simply succeeds
+func requireModeEnforced(t *testing.T) {
+	t.Helper()
+	if os.Getuid() == 0 {
+		t.Skip("running as root: directory modes are not enforced")
 	}
 }
 

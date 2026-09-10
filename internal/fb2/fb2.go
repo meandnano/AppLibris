@@ -16,7 +16,11 @@ import (
 	"slices"
 	"strings"
 
+	"golang.org/x/text/encoding/htmlindex"
+	"golang.org/x/text/transform"
+
 	"library/internal/cover"
+	"library/internal/storage"
 )
 
 // maxCoverBase64Bytes bounds the copy readCoverBinary accumulates of the
@@ -241,15 +245,7 @@ func (c *cappedReader) Read(p []byte) (int, error) {
 // binary otherwise — so the rest of an illustrated book is never read
 func readMetadata(r io.Reader) (Metadata, error) {
 	decoder := xml.NewDecoder(r)
-	// A declared non-UTF-8 encoding would otherwise fail the whole parse
-	// outright ("encoding ... declared but Decoder.CharsetReader is nil"),
-	// not degrade to mojibake. The library's FB2 files are UTF-8
-	// regardless of what they declare, so trust the byte content over the
-	// label: pass the stream through unchanged for any charset name,
-	// known or not. A best-effort parse beats a filename title.
-	decoder.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) {
-		return input, nil
-	}
+	decoder.CharsetReader = decodeCharset
 
 	if _, err := nextStartElement(decoder); err != nil {
 		return Metadata{}, fmt.Errorf("parse fb2: %w", err)
@@ -312,12 +308,38 @@ walk:
 		Title:         strings.TrimSpace(ti.BookTitle),
 		Authors:       authorNames(ti.Author),
 		Language:      strings.TrimSpace(ti.Lang),
-		ISBN:          strings.TrimSpace(desc.PublishInfo.ISBN),
+		ISBN:          storage.NormalizeISBN(desc.PublishInfo.ISBN),
 		Description:   annotationText(ti.Annotation.P),
 		Publisher:     strings.TrimSpace(desc.PublishInfo.Publisher),
 		PublishedDate: findPublishedDate(desc),
 		Cover:         coverData,
 	}, nil
+}
+
+// decodeCharset is the xml.Decoder.CharsetReader every FB2 parse installs:
+// it wraps the document in the decoder for the charset it declares, so an
+// honestly labelled windows-1251 file — which is most of a legacy Russian
+// collection — parses instead of failing on "invalid UTF-8" and landing
+// under its filename. encoding/xml never calls this for a UTF-8 label, and
+// rejects non-UTF-8 bytes whatever Strict says, so the declaration is the
+// only thing that can make those bytes readable.
+//
+// A label htmlindex does not know is passed through unchanged, which is
+// also what happens to a UTF-8 file that lies about its label: its title
+// becomes mojibake rather than the parse failing. That is the trade — the
+// cost falls on a file that misdescribes itself, and mojibake is one edit
+// away from right where a parse failure is a book nobody finds.
+//
+// The .fb2.zip cap sits beneath this untouched: the cap bounds the bytes
+// read out of the archive, and a decoder over a capped reader stops where
+// the reader does.
+func decodeCharset(label string, input io.Reader) (io.Reader, error) {
+	enc, err := htmlindex.Get(strings.TrimSpace(label))
+	if err != nil {
+		slog.Debug("fb2 declares an unknown charset", "charset", label)
+		return input, nil
+	}
+	return transform.NewReader(input, enc.NewDecoder()), nil
 }
 
 // nextStartElement consumes tokens up to and including the first start
