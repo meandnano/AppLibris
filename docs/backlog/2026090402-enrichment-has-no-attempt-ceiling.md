@@ -45,7 +45,7 @@ built on those rows can count the right thing.
 
 Nothing triggers enrichment except a person pressing a button. Step 06
 built exactly that and explicitly ruled out both a library-wide "enrich
-everything" and automatic enrichment on scan; DESIGN.md's deferred list
+everything" and automatic enrichment on scan; docs/notes/design.md's deferred list
 records all three as decisions rather than gaps.
 
 With a human as the trigger there is no loop to bound. Pressing the button
@@ -59,7 +59,7 @@ every trigger, spending a ~1 req/s rate-limit budget and Google Books'
 daily quota (which this project has already been observed to exhaust
 anonymously) on books that cannot resolve, crowding out books that could.
 
-DESIGN.md's deferred list already names this as the thing that has to
+docs/notes/design.md's deferred list already names this as the thing that has to
 arrive alongside automatic enrichment, so the trigger for acting on it is
 that decision being revisited, not this file.
 

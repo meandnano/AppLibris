@@ -26,8 +26,8 @@ No title, no author, no cover. The book lands under its filename. And
 because `maybeRegenerateCover` correctly treats a parse error as "the
 question was never answered", nothing heals it on a later sweep.
 
-Legacy Russian FB2 collections, the population DESIGN.md names as the
-reason FB2 is supported at all, are predominantly cp1251, with KOI8-R a
+Legacy Russian FB2 collections, the population FB2 support exists for,
+are predominantly cp1251, with KOI8-R a
 distant second. The pass-through is right for a UTF-8 file mislabelled as
 something else, which the comment describes, and wrong for every file
 labelled honestly.

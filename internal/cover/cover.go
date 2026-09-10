@@ -1,6 +1,6 @@
 // Package cover turns a raw embedded cover image into the stored thumbnail
-// DESIGN.md describes: resized to ~400px on the long edge, JPEG, written to
-// a derived directory keyed by content hash.
+// docs/notes/formats.md describes: resized to ~400px on the long edge, JPEG,
+// written to a derived directory keyed by content hash.
 package cover
 
 import (

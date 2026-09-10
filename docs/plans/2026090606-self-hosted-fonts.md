@@ -16,7 +16,7 @@ binary assets, and shares no code with anything else planned.
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,300..600&display=swap">
 ```
 
-DESIGN.md's Constraints say the app "ships as a **single container** with
+`docs/notes/design.md`'s Constraints say the app "ships as a **single container** with
 **no external process dependencies**" and "no JS build step". Templates,
 CSS and JS are embedded via `go:embed` precisely so there is nothing to
 fetch. The fonts are the one asset that breaks it: a machine with no route
@@ -43,7 +43,7 @@ Out of scope, with reasons:
   a weight is unused is a separate, measurable change and mixing it in
   would make "did self-hosting change how it looks?" unanswerable.
 - **`unicode-range` subsetting.** See Decision 3.
-- **A build step to generate subsets.** DESIGN.md forbids one, and it
+- **A build step to generate subsets.** `docs/notes/design.md` forbids one, and it
   would be needed to maintain any subset over time.
 - **Changing the fallback stacks.** They are what makes this safe to get
   wrong, and they stay.
@@ -53,8 +53,8 @@ Out of scope, with reasons:
 
 The backlog flagged this as the judgement call and it is the one that
 matters most here. Book titles in a personal library are exactly the
-content likely to contain Cyrillic or accented Latin, and DESIGN.md notes
-the FB2 files are overwhelmingly Russian-language. A Latin-only subset
+content likely to contain Cyrillic or accented Latin, and the FB2 files in
+this collection are overwhelmingly Russian-language. A Latin-only subset
 would render Russian titles in a mismatched fallback face **mid-page**,
 beside Latin titles in the real one — visibly worse than either the CDN
 today or shipping no fonts at all.
@@ -185,21 +185,20 @@ would be worse than saying so. What is worth pinning:
 - The existing static-asset tests (ETag, `Cache-Control`, no directory
   listing) keep passing, now with a font path as one of the cases.
 
-## CLAUDE.md
+## docs/notes/web.md
 
-`internal/web`'s paragraph describes CSS/JS embedded via `go:embed` with
-"no build step". Add the fonts and the two decisions a reader would
+The rendering section describes CSS/JS embedded via `go:embed` with no
+build step. Add the fonts and the two decisions a reader would
 otherwise undo: the full charset (and why a Latin subset is wrong for this
 collection specifically), and that the shipped weight set mirrors the old
 CDN request rather than the weights `app.css` names explicitly — the four
 `font-weight: 400` rules are resets, not an inventory.
 
-## DESIGN.md (on `init`)
+## docs/notes/design.md
 
-The Constraints section's "no external process dependencies" now holds
+The Constraints section's "no external process dependencies" then holds
 without qualification for the browser as well as the server. Worth one
-sentence in the Web UI status note, since the previous state was a known
-exception rather than an oversight.
+sentence there.
 
 ## Verification
 

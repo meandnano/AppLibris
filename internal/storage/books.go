@@ -211,8 +211,8 @@ func (db *DB) CountBooks(ctx context.Context) (int, error) {
 }
 
 // SearchBooks returns every book whose books_fts row matches query, ordered
-// by sort_title rather than relevance — DESIGN.md's search UI filters the
-// grid in place rather than opening a results page, and reordering a grid
+// by sort_title rather than relevance — the search UI filters the grid in
+// place rather than opening a results page (docs/notes/storage.md), and reordering a grid
 // the user is actively scanning while they type would be jarring. query
 // must already be a valid FTS5 MATCH expression; SanitizeFTSQuery is what
 // produces one from raw user input.

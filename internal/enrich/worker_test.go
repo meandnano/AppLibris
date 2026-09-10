@@ -188,7 +188,7 @@ func TestWorkerBookGoneFails(t *testing.T) {
 }
 
 // A provider having nothing to say is the ordinary case for an obscure
-// book and finishes done with an empty result — DESIGN.md's "200 with no
+// book and finishes done with an empty result — docs/notes/enrichment.md's "200 with no
 // match is not a failure", and the half of this the test below must not
 // break.
 func TestWorkerCleanNoMatchMarksJobDone(t *testing.T) {

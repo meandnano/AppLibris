@@ -888,7 +888,7 @@ func TestResolveDoesNotSearchWithoutATitle(t *testing.T) {
 // book's missing set and can never be filled from the search path, so
 // without removing it the set never empties and every remaining provider
 // is called for a field none of them may answer — a wasted request and
-// rate-limit token per book per run, against DESIGN.md's "the chain stops
+// rate-limit token per book per run, against docs/notes/enrichment.md's "the chain stops
 // early and saves the API calls".
 func TestResolveStopsEarlyForANoISBNBook(t *testing.T) {
 	book := storage.Book{ID: 1, Title: "The Hobbit"}

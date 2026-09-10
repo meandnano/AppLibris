@@ -105,7 +105,7 @@ func TestSearchBooksAndsTokensAcrossColumns(t *testing.T) {
 	}
 }
 
-// SearchBooks orders by sort_title, not relevance (DESIGN.md: the UI
+// SearchBooks orders by sort_title, not relevance (docs/notes/storage.md: the UI
 // filters the grid in place, and reordering it while the user is still
 // typing would be jarring) — every other SearchBooks test here returns at
 // most one row, which can't tell that apart from an unordered or

@@ -102,7 +102,7 @@ const (
 //
 // Both caps above are applied here rather than by each caller, because
 // this is the one place raw user input becomes a MATCH expression: the
-// programmatic API DESIGN.md defers is then bounded by construction rather
+// programmatic API docs/notes/design.md defers is then bounded by construction rather
 // than by remembering to clip first. The byte cap arrives through
 // NormalizeSearchQuery, which internal/web calls too so that what it
 // renders back is the string this searched rather than a same-numbered

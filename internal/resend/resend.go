@@ -1,5 +1,5 @@
 // Package resend sends an email with one attachment through Resend's API —
-// DESIGN.md's chosen transport for send-to-Kindle. It is a thin wrapper
+// docs/notes/sending.md's chosen transport for send-to-Kindle. It is a thin wrapper
 // over the single POST /emails endpoint, not a general mail abstraction:
 // there is no Sender interface, because nothing else implements one yet.
 // Its caller is internal/sender's queue worker.
@@ -41,7 +41,7 @@ const SendTimeout = 5 * time.Minute
 // at 40MB; base64 inflates raw bytes by ~4/3, so that allows roughly 30MB
 // of raw attachment. 28MB leaves headroom for headers and the rest of the
 // JSON body. Amazon's own 200MB Send-to-Kindle cap is well above this and
-// isn't the binding constraint (per DESIGN.md).
+// isn't the binding constraint (per docs/notes/sending.md).
 const MaxAttachmentSize = 28 * 1024 * 1024
 
 // ErrAttachmentTooLarge is returned by Send, wrapped with the actual size,

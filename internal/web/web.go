@@ -1,6 +1,6 @@
 // Package web is the HTTP transport for the browser UI: thin handlers that
 // parse a request, call into internal/service, and render — no business
-// logic lives here, per DESIGN.md's "Layering for a future API."
+// logic lives here, per docs/notes/web.md's "Layering for a future API."
 package web
 
 import (

@@ -1,137 +1,130 @@
 # library
 
-A self-hosted ebook library server: browse a book collection and send titles
-to a Kindle by email. See [DESIGN.md](https://github.com/meandnano/AppLibris/blob/init/DESIGN.md)
-on the `init` branch for the full design, and [CLAUDE.md](CLAUDE.md) for
-what's actually built so far.
+A self-hosted ebook library server. Point it at a directory of EPUB and FB2
+files and it gives you a cover grid to browse, a search box, a detail page
+per book, and a button that sends the book to a Kindle by email.
 
-## Search
+It is built for one person on a home network: a single Go binary, a single
+container, an embedded SQLite database, and no other services to run. The
+web UI is server-rendered HTML with a little [htmx](https://htmx.org); there
+is no JavaScript build step, and every page still works with JavaScript off.
 
-The search box on the library page filters the grid as you type — there's
-no separate results page. It searches title, authors, description and
-ISBN, matching on word prefixes (typing "har pot" finds "Harry Potter"
-while you're still typing, in either word order) and ignoring diacritics
-in both directions (searching "tokarczuk" finds a stored "Tokarczuk", and
-vice versa). Typing an ISBN finds the book regardless of whether it's
-punctuated with hyphens or not.
+## Features
 
-Press `/` anywhere on the page to jump to the search box, and `clear ×`
-inside it goes back to the unfiltered library. When a search matches, a
-line above the grid says how many books of how many, and which fields
-matched — so a hit on a description or an ISBN isn't a mystery.
+- **Reads the library you already have.** EPUB and FB2 (including
+  `.fb2.zip`) files anywhere under one directory, with no folder
+  conventions to follow. Title, authors, language, ISBN, publisher,
+  publication date, description and the cover are read out of each file.
+- **Keeps up with the directory.** New, changed and removed files are picked
+  up by a filesystem watch within seconds, and by a periodic rescan
+  regardless. A file that disappears is marked missing and only forgotten
+  after a grace period, so an unmounted disk does not delete your edits.
+- **Merges byte-identical duplicates.** The same file at two paths is one
+  book with two known locations, flagged on the grid and listed on the
+  detail page.
+- **Search as you type** over title, authors, description and ISBN. Word
+  prefixes match in any order, diacritics are ignored in both directions,
+  and an ISBN matches however it is punctuated. Press `/` to jump to the
+  search box.
+- **A paged cover grid** that loads 48 books at a time and appends more as
+  you scroll. Every page and every search has its own shareable URL.
+- **Inline metadata editing** on the detail page, one field at a time. A
+  value you edit is never overwritten by anything automatic.
+- **Metadata enrichment on request.** A "Fetch metadata" button fills in
+  the fields a file did not provide, from Open Library and Google Books, and
+  fetches a cover when the book has none. Embedded and hand-edited values
+  are never touched, a provider-supplied value is marked with its source,
+  and an answer that does not plausibly match the book is discarded rather
+  than written.
+- **Send to Kindle** through [Resend](https://resend.com), with a saved
+  list of recipient addresses, a live status on the book page, retry, and a
+  history page answering "did I already send this?".
 
-Filtering is live via [htmx](https://htmx.org): each keystroke fires a
-debounced request that swaps in just the matching grid, so the page never
-does a full reload while you type. With JavaScript disabled, the same
-search box still works as a plain form — submitting it reloads the page
-with the results already filtered server-side, using the exact same
-`?q=` URL the live version keeps in the address bar. That URL is
-shareable and bookmarkable either way.
+## Running it
 
-## Paging
+Build the image from the repository and run it with two mounts:
 
-The library grid loads 48 books at a time and appends the next batch as
-you scroll. The count under the grid says how many are left.
+```sh
+docker build -t library .
+docker run -d \
+  -p 127.0.0.1:8080:8080 \
+  -v /path/to/books:/library \
+  -v /path/to/data:/data \
+  -e RESEND_API_KEY=re_... \
+  -e RESEND_FROM=library@yourdomain.example \
+  library
+```
 
-With JavaScript disabled the same element is an ordinary link: following
-it loads the next page as a whole page, and a "first page" link appears
-beside the search box to get back. Each page's URL carries its own
-position, so it can be bookmarked or shared like any other.
+`/library` holds your books, `/data` holds the database and the cover
+thumbnails. The container runs as uid 65532 and needs write access to both.
+The covers directory is disposable: delete it and the next scan rebuilds
+what it can and forgets the rest.
 
-## Deployment requirement: an HTTPS front
+Without Docker, `make run` starts the server against `./library` and
+`./data`.
 
-There is no login. What keeps a page in your browser from sending your
-books to an address of its choosing is a header browsers attach to every
-request, `Sec-Fetch-Site`, which says whether the request came from this
-site or another one. Browsers attach it **only when the page is served
-over HTTPS** (or from `localhost`). Over plain `http://` on a LAN or
-tailnet address it is simply absent, and the server cannot tell a
-same-site request from a cross-site one.
+### Put HTTPS in front of it
 
-So the service has to be run in two parts, and both matter:
+There is no login. The one thing stopping a web page you happen to visit
+from posting to your server is a header browsers send only over HTTPS (or
+to `localhost`). So run the server behind an HTTPS gateway such as Tailscale
+Serve, Caddy or the reverse proxy your NAS already has, and make sure the
+plain listener is reachable only by that gateway: bind it to `127.0.0.1` as
+above when the proxy runs on the same host, or leave the port unpublished on
+a shared Docker network when the proxy is a sidecar.
 
-1. **An HTTPS gateway in front.** Tailscale Serve, Caddy, or whatever
-   reverse proxy your NAS already has. The server's own redirects are
-   relative, so it does not care what scheme it is fronted by.
-2. **The plain listener reachable only by that gateway.** With the proxy on
-   the same host, `ADDR=127.0.0.1:8080`. With the proxy in a sidecar
-   container, put both on a shared Docker network and do not publish the
-   server's port. A port published on the LAN beside an HTTPS front is the
-   requirement half-met, which is the same as unmet.
+By default the server refuses any state-changing request that arrives
+without that header, so a listener accidentally exposed over plain HTTP shows
+up the first time you press Save, Send or Fetch metadata, with a warning in
+the log naming `REQUIRE_FETCH_METADATA`.
 
-By default (`REQUIRE_FETCH_METADATA=true`) the server refuses any
-state-changing request that arrives without the header, so a listener that
-is accidentally reachable over plain HTTP shows up the first time someone
-presses Save, Send or Fetch metadata: a red "Refused" line appears above
-the control, and the log carries a warning naming this setting. Set
-`REQUIRE_FETCH_METADATA=false` to admit such requests anyway; the server
-then logs one warning at startup and one on the first such request, and
-cross-site protection for them rests entirely on part 2 above.
+### Sending to a Kindle
 
-## Live updates
+Resend must be able to send from `RESEND_FROM`, and that address must be on
+your Amazon account's Approved Personal Document E-mail List. Resend caps a
+message at 40 MB including the base64-encoded attachment, so books over
+about 28 MB are refused before a send is attempted. Only EPUB is offered for
+sending: Amazon accepts FB2 attachments and then silently drops them.
 
-A book dropped into the library directory normally appears within a few
-seconds: the server watches the directory and rescans shortly after things
-go quiet. A periodic rescan (`SCAN_INTERVAL`, default 15 minutes) runs
-regardless, so nothing depends on the watch working — at worst a new book
-takes that long to show up.
+### On a NAS
 
-That distinction matters on a NAS. On an Unraid **user share**
-(`/mnt/user/...`), an NFS export or an SMB mount, the filesystem is a view
-over storage that other things can write to directly, and only changes
-made *through* the share generate events. Copying a book to the share over
-SMB is seen; Unraid's mover shuffling files between the cache pool and the
-array is not, because it works on `/mnt/cache` and `/mnt/diskN` behind the
-share's back. Those changes still appear at the next rescan.
+A filesystem watch only sees changes made through the mount it is watching.
+On an Unraid user share, an NFS export or an SMB mount, files moved behind
+the share (Unraid's mover, for example) appear at the next rescan rather
+than within seconds. For instant updates, bind-mount the underlying disk
+path instead of the share. The server logs which filesystem it found at
+startup, warns for the types above, and checks that events actually arrive.
 
-For instant updates either way, bind-mount the underlying disk path
-(`/mnt/cache/books`, `/mnt/diskN/books`) rather than the user share. The
-server logs which filesystem it found at startup and warns when it is one
-of the types above; it then creates a short-lived probe file to check
-whether events actually arrive, and says so if they don't. Set
-`WATCH_ENABLED=false` to turn the watch off and rely on the rescan alone,
-or `WATCH_SETTLE` (default `5s`) to change how long the directory must be
-quiet before a rescan runs.
+## Configuration
 
-## Metadata enrichment
+Everything is an environment variable. Relative paths resolve from the
+working directory, which is `/` in the container.
 
-The server can fill in missing book metadata and fetch a cover, from Open
-Library and Google Books, for whichever fields a book's own file didn't
-provide — never overwriting an embedded value or one edited by hand.
-Each book's detail page has a "Fetch metadata" button that queues the
-work and reports what it filled in; a field a provider supplied is marked
-with its source, so you can tell a guess from what the file itself said.
-Nothing is enriched automatically — a run is always something you asked
-for, on a book you chose. A run is reported as failed rather than as
-nothing found when no provider could answer, and when the only thing it
-found was a cover it could not save — a throttled API, a broken image and
-an unknown book are three different answers, and only the last one means
-there is nothing there.
+| Variable | Default | Meaning |
+|---|---|---|
+| `ADDR` | `:8080` | Address the HTTP server listens on. |
+| `LIBRARY_DIR` | `./library` | Directory holding the books. A symlink is followed; a dangling one fails startup. |
+| `COVERS_DIR` | `./data/covers` | Where cover thumbnails are written. Safe to delete. |
+| `DB_PATH` | `./data/library.db` | SQLite database file. Created on first run. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR`. Logs go to stderr. |
+| `SCAN_INTERVAL` | `15m` | How often the library is rescanned regardless of filesystem events. |
+| `MISSING_GRACE` | `24h` | How long a file must stay missing before its record is removed. Must not be negative. |
+| `WATCH_ENABLED` | `true` | Watch the library directory for changes. `false` relies on the rescan alone. |
+| `WATCH_SETTLE` | `5s` | How long the directory must be quiet after a change before a rescan runs. |
+| `REQUIRE_FETCH_METADATA` | `true` | Refuse state-changing requests that carry no `Sec-Fetch-Site` header. `false` admits them and logs a warning instead. |
+| `RESEND_API_KEY` | unset | Resend API key. Sending is disabled while unset. |
+| `RESEND_FROM` | unset | Sender address for Kindle mail. Sending is disabled while unset. |
+| `METADATA_PROVIDERS` | `openlibrary,googlebooks` | Providers to ask, in order. An unknown name fails startup. Set it empty (`METADATA_PROVIDERS=`) to disable enrichment and make no outbound requests. |
+| `GOOGLE_BOOKS_API_KEY` | unset | API key for Google Books. Without one the shared anonymous quota is used, which is routinely exhausted, so expect that provider to answer nothing. |
 
-A book with no ISBN is looked up by title and author instead, and an
-answer that doesn't plausibly match the book is discarded rather than
-written — so a file named `01 - Fellowship` reports "nothing to add"
-instead of acquiring some other book's publisher and cover. That is the
-common outcome for files whose titles came from their filenames, and it is
-the intended one: an empty field can still be filled by hand or by a later
-run, where a wrong one is recorded as though it were known.
+## Development
 
-Covers fetched this way live in `COVERS_DIR` alongside the ones read out
-of book files, and that directory stays safe to delete: the next scan
-rebuilds a cover it can re-extract from the book itself, and simply forgets
-one a provider supplied — the book shows an empty cover again, and "Fetch
-metadata" puts it back.
+```sh
+make test     # go test ./...
+make build    # bin/server
+make run      # go run ./cmd/server
+```
 
-`METADATA_PROVIDERS` (default `openlibrary,googlebooks`) lists which
-providers to use and in what order. Set it to an empty value
-(`METADATA_PROVIDERS=`) to disable enrichment outright and make no
-outbound requests at all — the setting for a deployment with no internet
-access (it does not change the HTTPS requirement above, which is about how
-*you* reach the server, not how it reaches anything else). Google Books
-nominally works anonymously at a low
-quota, but in practice expect to need `GOOGLE_BOOKS_API_KEY`: unauthenticated
-requests share one Google-wide project whose daily quota was found exhausted
-on every attempt, days apart, answering `429` rather than results. Enrichment
-degrades quietly when that happens — the provider is skipped and the other
-one still answers — so a keyless setup looks like it works and simply finds
-less.
+Design notes live under `docs/notes/`, implementation plans under
+`docs/plans/`, and deferred work under `docs/backlog/`. `CLAUDE.md` maps
+the code for anyone working on it.

@@ -11,7 +11,7 @@ import (
 
 // noDirFS hides directories from http.FileServer, which would otherwise
 // generate a browsable index for any directory lacking an index.html.
-// Serving one is not a leak — DESIGN.md binds this to a trusted network —
+// Serving one is not a leak — docs/notes/design.md binds this to a trusted network —
 // but the covers directory listing every content hash in the library is
 // surface nobody asked for.
 type noDirFS struct{ fs http.FileSystem }

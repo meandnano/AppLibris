@@ -37,7 +37,7 @@ const (
 
 // Watcher turns filesystem activity under the library directory into pokes
 // on a trigger channel. It is emphatically not a second way to index a
-// book: it never reads, hashes or parses the file an event names. DESIGN.md
+// book: it never reads, hashes or parses the file an event names. docs/notes/scanner.md
 // makes the periodic rescan the mechanism and the watcher an optimisation,
 // so the only thing a watcher failure can cost is latency — a book waits
 // for the next sweep instead of appearing within seconds.
@@ -393,7 +393,7 @@ func (w *Watcher) probe(ctx context.Context) (pending bool) {
 	// os.Create would truncate whatever is at the path and follow a symlink
 	// through to its target — and in a container the process is PID 1, so a
 	// name built from the pid is guessable. A library file must not be
-	// collateral damage of a diagnostic; DESIGN.md's rule for this directory
+	// collateral damage of a diagnostic; docs/notes/design.md's rule for this directory
 	// is that writes only ever create new paths.
 	f, err := os.CreateTemp(w.libraryDir, ".watch-probe-*")
 	if err != nil {

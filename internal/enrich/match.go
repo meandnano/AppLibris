@@ -21,7 +21,7 @@ const subtitleDelimiters = ":;,()[]{}—–/|"
 // compound; ". " ends a segment and "J.R.R." does not.
 //
 // The period earns its place from the population this path serves: Russian
-// editions, which DESIGN.md names as the reason the title search exists,
+// editions, which docs/notes/enrichment.md names as the reason the title search exists,
 // conventionally write "Series. Title" — without it "Властелин колец" could
 // never match "Властелин колец. Братство кольца", where the equivalent
 // colon form already matches. The cost is an abbreviation splitting a

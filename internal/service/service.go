@@ -1,5 +1,5 @@
 // Package service is the layer beneath the web (and, later, API) handlers:
-// business logic and storage access live here, per DESIGN.md's "Layering
+// business logic and storage access live here, per docs/notes/web.md's "Layering
 // for a future API," so handlers stay thin transports over these methods.
 package service
 
@@ -242,7 +242,7 @@ var kindleFormats = map[string]bool{
 // sendableFormat decides whether a book of the given format can be sent
 // to a Kindle and, when it cannot, the sentence the send control shows
 // instead of a button. FB2 gets the specific remedy because it is the
-// library's one indexed format Kindle refuses and DESIGN.md's deferred
+// library's one indexed format Kindle refuses and docs/notes/design.md's deferred
 // conversion is the fix; anything else unrecognised gets a generic
 // refusal rather than a remedy this code cannot vouch for.
 func sendableFormat(format string) (sendable bool, note string) {
@@ -436,7 +436,7 @@ func (s *Service) Recipients(ctx context.Context) ([]RecipientOption, error) {
 	return options, nil
 }
 
-// QueueSend is where send-to-Kindle's business rules live, per DESIGN.md's
+// QueueSend is where send-to-Kindle's business rules live, per docs/notes/web.md's
 // layering note that a handler must stay "parse request, call service
 // method, render":
 //
@@ -640,14 +640,14 @@ func sendStateFrom(send *storage.Send) *SendState {
 // sendHistoryWindow is how far back the send history view looks — plate
 // 07's "last 30 days" scope line. An unbounded log is a page whose render
 // cost grows forever; a rolling window keeps it bounded without an
-// archival or pagination story this library doesn't need at DESIGN.md's
+// archival or pagination story this library doesn't need at docs/notes/sending.md's
 // stated volume ("a handful of sends a week").
 const sendHistoryWindow = 30 * 24 * time.Hour
 
 // SendHistoryLimit caps how many rows the history view will ever render,
 // even inside the window. A time window alone is not a bound — nothing
 // stops a scripted burst from putting thousands of rows inside 30 days —
-// and at DESIGN.md's stated volume, 500 rows is roughly a decade of
+// and at docs/notes/sending.md's stated volume, 500 rows is roughly a decade of
 // ordinary use, so this should never actually bite in practice. It exists
 // so that if it ever does, SendHistory can say so instead of the page
 // silently rendering a "last 30 days" that is no longer true.
