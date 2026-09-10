@@ -34,18 +34,28 @@ answers.
 It returns the first ISBN-shaped run in its input as bare digits with an
 upper-cased check digit. An `ISBN` or `urn:isbn:` marker is stripped first,
 groups may be separated by single hyphens or spaces, and a trailing `X`
-counts only as an ISBN-10's tenth character. Thirteen digits, a grouped run
-and a marked one are taken out of surrounding text; a bare ten-digit run is
-taken only when it is the whole value, since ten digits in a sentence are as
-likely an LCCN or a catalogue number as an ISBN.
+counts only as an ISBN-10's tenth character. Text around the run is ignored,
+so `ISBN 978-0-00-000000-0 (ebook)` and the bare `0306406152 (pbk.)` both
+yield their digits.
+
+Ignoring the surroundings is safe because every caller reads a slot that
+already claims to hold an ISBN — an `opf:scheme="ISBN"` or `urn:isbn:`
+identifier, FB2's `<isbn>`, a provider's ISBN array — so a run found there is
+an ISBN by declaration and needs no corroborating shape. A run is matched
+maximally over digits, separators and `X` and validated afterwards, which is
+what makes `030640615X7` one refused eleven-character run rather than a valid
+ISBN-10 with a stray digit after it. A space is one of those run bytes, so a
+digit-led word after the number (`978-0-306-40615-7 2nd ed.`) joins the run
+and the whole thing is refused: it loses an ISBN, never invents one, and
+`docs/backlog/2026091005-isbn-run-absorbs-a-following-number.md` records it.
 
 An `opf:scheme="ISBN"` value holding no ISBN-shaped run at all — "Not
 available" is what publishers write — falls through to the next identifier
 rather than ending the search, so the real number under a `urn:isbn:`
 identifier is still found. The bare branch adds the one rule the shared
 function deliberately lacks: a scheme-less identifier must be *wholly* an
-ISBN, since an identifier with no marker is evidence of nothing and must not
-be read as an ISBN on shape alone.
+ISBN, since an identifier that claims nothing is evidence of nothing and a
+ten-digit run in a sentence is as likely an LCCN or a catalogue number.
 
 The check digit is never validated: a malformed ISBN in a file is still the
 best identifier it offers, and a wrong check digit still keys a provider
@@ -87,19 +97,19 @@ which most of a legacy Russian collection is — parses only because of this,
 and would otherwise fail with `invalid UTF-8` and land under its filename.
 A parse error is one nothing re-asks.
 
-A label `htmlindex` does not know is passed through unchanged. So is,
-in effect, the label of a UTF-8 file that declares `windows-1251`: its bytes
-are read through the cp1251 table and its title becomes mojibake rather than
-the parse failing. That is the trade — the cost falls on a file that
-misdescribes itself, the benefit on every file that does not, and mojibake
-is one edit away from right where a parse failure is a book nobody finds.
+A label `htmlindex` does not know is passed through unchanged. A UTF-8 file
+that declares `windows-1251` is the other cost: its bytes are read through
+the cp1251 table and its title becomes mojibake rather than the parse
+failing. That is the trade — the cost falls on a file that misdescribes
+itself, the benefit on every file that does not, and mojibake is one edit
+away from right where a parse failure is a book nobody finds.
 A byte-content sniff that ignored the label would not help: two encodings
 that are both plausible for a run of high bytes cannot be told apart by
 sniffing, and the label is the one piece of evidence the file offers.
 
-The `.fb2.zip` cap sits beneath the decoder untouched: the cap bounds the
-bytes read out of the archive, and a decoder over a capped reader stops
-where the reader does.
+The `.fb2.zip` cap is applied on both sides of the decoder, since a decoder
+only grows a byte count and the cap has to mean the same number either way.
+See **Memory caps against untrusted files** below.
 
 **Only the description is decoded through a struct.** `<binary>` elements
 are walked token by token and every one but the coverpage's target is
@@ -182,13 +192,24 @@ quantum so a cover of exactly the cap is admitted as `Store` admits it)
 checked as the buffer fills and the decoded length checked exactly
 afterwards, since one base64 quantum encodes three byte lengths alike.
 
-**`maxZipDocumentBytes` (128 MiB)** caps the `.fb2` inside a `.fb2.zip`,
-through a `cappedReader`. The cover cap above bounds the copy this package
-keeps, not the token itself: `encoding/xml` buffers a whole text node inside
-the decoder before `Token` returns it, and nothing in the package caps that.
-So this cap is in effect the largest single text node an archive may inflate
-to; the tokeniser's buffer doubles as it grows, so the transient worst case
-is about twice that, in line with the ~300 MB `maxPixels` already accepts.
+**`maxZipDocumentBytes` (128 MiB)** caps the `.fb2` inside a `.fb2.zip`.
+The cover cap above bounds the copy this package keeps, not the token
+itself: `encoding/xml` buffers a whole text node inside the decoder before
+`Token` returns it, and nothing in the package caps that. So this cap is in
+effect the largest single text node an archive may inflate to; the
+tokeniser's buffer doubles as it grows, so the transient worst case is about
+twice that, in line with the ~300 MB `maxPixels` already accepts.
+
+It is applied on **both sides of the charset decoder**, and needs to be. A
+`cappedReader` bounds the bytes read out of the archive; a `budgetReader`
+bounds what the decoder produces from them. One alone is not the figure the
+constant names, because a decoder only ever grows a byte count — every
+cp1251 Cyrillic byte becomes two of UTF-8, a legacy CJK encoding's byte can
+become three — so an archive capped only on the read would hold two to three
+times the budget. The decoded side refuses a crossing read whole rather than
+trimming it to what is left: a trimmed read cuts the decoder's output
+mid-rune, and `encoding/xml` reports invalid UTF-8 for that before it ever
+asks for the byte that would carry the size refusal.
 Where the cap lands decides what survives it: past the description it costs
 the cover only (`errDocumentTooLarge` is told apart from a parse failure),
 inside the description there is nothing to keep and it is an error. A plain

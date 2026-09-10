@@ -86,7 +86,7 @@ func (c *Client) Name() string { return providerName }
 // ByISBN looks a book up by isbn, through the one normalisation every
 // reader of an ISBN shares (storage.NormalizeISBN), so the lookup key
 // reaches Google Books — and comes back out through toMetadata — in the
-// same shape the column already holds.
+// same shape the column already holds
 func (c *Client) ByISBN(ctx context.Context, isbn string) (enrich.Metadata, error) {
 	normalized := storage.NormalizeISBN(isbn)
 	if normalized == "" {

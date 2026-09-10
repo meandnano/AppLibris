@@ -123,7 +123,9 @@ tidy-up would break. The note named in the heading carries the reasoning.
   held; never add an uncapped read in `internal/epub` or `internal/fb2`.
   `maxZipDocumentBytes` (128 MiB) bounds the whole `.fb2` inside an
   archive because `encoding/xml` buffers a full text node before returning
-  it.
+  it, and is applied on **both sides** of the charset decoder — a decoder
+  only grows a byte count, so capping the read alone leaves the figure two
+  to three times looser than it says.
 - `cover.MaxCoverBytes` (8 MiB) and `enrich.MaxCoverBytes` (512 KiB) are
   separate constants, never aliases. Google Books' cover-size choice is
   calibrated against the second.
@@ -136,9 +138,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
   EPUB, never `title-info/date` over `publish-info/year` in FB2.
 - Every reader of an ISBN calls `storage.NormalizeISBN` — `internal/epub`'s
   three branches, `internal/fb2`'s `<isbn>`, both providers' `ByISBN` and
-  `bestISBN`. Never a private copy. A scheme-marked EPUB identifier holding
-  no run falls through to the next; the bare branch additionally requires
-  the whole identifier to *be* the run.
+  `bestISBN`. Never a private copy. It ignores text around the run, which is
+  safe only because every caller reads a slot already claiming to hold an
+  ISBN; `internal/epub`'s bare branch is the exception and carries its own
+  guard (`bareISBN`, the whole identifier must be the run) rather than
+  making the shared function pay for it. A scheme-marked EPUB identifier
+  holding no run falls through to the next.
 - FB2's declared charset is decoded through `htmlindex`; only a label
   `htmlindex` does not know passes through unchanged.
 - Cover files are named by the *book's* content hash, not the thumbnail's

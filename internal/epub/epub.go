@@ -254,7 +254,7 @@ func readOPFPackage(zr *zip.Reader, opfPath string) (opfPackage, error) {
 // (ebook)" yields the digits. A branch whose value holds no ISBN-shaped run
 // at all falls through to the next identifier rather than ending the
 // search, so a publisher who writes "Not available" under the ISBN scheme
-// and the real number under urn:isbn: still gets the real number.
+// and the real number under urn:isbn: still gets the real number
 func findISBN(pkg opfPackage) string {
 	for _, id := range pkg.Metadata.Identifier {
 		if strings.EqualFold(id.Scheme, "ISBN") {
@@ -292,7 +292,7 @@ func findISBN(pkg opfPackage) string {
 // so a run with anything else beside it — a ten-digit LCCN in a sentence,
 // say — must not be read as an ISBN just for its shape. That is the one
 // thing this adds to storage.NormalizeISBN, which is deliberately willing
-// to pull a marked or grouped run out of surrounding text.
+// to pull a marked or grouped run out of surrounding text
 func bareISBN(raw string) string {
 	isbn := storage.NormalizeISBN(raw)
 	if isbn == "" {

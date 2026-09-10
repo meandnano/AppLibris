@@ -119,7 +119,7 @@ func SortTitle(title string) string {
 // edit, internal/enrich for a provider's answer, and internal/scanner for
 // what a file had embedded in it. A value one writer stores but another's
 // validation would reject is a field the app can no longer edit — opening
-// the editor and pressing Save unchanged fails on a value nobody typed.
+// the editor and pressing Save unchanged fails on a value nobody typed
 const (
 	MaxTitleBytes       = 1024
 	MaxAuthorNameBytes  = 1024
@@ -140,17 +140,22 @@ const (
 //
 // An "ISBN" or "urn:isbn:" marker is stripped first, groups may be
 // separated by single hyphens or spaces, and a trailing X counts only as an
-// ISBN-10's tenth character. Thirteen digits, a grouped run and a marked
-// one are taken out of surrounding text; a bare ten-digit run is taken only
-// when it is the whole value, since ten digits in a sentence are as likely
-// an LCCN or a catalogue number as an ISBN.
+// ISBN-10's tenth character. Text before or after the run is ignored, so
+// "ISBN 978-0-00-000000-0 (ebook)" yields the digits and "Not available"
+// yields nothing.
+//
+// Every caller reads a slot that already claims to hold an ISBN — an
+// opf:scheme="ISBN" or urn:isbn: identifier, FB2's <isbn> element, a
+// provider's ISBN array — so a run found there is an ISBN by declaration and
+// needs no corroborating shape. internal/epub's bare branch is the one
+// reader with no such claim, and it holds its own guard (bareISBN) rather
+// than making every other caller pay for it
 //
 // The check digit is deliberately not validated: a malformed ISBN in a file
 // is still the best identifier it offers, and a wrong check digit still
-// keys a provider lookup that answers no-match cleanly.
+// keys a provider lookup that answers no-match cleanly
 func NormalizeISBN(raw string) string {
-	rest, marked := cutISBNMarker(strings.TrimSpace(raw))
-	rest = strings.TrimSpace(rest)
+	rest := strings.TrimSpace(cutISBNMarker(strings.TrimSpace(raw)))
 
 	for i := 0; i < len(rest); {
 		if !isISBNRunByte(rest[i]) {
@@ -161,7 +166,7 @@ func NormalizeISBN(raw string) string {
 		for end < len(rest) && isISBNRunByte(rest[end]) {
 			end++
 		}
-		if isbn, ok := isbnFromRun(rest[i:end], marked || (i == 0 && end == len(rest))); ok {
+		if isbn, ok := isbnFromRun(rest[i:end]); ok {
 			return isbn
 		}
 		i = end
@@ -169,36 +174,30 @@ func NormalizeISBN(raw string) string {
 	return ""
 }
 
-// cutISBNMarker removes an ISBN marker from the front of v and reports
-// whether it found one. The marker is evidence in its own right: it is what
-// admits "ISBN 0306406152 (ebook)", whose run would otherwise be ten bare
-// digits with text beside them.
-func cutISBNMarker(v string) (string, bool) {
+// cutISBNMarker removes an ISBN marker from the front of v, so the digits
+// behind it are not read as part of the run
+func cutISBNMarker(v string) string {
 	for _, marker := range []string{"urn:isbn:", "isbn:", "isbn"} {
 		if len(v) >= len(marker) && strings.EqualFold(v[:len(marker)], marker) {
-			return v[len(marker):], true
+			return v[len(marker):]
 		}
 	}
-	return v, false
+	return v
 }
 
 // isISBNRunByte reports whether c can appear inside an ISBN-shaped run.
 // Membership is deliberately wider than the grammar isbnFromRun accepts, so
 // that a run is always maximal: "030640615X7" is one eleven-character run
-// that is refused, not a valid ISBN-10 with a stray digit after it.
+// that is refused, not a valid ISBN-10 with a stray digit after it
 func isISBNRunByte(c byte) bool {
 	return c >= '0' && c <= '9' || c == '-' || c == ' ' || c == 'X' || c == 'x'
 }
 
-// isbnFromRun validates one maximal run and returns it as bare digits.
-// whole says the run stands alone rather than inside surrounding text,
-// which is the evidence a ten-digit run needs when it carries no grouping
-// of its own.
-func isbnFromRun(run string, whole bool) (string, bool) {
+// isbnFromRun validates one maximal run and returns it as bare digits
+func isbnFromRun(run string) (string, bool) {
 	trimmed := strings.Trim(run, "- ")
 
 	var digits strings.Builder
-	grouped := false
 	for i := 0; i < len(trimmed); i++ {
 		switch c := trimmed[i]; {
 		case c >= '0' && c <= '9':
@@ -210,7 +209,6 @@ func isbnFromRun(run string, whole bool) (string, bool) {
 			if next := trimmed[i+1]; next == '-' || next == ' ' {
 				return "", false
 			}
-			grouped = true
 		default:
 			// X, in the one position an ISBN-10's check digit occupies
 			if digits.Len() != 9 || i != len(trimmed)-1 {
@@ -221,14 +219,7 @@ func isbnFromRun(run string, whole bool) (string, bool) {
 	}
 
 	isbn := digits.String()
-	switch len(isbn) {
-	case 13:
-		return isbn, true
-	case 10:
-		return isbn, whole || grouped
-	default:
-		return "", false
-	}
+	return isbn, len(isbn) == 10 || len(isbn) == 13
 }
 
 func setFieldSourceTx(ctx context.Context, tx *sql.Tx, bookID int64, field MetadataField, source string) error {

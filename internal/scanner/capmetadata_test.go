@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -12,10 +13,23 @@ import (
 	"library/internal/storage"
 )
 
+// straddling builds a valid UTF-8 value of at least n bytes positioned so
+// that a cut at any of the Max* limits lands *inside* a rune.
+//
+// Getting this wrong is the easy way to write a test that proves nothing:
+// every limit here is even, so a filler of two-byte runes is cut on a rune
+// boundary by arithmetic alone and `strings.ToValidUTF8` could be deleted
+// from capValue with every assertion still green. Three-byte runes behind a
+// two-byte lead-in straddle all three limits, since each is 1 mod 3 and the
+// lead-in shifts that to 2
+func straddling(n int) string {
+	return "aa" + strings.Repeat("€", n/3+1)
+}
+
 // overlongEPUB writes an EPUB whose embedded metadata is past every limit a
 // person's edit meets. The description has to fit inside internal/epub's
 // 4 MiB OPF bound while still exceeding 64 KiB, so it is built here rather
-// than taken from a fixture.
+// than taken from a fixture
 func overlongEPUB(t *testing.T, path string) {
 	t.Helper()
 
@@ -23,6 +37,8 @@ func overlongEPUB(t *testing.T, path string) {
 	for i := range 150 {
 		fmt.Fprintf(&creators, "<dc:creator>Author %03d</dc:creator>\n    ", i)
 	}
+	// One name past the per-name cap, so the author list is cut two ways
+	fmt.Fprintf(&creators, "<dc:creator>%s</dc:creator>", straddling(storage.MaxAuthorNameBytes+500))
 
 	opfXML := fmt.Sprintf(`<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
@@ -34,12 +50,10 @@ func overlongEPUB(t *testing.T, path string) {
   </metadata>
   <manifest></manifest>
 </package>`,
-		// Multi-byte throughout, so a cut on a byte boundary would leave
-		// an invalid rune behind and the assertions would see it
-		strings.Repeat("é", 1000),
+		straddling(storage.MaxTitleBytes+500),
 		creators.String(),
-		strings.Repeat("ü", storage.MaxDescriptionBytes),
-		strings.Repeat("ß", storage.MaxScalarBytes))
+		straddling(storage.MaxDescriptionBytes*2),
+		straddling(storage.MaxScalarBytes+500))
 
 	writeTestEPUBWithOPF(t, path, opfXML)
 }
@@ -83,6 +97,13 @@ func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 		if !utf8.ValidString(tt.value) {
 			t.Errorf("%s was cut mid-rune", tt.field)
 		}
+		// straddling puts a rune across every limit, so the surviving
+		// value must stop short of it. Landing exactly on the limit means
+		// the partial rune was kept
+		if len(tt.value) != tt.limit-2 {
+			t.Errorf("%s is %d bytes, want %d — the last whole rune before the %d-byte limit",
+				tt.field, len(tt.value), tt.limit-2, tt.limit)
+		}
 	}
 
 	authors, err := db.ListAuthorsForBook(ctx, book.ID)
@@ -96,6 +117,17 @@ func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 	// hundred: the first credited author is the one the grid shows
 	if authors[0] != "Author 000" || authors[storage.MaxAuthors-1] != fmt.Sprintf("Author %03d", storage.MaxAuthors-1) {
 		t.Errorf("authors = %v…%v, want the first %d in source order", authors[0], authors[len(authors)-1], storage.MaxAuthors)
+	}
+	// The per-name cap is a separate rule from the list cap, and the
+	// over-long name sits past the list cut, so it has to be checked on
+	// its own rather than through the stored list
+	longName := capValue("verbose.epub", storage.FieldAuthors,
+		straddling(storage.MaxAuthorNameBytes+500), storage.MaxAuthorNameBytes)
+	if len(longName) != storage.MaxAuthorNameBytes-2 {
+		t.Errorf("a capped author name is %d bytes, want %d", len(longName), storage.MaxAuthorNameBytes-2)
+	}
+	if !utf8.ValidString(longName) {
+		t.Error("a capped author name was cut mid-rune")
 	}
 
 	sources, err := db.FieldSourcesForBook(ctx, book.ID)
@@ -114,7 +146,7 @@ func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 
 // The property the caps exist for: what the scanner stored is a value the
 // editor hands back unchanged. Without them, opening the editor on a
-// 10 MB description and pressing Save fails on a value nobody typed.
+// 10 MB description and pressing Save fails on a value nobody typed
 func TestCreateBookCappedValuesAreEditable(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
@@ -136,6 +168,11 @@ func TestCreateBookCappedValuesAreEditable(t *testing.T) {
 		t.Fatalf("FindBookByID = %v, %v", book, err)
 	}
 
+	authors, err := db.ListAuthorsForBook(ctx, book.ID)
+	if err != nil {
+		t.Fatalf("ListAuthorsForBook: %v", err)
+	}
+
 	svc := service.New(db)
 	for _, tt := range []struct {
 		field string
@@ -144,6 +181,10 @@ func TestCreateBookCappedValuesAreEditable(t *testing.T) {
 		{"title", book.Title},
 		{"description", book.Description},
 		{"publisher", book.Publisher},
+		// The editor submits the list as newline-separated lines, which is
+		// the form both caps have to survive together: too many names and
+		// one name too long are separate refusals in normalizeAuthors
+		{"authors", strings.Join(authors, "\n")},
 	} {
 		detail, err := svc.UpdateBookMetadata(ctx, book.ID, service.MetadataUpdate{Field: tt.field, Value: tt.value})
 		if err != nil {
@@ -166,5 +207,13 @@ func TestCreateBookCappedValuesAreEditable(t *testing.T) {
 	}
 	if after.Publisher != book.Publisher {
 		t.Errorf("publisher round-tripped to %d bytes, want the %d it went in as", len(after.Publisher), len(book.Publisher))
+	}
+
+	authorsAfter, err := db.ListAuthorsForBook(ctx, book.ID)
+	if err != nil {
+		t.Fatalf("ListAuthorsForBook after the edits: %v", err)
+	}
+	if !slices.Equal(authorsAfter, authors) {
+		t.Errorf("authors round-tripped to %d names, want the %d they went in as", len(authorsAfter), len(authors))
 	}
 }

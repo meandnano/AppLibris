@@ -4,7 +4,7 @@
 // transcodes content and leaves the declaration saying utf-8. It carries no
 // BOM. Those are the two places such a fixture goes wrong, and the point of
 // committing real cp1251 bytes is that a string transcoded inside the test
-// would not prove encoding/xml ever sees them.
+// would not prove encoding/xml ever sees them
 package fb2
 
 import (
@@ -134,7 +134,7 @@ func TestReadMetadataFullDocument(t *testing.T) {
 // bytes rather than a string transcoded in the test: encoding/xml refuses
 // bytes that are not valid UTF-8 whatever Strict says, so a legacy Russian
 // collection's honestly labelled files parse only if the declaration is
-// honoured.
+// honoured
 func TestReadMetadataDecodesWindows1251(t *testing.T) {
 	got, err := ReadMetadata(filepath.Join("testdata", "cp1251.fb2"))
 	if err != nil {
@@ -158,7 +158,7 @@ func TestReadMetadataDecodesWindows1251(t *testing.T) {
 // that declares windows-1251 now reads its own bytes through the cp1251
 // table and gets mojibake. That is the trade the decision makes — the cost
 // falls on a file that misdescribes itself, and a mojibake title is one
-// edit away from right where a parse failure is a book nobody finds.
+// edit away from right where a parse failure is a book nobody finds
 func TestReadMetadataMislabelledUTF8DegradesToMojibake(t *testing.T) {
 	path := buildTestFB2(t, fmt.Sprintf(testFB2Template, "windows-1251", "Книга", base64.StdEncoding.EncodeToString([]byte("x"))))
 
@@ -188,8 +188,35 @@ func TestReadMetadataZipCapStillAppliesUnderADecoder(t *testing.T) {
 		t.Fatalf("encode the document as cp1251: %v", err)
 	}
 
-	_, err = readMetadata(&cappedReader{r: strings.NewReader(cp1251), remaining: 4096})
+	_, err = readCappedDocument(strings.NewReader(cp1251), 4096)
 	if !errors.Is(err, errDocumentTooLarge) {
+		t.Fatalf("readMetadata error = %v, want errDocumentTooLarge", err)
+	}
+}
+
+// The cap the decoder makes necessary. encoding/xml holds a whole decoded
+// text node, and cp1251 Cyrillic doubles in UTF-8, so a document that fits
+// under the cap as archive bytes can exceed it as the bytes actually held.
+// Capping only the read would hand an untrusted archive twice the budget
+// maxZipDocumentBytes names
+func TestReadMetadataCapsWhatTheDecoderProduces(t *testing.T) {
+	// Cyrillic only, so every byte read becomes two bytes held: sized to
+	// sit under the cap encoded and over it decoded
+	const cap = 4096
+	body := strings.Repeat("я", cap*3/4)
+	doc := `<?xml version="1.0" encoding="windows-1251"?>` +
+		`<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">` +
+		`<description><title-info><book-title>` + body + `</book-title></title-info></description>` +
+		`</FictionBook>`
+	cp1251, err := charmap.Windows1251.NewEncoder().String(doc)
+	if err != nil {
+		t.Fatalf("encode the document as cp1251: %v", err)
+	}
+	if len(cp1251) >= cap {
+		t.Fatalf("fixture is %d encoded bytes, want it under the %d-byte cap so only the decoded cap can fire", len(cp1251), cap)
+	}
+
+	if _, err := readCappedDocument(strings.NewReader(cp1251), cap); !errors.Is(err, errDocumentTooLarge) {
 		t.Fatalf("readMetadata error = %v, want errDocumentTooLarge", err)
 	}
 }
@@ -536,7 +563,7 @@ func TestReadMetadataDocumentCap(t *testing.T) {
 	descriptionEnd := strings.Index(doc, "</description>") + len("</description>")
 
 	t.Run("past the description keeps the text metadata", func(t *testing.T) {
-		got, err := readMetadata(&cappedReader{r: strings.NewReader(doc), remaining: int64(descriptionEnd + 512)})
+		got, err := readCappedDocument(strings.NewReader(doc), int64(descriptionEnd+512))
 		if err != nil {
 			t.Fatalf("readMetadata: %v", err)
 		}
@@ -549,7 +576,7 @@ func TestReadMetadataDocumentCap(t *testing.T) {
 	})
 
 	t.Run("inside the description is an error", func(t *testing.T) {
-		_, err := readMetadata(&cappedReader{r: strings.NewReader(doc), remaining: int64(descriptionEnd - 20)})
+		_, err := readCappedDocument(strings.NewReader(doc), int64(descriptionEnd-20))
 		if !errors.Is(err, errDocumentTooLarge) {
 			t.Fatalf("readMetadata error = %v, want errDocumentTooLarge", err)
 		}

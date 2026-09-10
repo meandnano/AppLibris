@@ -597,10 +597,15 @@ func TestMkdirPermissionErrorNamesBothUIDs(t *testing.T) {
 	if err == nil {
 		t.Fatal("resolveDir under an unwritable parent: want an error, got nil")
 	}
-	for _, want := range []string{"running as uid", "owned by uid", parent} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %q, want it to contain %q", err, want)
-		}
+	if !strings.Contains(err.Error(), "running as uid") {
+		t.Errorf("error = %q, want the uid the process runs as named", err)
+	}
+	// The nearest *existing* ancestor, not the directory MkdirAll could not
+	// make — naming the target would report the ownership of something that
+	// is not there. Asserting on the bare path would pass either way, since
+	// the target contains the parent as a prefix
+	if want := parent + " is owned by uid"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
 	}
 }
 

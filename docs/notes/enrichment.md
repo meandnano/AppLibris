@@ -174,9 +174,9 @@ edit, and it never passes through that function, so this is the only thing
 bounding what a remote source can store.
 
 The limits are `internal/storage`'s `Max*` constants — one definition,
-below all three writers of those columns: a person's edit here, a
-provider's answer here, and what a file had embedded in it in
-`internal/scanner`. None of them restates a number, because a value one
+below all three writers of those columns: a person's edit in
+`internal/service`, a provider's answer here, and what a file had embedded
+in it in `internal/scanner`. None of them restates a number, because a value one
 writer stores but another's validation would reject is a field the app can
 no longer edit: opening the editor and pressing Save unchanged then fails
 on a value nobody typed. Author names are sanitised one at a time and

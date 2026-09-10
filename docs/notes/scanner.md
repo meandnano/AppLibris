@@ -114,7 +114,10 @@ neither side of the mismatch it reports, and both are needed to fix it —
 the image runs as uid 65532 while a NAS bind mount is owned by the share's
 user, an Unraid one by `nobody`, and a fresh named volume by root. The
 owner comes from the platform's stat struct, so `ownerUID` is build-tagged
-and reports nothing off unix.
+`unix` — not `linux`, though the image is: `syscall.Stat_t` carries `Uid` on
+every unix, and the test asserting the message runs on the development
+machine and on non-Linux CI runners, where a narrower tag would take the
+fallback and fail — and reports nothing elsewhere.
 
 `LIBRARY_DIR` is the resolution that matters most:
 `filepath.WalkDir` `Lstat`s its root and never follows a link, so a

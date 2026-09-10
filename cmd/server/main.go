@@ -384,7 +384,7 @@ func resolveDir(label, dir string) (string, error) {
 //
 // filepath.EvalSymlinks refuses a path that is not there anyway; the stat
 // is here so the message names the variable to fix rather than an
-// ENOENT from a resolver.
+// ENOENT from a resolver
 func requireExistingDir(label, envVar, dir string) (string, error) {
 	if err := danglingLink(label, dir); err != nil {
 		return "", err
@@ -429,7 +429,7 @@ func evalSymlinks(label, dir string) (string, error) {
 // "mkdir /data/covers: permission denied" into an instruction.
 //
 // The owner named is the nearest existing ancestor's, since the target
-// directory is precisely what MkdirAll could not make.
+// directory is precisely what MkdirAll could not make
 func mkdirError(label, dir string, err error) error {
 	wrapped := fmt.Errorf("create %s %s: %w", label, dir, err)
 	if !errors.Is(err, fs.ErrPermission) {

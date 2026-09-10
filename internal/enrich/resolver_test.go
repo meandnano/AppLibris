@@ -485,11 +485,17 @@ func TestResolveSanitizesProviderValues(t *testing.T) {
 
 // Truncation must not leave a half-written rune behind: the column is text,
 // and invalid UTF-8 in it renders as a replacement character forever.
+//
+// The filler has to straddle the limit for this to test anything. Every
+// Max* is even, so a two-byte rune is cut on a boundary by arithmetic alone
+// and the cap could stop trimming with the assertion still green;
+// three-byte runes behind a two-byte lead-in do not divide any of them
 func TestSanitizeValueTruncatesOnARuneBoundary(t *testing.T) {
-	value := strings.Repeat("é", storage.MaxScalarBytes)
+	value := "aa" + strings.Repeat("€", storage.MaxScalarBytes)
 	got := sanitizeValue(storage.FieldPublisher, value)
-	if len(got) > storage.MaxScalarBytes {
-		t.Errorf("length = %d, want at most %d", len(got), storage.MaxScalarBytes)
+	if len(got) != storage.MaxScalarBytes-2 {
+		t.Errorf("length = %d, want %d — the last whole rune before the %d-byte limit",
+			len(got), storage.MaxScalarBytes-2, storage.MaxScalarBytes)
 	}
 	if !utf8.ValidString(got) {
 		t.Error("truncated value is not valid UTF-8")

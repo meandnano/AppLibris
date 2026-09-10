@@ -860,7 +860,7 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 // Truncated, never rejected. A book whose description is too long is still
 // a book, and a filename title beside a dropped one is worse than prose cut
 // at 64 KiB. A cut field is still `embedded` in field_sources too:
-// provenance says where a value came from, not whether it arrived whole.
+// provenance says where a value came from, not whether it arrived whole
 func capMetadata(path string, m bookMeta) bookMeta {
 	m.Title = capValue(path, storage.FieldTitle, m.Title, storage.MaxTitleBytes)
 	m.Language = capValue(path, storage.FieldLanguage, m.Language, storage.MaxScalarBytes)
@@ -884,7 +884,7 @@ func capMetadata(path string, m bookMeta) bookMeta {
 // internal/enrich's sanitizeValue does, and trims what the cut exposed so
 // the stored value is one internal/service's normalizeField hands back
 // unchanged. Info rather than Warn: a verbose file is worth knowing about
-// and is not an error.
+// and is not an error
 func capValue(path string, field storage.MetadataField, value string, limit int) string {
 	if len(value) <= limit {
 		return value

@@ -99,7 +99,7 @@ func missingFields(book storage.Book, authors []string, sources map[storage.Meta
 // remote source can store. The caps come from internal/storage, which sits
 // below every writer of those columns: a number restated here could drift
 // from the one an edit is checked against, and a value this package writes
-// but normalizeField would reject is a field the app can no longer edit.
+// but normalizeField would reject is a field the app can no longer edit
 func sanitizeValue(field storage.MetadataField, value string) string {
 	if field != storage.FieldDescription {
 		value = strings.Join(strings.Fields(value), " ")

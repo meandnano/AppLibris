@@ -10,7 +10,7 @@ import (
 // ownerUID reports the uid owning path. It is separated by build tag
 // because the owner lives in the platform's stat struct rather than in
 // fs.FileInfo, and only mkdirError reads it — one message, on the platform
-// where the mount whose ownership is the question actually exists.
+// where the mount whose ownership is the question actually exists
 func ownerUID(path string) (int, bool) {
 	info, err := os.Stat(path)
 	if err != nil {

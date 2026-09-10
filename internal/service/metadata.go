@@ -69,7 +69,7 @@ func (s *Service) UpdateBookMetadata(ctx context.Context, bookID int64, update M
 // MaxDescriptionBytes is storage.MaxDescriptionBytes under the name
 // internal/web sizes its request-body cap from — the encoded body is a
 // multiple of the decoded value, so the two limits have to be derived from
-// one number to stay consistent.
+// one number to stay consistent
 const MaxDescriptionBytes = storage.MaxDescriptionBytes
 
 // MaxMetadataValueBytes is the largest single submitted value any field
