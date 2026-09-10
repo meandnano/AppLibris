@@ -83,7 +83,13 @@ func bookFormat(suffix string) string {
 // logged and counted rather than aborting the sweep — and so is a
 // directory WalkDir can't read: its subtree is skipped, not the rest of
 // the library. Only a failure on libraryDir itself (missing, unmounted) is
-// fatal, since that must not look like an empty library. ctx cancellation
+// fatal, since that must not look like an empty library. A symlinked
+// subdirectory is not followed either, and is logged and counted the same
+// way — see the walk callback for why following one was rejected; a
+// symlinked *file* is indexed as any other, since every read of it goes
+// through the link.
+//
+// ctx cancellation
 // is checked before the walk starts and on every entry the walk visits;
 // either stops Scan immediately and returns ctx.Err() (wrapped), visiting
 // no further entries and skipping reconciliation entirely — a cancelled
@@ -130,6 +136,24 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 			}
 			return err
 		}
+		// WalkDir never follows a link, so a symlinked directory arrives
+		// here as a non-directory entry whose name has no supported
+		// suffix and would be dropped by the check below without a word.
+		// Following it is the alternative that was rejected: it needs a
+		// (dev, ino) cycle guard, and a link pointing outside the library
+		// indexes files whose relative file_path cannot express where they
+		// are. So it stays unfollowed, but says so — counted as an error
+		// so the sweep summary carries it, and repeated every sweep as
+		// pressure toward a bind mount instead.
+		if d.Type()&fs.ModeSymlink != 0 && resolvesToDir(walkPath) {
+			attrs := []any{"path", walkPath}
+			if target, linkErr := os.Readlink(walkPath); linkErr == nil {
+				attrs = append(attrs, "target", target)
+			}
+			slog.Warn("symlinked directory is not followed", attrs...)
+			result.Errors++
+			return nil
+		}
 		if d.IsDir() || matchedSuffix(d.Name()) == "" {
 			return nil
 		}
@@ -151,6 +175,15 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 	reconcileMissing(ctx, db, libraryDir, skippedDirs, seen, missingGrace, &result)
 
 	return result, nil
+}
+
+// resolvesToDir reports whether path, followed through any links, is a
+// directory. A link that resolves to nothing gets a false here and takes
+// the ordinary route: a supported suffix makes it a per-file error, and
+// anything else is ignored as before.
+func resolvesToDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // relSlash returns path relative to libraryDir, slash-separated — the form

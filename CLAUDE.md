@@ -1266,7 +1266,25 @@ full design.
   of which — how a book is packaged on disk isn't something the format
   badge in the UI should surface. Supported files are matched on filename
   *suffix* rather than `filepath.Ext`, since a `.fb2.zip` archive is two
-  extensions and `Ext` would only ever see the last one. For known content,
+  extensions and `Ext` would only ever see the last one. A **symlinked
+  subdirectory is not followed**, and — the half that changed — says so:
+  `filepath.WalkDir` never follows a link, so such an entry arrives as a
+  non-directory whose name has no supported suffix and the ordinary filter
+  would drop it in silence. It is logged at Warn (naming the link and its
+  target) and counted in `Result.Errors`, once per sweep, so the summary
+  line carries it and the fifteen-minute repeat is pressure toward a bind
+  mount. Following one was rejected rather than deferred: it needs a
+  `(dev, ino)` cycle guard — the very inode tracking the mover paragraph
+  below argues against — and a link pointing outside the library indexes
+  files whose relative `file_path` cannot express where they are. A
+  symlinked *file* is indexed as any other, since the stat, the open and
+  the hash all go through the link, and a **dangling** link is neither: it
+  resolves to no directory, so it takes the ordinary route and is a
+  per-file error only if its name carries a supported suffix. The root
+  itself is caught by the same branch — a symlinked `LIBRARY_DIR` walks as
+  one entry and finds nothing — but `cmd/server` resolves it away before
+  the scanner ever sees it, so that Warn is a backstop for an embedded
+  caller rather than the fix. For known content,
   a sweep re-extracts a recorded cover whose file is missing or zero bytes
   and refreshes its stored path, making `COVERS_DIR` disposable — but a
   cover a *provider* supplied has no original in the book to rebuild from,
@@ -2173,7 +2191,29 @@ full design.
 - `cmd/server` — entrypoint. `main` sets up logging and a
   `signal.NotifyContext` (SIGINT/SIGTERM) and calls `run(ctx) error`, so
   every failure path has one exit point (`slog.Error` + `os.Exit(1)`).
-  `run` opens the database (`DB_PATH` env var, default `./data/library.db`)
+  `run` resolves each configured path — `LIBRARY_DIR`, `COVERS_DIR`,
+  `DB_PATH`'s directory — through `resolveDir`, which creates it if absent
+  and then `filepath.EvalSymlinks` it, so every consumer downstream (the
+  walk, the watcher, both queue workers) is handed one root that means the
+  same thing whether or not links are followed. `LIBRARY_DIR` is the one
+  that has to be resolved here: `filepath.WalkDir` `Lstat`s its root and
+  never follows a link, so `~/Books -> /volume1/books` — the ordinary NAS
+  shape — was visited once as a non-directory entry, ending the walk with
+  zero books, one "library appeared empty" Warn and no error at all.
+  Relative `file_path` storage is unaffected, since every stored path is
+  made relative to whatever root the scanner is given. A **dangling** link
+  is a startup error naming both the link and its target, and that check
+  runs *before* `MkdirAll` rather than after: `MkdirAll` fails on one too
+  (`Stat` follows the link and finds nothing, `Mkdir` then fails `EEXIST`
+  on the link itself), but its message names only the link it could not
+  replace and never the target that is missing, which is the whole
+  question when a volume did not mount. `DB_PATH` is neither walked nor
+  itself resolvable before the first run — `EvalSymlinks` needs every
+  element of a path to exist and the database file does not yet — so only
+  its directory is resolved and the base name rejoined; the point there is
+  just that the `listening` line names the file the process actually
+  opened, alongside the resolved library and covers directories. `run`
+  then opens the database (`DB_PATH` env var, default `./data/library.db`)
   and starts serving immediately — `/healthz` and `internal/web`'s routes
   at `/`, on `ADDR` (default `:8080`), with `ReadHeaderTimeout`,
   `ReadTimeout`, `WriteTimeout` and `IdleTimeout` all set — rather than

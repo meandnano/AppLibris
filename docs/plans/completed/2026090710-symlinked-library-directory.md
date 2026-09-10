@@ -48,6 +48,38 @@ empty library, which is worse.
 neither is walked; a symlinked covers directory works today because
 `os.CreateTemp` and `os.Rename` follow links.
 
+**Correction found while implementing this, recorded here because the
+instruction above is wrong as written in two places.**
+
+*One call, after `MkdirAll`* does not produce the dangling-link error this
+decision asks for, because `MkdirAll` fails first and describes the wrong
+thing: `os.Stat` follows the link and reports the target absent, so
+`MkdirAll` goes on to `os.Mkdir` the path itself, which fails `EEXIST` on
+the link. The message is `mkdir ./library: file exists` — it names the link
+it could not replace and never the target that is missing, which is the
+whole question when a volume did not mount, and `EvalSymlinks` is never
+reached to say otherwise. So the dangling case is checked *before*
+`MkdirAll`, with `os.Readlink` plus `os.Stat`: a path that is a link and
+does not stat is the startup error naming both. `EvalSymlinks` still runs
+after `MkdirAll` for the ordinary case.
+
+*`DB_PATH` gets the same treatment* cannot be a plain `EvalSymlinks` either:
+that call needs every element of the path to exist, and the database file
+does not on a first run — every fresh deployment would fail at startup. Only
+`filepath.Dir(dbPath)` is resolved (through the same `resolveDir`, which
+also creates it, as `storage.Open` would), and the base name is rejoined.
+The value is cosmetic in the way the decision already says — the
+`listening` line names the file actually opened — so resolving the final
+element once it exists buys nothing worth a second code path.
+
+One consequence not anticipated above, kept rather than suppressed:
+Decision 2's branch fires on the walk *root* too, since `WalkDir` hands the
+root to the callback as an ordinary symlink entry. A symlinked
+`LIBRARY_DIR` reaching `Scan` unresolved therefore now warns and counts an
+error instead of reading as an empty library. Decision 1 means production
+never takes that path; it is a backstop for an embedded caller, and a
+scanner test pins it.
+
 ## Decision 2: a symlinked subdirectory is skipped with a Warn, not followed
 
 Following directory symlinks means a cycle guard keyed on `(dev, ino)`,

@@ -2954,3 +2954,157 @@ func TestScanKeepsAPresentProviderCoverWhenEmbeddedCoverIsUndecodable(t *testing
 		t.Errorf("scan log = %q, want the refusal warned about", got)
 	}
 }
+
+// The motivation for cmd/server resolving LIBRARY_DIR before anything sees
+// it: filepath.WalkDir Lstats its root and never follows a link, so a
+// symlinked root is visited once as a non-directory entry and the walk
+// ends. Nothing here is an error, which is what makes it worth pinning —
+// the whole library reads as empty and only the resolution one layer up
+// prevents it. A change that made Scan resolve its own root should delete
+// this test rather than satisfy it.
+func TestScanOfAnUnresolvedSymlinkedRootIndexesNothing(t *testing.T) {
+	target := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(target, "book.epub"), "Book One", "Author A", nil)
+
+	link := filepath.Join(t.TempDir(), "library")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink library root: %v", err)
+	}
+
+	logs := captureLogs(t)
+	result, err := Scan(ctx, db, link, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan through an unresolved symlinked root: %v", err)
+	}
+	if result.Scanned != 0 || result.New != 0 {
+		t.Errorf("scan = %+v, want Scanned=0 New=0 — WalkDir does not follow the root link", result)
+	}
+	// The root arrives at the callback as a symlink entry like any other,
+	// so the unfollowed-directory branch catches it too: still no books,
+	// but no longer in silence
+	if result.Errors != 1 {
+		t.Errorf("Errors = %d, want 1 — the root link itself is reported", result.Errors)
+	}
+	if got := logs.String(); !strings.Contains(got, "symlinked directory is not followed") {
+		t.Errorf("scan log = %q, want the unfollowed root named", got)
+	}
+
+	// and the same root, resolved as cmd/server resolves it, is an
+	// ordinary library
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	result, err = Scan(ctx, db, resolved, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan of the resolved root: %v", err)
+	}
+	if result.Scanned != 1 || result.New != 1 || result.Errors != 0 {
+		t.Errorf("scan of the resolved root = %+v, want Scanned=1 New=1 Errors=0", result)
+	}
+	if book := bookByPath(t, ctx, db, "book.epub"); book.Title != "Book One" {
+		t.Errorf("Title = %q, want %q", book.Title, "Book One")
+	}
+}
+
+// A symlinked subdirectory is not followed — following it needs a cycle
+// guard and would index files whose relative file_path cannot say where
+// they are — but it is not passed over in silence either, which is the
+// half that changed: the entry arrives as a non-directory whose name has
+// no supported suffix, so the ordinary filter would drop it without a
+// word.
+func TestScanDoesNotFollowASymlinkedSubdirectory(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author A", nil)
+
+	outside := t.TempDir()
+	writeTestEPUB(t, filepath.Join(outside, "hidden.epub"), "Hidden Book", "Author B", nil)
+	if err := os.Symlink(outside, filepath.Join(libDir, "more")); err != nil {
+		t.Fatalf("symlink subdirectory: %v", err)
+	}
+
+	logs := captureLogs(t)
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.Scanned != 1 || result.New != 1 {
+		t.Errorf("scan = %+v, want Scanned=1 New=1 (the sibling alone)", result)
+	}
+	if result.Errors != 1 {
+		t.Errorf("Errors = %d, want 1 (the unfollowed symlinked directory)", result.Errors)
+	}
+	if got := logs.String(); !strings.Contains(got, "symlinked directory is not followed") {
+		t.Errorf("scan log = %q, want the unfollowed directory named", got)
+	}
+	if f, err := db.FindFileByPath(ctx, "more/hidden.epub"); err != nil || f != nil {
+		t.Errorf("FindFileByPath more/hidden.epub = %+v, %v; want it absent", f, err)
+	}
+}
+
+// A symlinked *file* is indexed as any other: every read of it — the stat,
+// the open, the hash — goes through the link, so there is nothing about it
+// the index cannot express.
+func TestScanIndexesASymlinkedFile(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	outside := filepath.Join(t.TempDir(), "elsewhere.epub")
+	writeTestEPUB(t, outside, "Linked Book", "Author A", nil)
+	if err := os.Symlink(outside, filepath.Join(libDir, "book.epub")); err != nil {
+		t.Fatalf("symlink book: %v", err)
+	}
+
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.Scanned != 1 || result.New != 1 || result.Errors != 0 {
+		t.Errorf("scan = %+v, want Scanned=1 New=1 Errors=0", result)
+	}
+	if book := bookByPath(t, ctx, db, "book.epub"); book.Title != "Linked Book" {
+		t.Errorf("Title = %q, want %q", book.Title, "Linked Book")
+	}
+}
+
+// A link that resolves to nothing is not a directory, so it takes the
+// ordinary route rather than the new branch: with a supported suffix it is
+// a per-file error exactly as a deleted file would be, and without one it
+// is ignored. Getting this wrong the other way — treating any symlink as a
+// directory — would report a stray dangling link as a library problem.
+func TestScanTreatsADanglingSymlinkAsAFile(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Symlink(gone, filepath.Join(libDir, "book.epub")); err != nil {
+		t.Fatalf("symlink dangling book: %v", err)
+	}
+	if err := os.Symlink(gone, filepath.Join(libDir, "notes")); err != nil {
+		t.Fatalf("symlink dangling other: %v", err)
+	}
+
+	logs := captureLogs(t)
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.Scanned != 1 || result.New != 0 || result.Errors != 1 {
+		t.Errorf("scan = %+v, want Scanned=1 New=0 Errors=1 (the dangling .epub alone)", result)
+	}
+	if got := logs.String(); strings.Contains(got, "symlinked directory is not followed") {
+		t.Errorf("a dangling link was reported as a directory:\n%s", got)
+	}
+}
