@@ -27,14 +27,14 @@ different hash at a known path.
 
 ## Why this is backlog, not a plan
 
-It is a design consequence, recorded in DESIGN.md's identity decision,
+It is a design consequence, recorded in docs/notes/scanner.md's identity decision,
 not a bug in how that decision was implemented. A person who points this
 at a Calibre-managed folder and edits metadata in both places will lose
 one side's edits; a person who treats the library directory as the
 source of truth and edits here will not. The second is what the project
 is designed for. This item exists so the trade is written down where a
 future maintainer looks, and so that it is re-examined if a conversion
-step (DESIGN.md's deferred list) ever writes files into the library
+step (docs/notes/design.md's deferred list) ever writes files into the library
 itself, at which point the project would be rewriting its own books.
 
 ## Re-validate before acting

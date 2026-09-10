@@ -53,7 +53,7 @@ func compose(p enrich.Provider) enrich.Provider {
 // Resolve turns an ordered list of configured provider names into the
 // decorated Provider chain enrich.New expects. An unknown name fails
 // outright, naming it and listing the valid ones, rather than silently
-// running with fewer providers than configured — the difference DESIGN.md
+// running with fewer providers than configured — the difference docs/notes/enrichment.md
 // draws between "I asked for something specific and did not get it" and an
 // unset RESEND_API_KEY, which only warns. An empty names list resolves to
 // an empty, non-nil slice: enrichment disabled, not an error.

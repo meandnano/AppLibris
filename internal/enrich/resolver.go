@@ -31,7 +31,7 @@ var fields = []storage.MetadataField{
 }
 
 // isMissing is the rule the whole enrichment step exists to get right —
-// DESIGN.md's "a cleared field stays manual": a field is worth asking a
+// docs/notes/enrichment.md's "a cleared field stays manual": a field is worth asking a
 // provider for only when it is both empty and not something a person
 // deliberately set (including deliberately clearing). Dropping the
 // emptiness half means re-enrichment overwrites good embedded metadata
@@ -199,7 +199,7 @@ type Resolution struct {
 // providers for them in order, and merges the answers field by field. It
 // takes no database and no clock — everything it needs about the book's
 // current state is passed in — which is what makes ordering and merging
-// testable without a real provider, per DESIGN.md.
+// testable without a real provider, per docs/notes/enrichment.md.
 //
 // If nothing is missing, no provider is called at all. Otherwise providers
 // are asked in the given order. Each is asked by ISBN when book has one and
@@ -227,7 +227,7 @@ type Resolution struct {
 //     so moving it re-opens the write as well as the wasted call.
 //
 // Once nothing is left missing, the loop stops without calling the
-// remaining providers — DESIGN.md's "the chain stops early and saves the
+// remaining providers — docs/notes/enrichment.md's "the chain stops early and saves the
 // API calls" — which is why a two-provider test where the first answers
 // everything must show the second is never called.
 //

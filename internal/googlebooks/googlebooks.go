@@ -1,5 +1,5 @@
 // Package googlebooks is an enrich.Provider backed by the Google Books
-// Volumes API (https://www.googleapis.com/books/v1/volumes), per DESIGN.md's
+// Volumes API (https://www.googleapis.com/books/v1/volumes), per docs/notes/enrichment.md's
 // provider choices for the metadata chain. An API key is nominally
 // optional, but in practice required: unauthenticated requests are billed
 // to one Google-wide project whose daily quota was found already exhausted
@@ -326,7 +326,7 @@ func (l imageLinks) best() string {
 
 // search issues a GET against /volumes with q and turns the response into
 // Metadata — plus, for a matched volume, the second request enrichVolume
-// makes. It implements the four network cases DESIGN.md draws a hard line
+// makes. It implements the four network cases docs/notes/enrichment.md draws a hard line
 // around: a 200 with no items and a defensive 404 are both "no match", nil
 // error; a 429, any 5xx, or a transport/timeout failure are errors the retry
 // decorator (internal/enrich) and the resolver's skip-and-continue both

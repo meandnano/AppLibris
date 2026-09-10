@@ -1,6 +1,6 @@
 // Package epub reads metadata embedded in an EPUB's OPF package —
 // the title, authors, language, ISBN, and description most books already
-// carry, per DESIGN.md's metadata source order.
+// carry, per docs/notes/enrichment.md's metadata source order.
 package epub
 
 import (

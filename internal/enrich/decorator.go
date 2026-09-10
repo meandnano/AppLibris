@@ -100,7 +100,7 @@ const DefaultCacheSize = 512
 // a bounded in-memory cache instead of calling p again. A "no match"
 // answer is cached too: without that, a shelf of obscure books the
 // library re-enriches on every sweep would re-ask a provider for the same
-// negative answer forever. An error is never cached — DESIGN.md's
+// negative answer forever. An error is never cached — docs/notes/enrichment.md's
 // four-case contract treats an error as a transient, retryable condition,
 // not an answer worth remembering.
 //
@@ -222,7 +222,7 @@ const (
 )
 
 // WithRetry retries p's call when it fails with an error wrapping
-// ErrRetryable — the 429/5xx/transport case DESIGN.md's four-case contract
+// ErrRetryable — the 429/5xx/transport case docs/notes/enrichment.md's four-case contract
 // draws a hard line around — up to attempts total tries, with a backoff
 // and a ctx check between them. Any other error is returned on the first
 // attempt: a 400, a rejected API key or a malformed body will fail the

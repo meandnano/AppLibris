@@ -1,5 +1,5 @@
 // Package scanner walks the library directory and keeps the storage index
-// in sync with it, per DESIGN.md's scanner and metadata-source rules.
+// in sync with it, per docs/notes/scanner.md's scanner and metadata-source rules.
 package scanner
 
 import (

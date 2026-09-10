@@ -1,6 +1,6 @@
 // Package storage is the SQLite-backed persistence layer. It owns the
 // database file, schema migrations, and the read/write connection split
-// described in DESIGN.md.
+// described in docs/notes/storage.md.
 package storage
 
 import (

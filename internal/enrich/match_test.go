@@ -23,7 +23,7 @@ func TestTitlesMatch(t *testing.T) {
 		{"article a dropped", "Wizard of Earthsea", "A Wizard of Earthsea", true},
 		{"article an dropped", "Wrinkle in Time", "An Wrinkle in Time", true},
 
-		// The Russian "Series. Title" convention, which DESIGN.md names as
+		// The Russian "Series. Title" convention, which docs/notes/enrichment.md names as
 		// the population the title search exists for. Without the period the
 		// colon form matched and this one did not.
 		{"russian series convention", "Властелин колец", "Властелин колец. Братство кольца", true},

@@ -190,8 +190,8 @@ func run(ctx context.Context) error {
 		Handler: mux,
 		// ReadHeaderTimeout guards a client that opens a connection and
 		// never sends a request line. WriteTimeout is sized with
-		// send-to-Kindle in mind: DESIGN.md makes sends a queued
-		// background job precisely so a handler never holds a request
+		// send-to-Kindle in mind: a send is a queued background job
+		// (docs/notes/sending.md) precisely so a handler never holds a request
 		// open reading a multi-megabyte book off disk — the worker does
 		// that instead — so 60s here is headroom, not a design constraint.
 		ReadHeaderTimeout: 10 * time.Second,
@@ -453,9 +453,9 @@ func waitForBackground(cancel context.CancelFunc, done <-chan struct{}, deadline
 
 // periodicScan sweeps on a timer and whenever the watcher pokes trigger.
 // Both wake-ups run the same sweep on the same goroutine, so the watcher
-// changes when a sweep happens and never what one does — DESIGN.md's "two
-// entry points sharing one code path", with the ticker as the safety net
-// that runs whether or not any event ever arrives.
+// changes when a sweep happens and never what one does (docs/notes/scanner.md),
+// with the ticker as the safety net that runs whether or not any event ever
+// arrives.
 func periodicScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, interval, missingGrace time.Duration, trigger <-chan struct{}, watcher *scanner.Watcher) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

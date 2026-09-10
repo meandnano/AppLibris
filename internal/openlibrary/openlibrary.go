@@ -1,5 +1,5 @@
 // Package openlibrary is an enrich.Provider backed by Open Library's public
-// APIs — no API key, no registration, per DESIGN.md's provider choices for
+// APIs — no API key, no registration, per docs/notes/enrichment.md's provider choices for
 // the metadata chain.
 //
 // It reads two different endpoints, because Open Library models a *work*
@@ -339,7 +339,7 @@ func (c *Client) editionMetadata(record readAPIRecord) enrich.Metadata {
 }
 
 // get issues one GET and returns its body, implementing the four network
-// cases DESIGN.md draws a hard line around: a 404 is "no match" — a nil
+// cases docs/notes/enrichment.md draws a hard line around: a 404 is "no match" — a nil
 // body and a nil error, the ordinary answer for a book neither endpoint
 // knows; a 429, any 5xx, or a transport/timeout failure are errors the
 // retry decorator (internal/enrich) and the resolver's skip-and-continue

@@ -9,7 +9,7 @@
 // internal/openlibrary and internal/googlebooks are the two real
 // implementations; a nil or empty provider list stays valid, since that is
 // what METADATA_PROVIDERS= configures. The package is buildable and fully
-// testable without any of them, per DESIGN.md's "resolver logic is kept
+// testable without any of them, per docs/notes/enrichment.md's "resolver logic is kept
 // separate from the providers so ordering and merging are testable without
 // any real provider" — see resolver_test.go's fakes.
 package enrich
@@ -20,7 +20,7 @@ import (
 )
 
 // ErrRetryable marks the subset of provider failures worth another try —
-// DESIGN.md's 429/5xx/transport case. A provider wraps it around those and
+// docs/notes/enrichment.md's 429/5xx/transport case. A provider wraps it around those and
 // only those; WithRetry retries on errors.Is(err, ErrRetryable) and gives
 // up immediately on anything else, so a 400, a bad API key, or a malformed
 // body costs one request rather than three. A "no match" never reaches
