@@ -45,17 +45,18 @@ is no JavaScript build step, and every page still works with JavaScript off.
 
 ## Running it
 
-Build the image from the repository and run it with two mounts:
+Every release publishes a linux/amd64 and linux/arm64 image to
+`ghcr.io/meandnano/applibris`, tagged by version. Nothing floats, so name the
+version you want and run it with two mounts:
 
 ```sh
-docker build -t library .
 docker run -d \
   -p 127.0.0.1:8080:8080 \
   -v /path/to/books:/library \
   -v /path/to/data:/data \
   -e RESEND_API_KEY=re_... \
   -e RESEND_FROM=library@yourdomain.example \
-  library
+  ghcr.io/meandnano/applibris:0.1.0
 ```
 
 `/library` holds your books, `/data` holds the database and the cover
@@ -63,8 +64,10 @@ thumbnails. The container runs as uid 65532 and needs write access to both.
 The covers directory is disposable: delete it and the next scan rebuilds
 what it can and forgets the rest.
 
-Without Docker, `make run` starts the server against `./library` and
-`./data`.
+To run a revision that has no release, build the image from the repository
+with `docker build -t applibris .` and use `applibris` in place of the
+`ghcr.io` reference. Without Docker, `make run` starts the server against
+`./library` and `./data`.
 
 ### Put HTTPS in front of it
 

@@ -296,6 +296,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
   otherwise at the top of its test file.
 - `go test ./...` must pass; CI also runs `go vet` with `-race` and builds
   the image.
+- A `v*` tag publishes: `.github/workflows/publish.yaml` runs the tests, builds
+  `linux/amd64` and `linux/arm64` on a runner each, pushes both to
+  `ghcr.io/meandnano/applibris` by digest, joins them into one manifest list
+  tagged with the version, and creates the GitHub release from the commits
+  since the previous tag.
 
 ## Documentation
 
