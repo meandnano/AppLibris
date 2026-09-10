@@ -83,12 +83,16 @@ func bookFormat(suffix string) string {
 // logged and counted rather than aborting the sweep — and so is a
 // directory WalkDir can't read: its subtree is skipped, not the rest of
 // the library. Only a failure on libraryDir itself (missing, unmounted) is
-// fatal, since that must not look like an empty library. ctx cancellation
-// is checked before the walk starts and on every entry the walk visits;
-// either stops Scan immediately and returns ctx.Err() (wrapped), visiting
-// no further entries and skipping reconciliation entirely — a cancelled
-// sweep must never be read as "here is what the library currently looks
-// like."
+// fatal, since that must not look like an empty library. A symlinked
+// subdirectory is not followed either, and nor is one whose target cannot
+// be stat'd at all; both are logged and counted the same way — see the
+// walk callback for why following one was rejected. A symlinked *file* is
+// indexed as any other, since every read of it goes through the link.
+// ctx cancellation is checked before the walk starts and on every entry
+// the walk visits; either stops Scan immediately and returns ctx.Err()
+// (wrapped), visiting no further entries and skipping reconciliation
+// entirely — a cancelled sweep must never be read as "here is what the
+// library currently looks like."
 //
 // After a clean walk, Scan reconciles book_files rows that weren't seen:
 // under a subtree that was itself walked cleanly, a row not seen this
@@ -129,6 +133,40 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 				return fs.SkipDir
 			}
 			return err
+		}
+		// WalkDir never follows a link, so a symlinked directory arrives
+		// here as a non-directory entry whose name has no supported
+		// suffix and the filter below would drop it without a word.
+		// Following it is the alternative that was rejected: it needs a
+		// (dev, ino) cycle guard, and a link pointing outside the library
+		// indexes files whose relative file_path cannot express where they
+		// are. So it stays unfollowed and says so — counted as an error so
+		// the sweep summary carries it, and repeated every sweep as
+		// pressure toward a bind mount instead
+		if d.Type()&fs.ModeSymlink != 0 {
+			info, statErr := os.Stat(walkPath)
+			switch {
+			case statErr == nil && info.IsDir():
+				attrs := []any{"path", walkPath}
+				if target, linkErr := os.Readlink(walkPath); linkErr == nil {
+					attrs = append(attrs, "target", target)
+				}
+				slog.Warn("symlinked directory is not followed", attrs...)
+				result.Errors++
+				return nil
+			case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
+				// A cycle (ELOOP), a target that may not be stat'd
+				// (EACCES): the link says nothing about whether books sit
+				// behind it, and an unknown is not evidence — the posture
+				// missing-file reconciliation takes toward a
+				// non-ErrNotExist Lstat. Reported rather than guessed at,
+				// where falling through would drop it on the strength of
+				// its name alone
+				slog.Warn("could not resolve symlink", "path", walkPath, "error", statErr)
+				result.Errors++
+				return nil
+			}
+			// resolving to nothing or to a file takes the ordinary route
 		}
 		if d.IsDir() || matchedSuffix(d.Name()) == "" {
 			return nil

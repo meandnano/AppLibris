@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -270,5 +271,222 @@ func TestFetchMetadataGuardMapsTheSettingToTheRightWrapper(t *testing.T) {
 				t.Errorf("next called = %v, want %v", called, tc.wantNext)
 			}
 		})
+	}
+}
+
+// Every consumer of a configured directory — the walk, the watcher, the
+// sender worker — has to be handed the same root, and filepath.WalkDir is
+// the one that cannot resolve it for itself. A link resolving nowhere is
+// the reason this is a function rather than a bare EvalSymlinks call:
+// os.MkdirAll fails on one too, but names only the link it could not
+// replace, never the target that is missing
+func TestResolveDir(t *testing.T) {
+	t.Run("a symlink resolves to its target", func(t *testing.T) {
+		target := t.TempDir()
+		link := filepath.Join(t.TempDir(), "library")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+
+		got, err := resolveDir("library directory", link)
+		if err != nil {
+			t.Fatalf("resolveDir: %v", err)
+		}
+		// the target itself may sit behind a link (macOS /var), so the
+		// comparison is against its own resolution rather than the raw path
+		want, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("resolveDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("an absent directory is created", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "data", "covers")
+
+		got, err := resolveDir("covers directory", dir)
+		if err != nil {
+			t.Fatalf("resolveDir: %v", err)
+		}
+		if info, err := os.Stat(got); err != nil || !info.IsDir() {
+			t.Fatalf("Stat %q = %v, %v; want a directory", got, info, err)
+		}
+	})
+
+	t.Run("a dangling symlink names the link and its target", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "volume1", "books")
+		link := filepath.Join(t.TempDir(), "library")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+
+		_, err := resolveDir("library directory", link)
+		if err == nil {
+			t.Fatal("resolveDir on a dangling link: want an error, got nil")
+		}
+		if !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), target) {
+			t.Errorf("error = %q, want both the link %q and its target %q named", err, link, target)
+		}
+	})
+
+	// The same failure one level up, and the ordinary NAS shape: it is the
+	// mount point that is a link, not the directory configured under it.
+	// Checking the final element alone leaves this case to MkdirAll, whose
+	// message names neither the link nor what it points at
+	t.Run("a dangling symlink at an ancestor names that link", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "volume1")
+		nas := filepath.Join(t.TempDir(), "nas")
+		if err := os.Symlink(target, nas); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		configured := filepath.Join(nas, "books")
+
+		_, err := resolveDir("library directory", configured)
+		if err == nil {
+			t.Fatal("resolveDir under a dangling ancestor: want an error, got nil")
+		}
+		if !strings.Contains(err.Error(), nas) || !strings.Contains(err.Error(), target) {
+			t.Errorf("error = %q, want the ancestor link %q and its target %q named", err, nas, target)
+		}
+	})
+
+	// os.Readlink hands back the text of the link, so a relative one names
+	// nothing the reader can go and look at
+	t.Run("a relative target is named as a path", func(t *testing.T) {
+		dir := t.TempDir()
+		link := filepath.Join(dir, "library")
+		if err := os.Symlink("../books", link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+
+		_, err := resolveDir("library directory", link)
+		if err == nil {
+			t.Fatal("resolveDir on a relative dangling link: want an error, got nil")
+		}
+		want := filepath.Join(filepath.Dir(dir), "books")
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want the target resolved to %q", err, want)
+		}
+	})
+}
+
+// The end-to-end shape the resolution exists for, and the one a unit test
+// of resolveDir alone cannot catch: a resolved value that is computed and
+// then not passed on leaves the scanner walking the link, which finds
+// nothing behind it
+func TestRunIndexesALibraryBehindASymlink(t *testing.T) {
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "book.fb2"), []byte("book content"), 0o644); err != nil {
+		t.Fatalf("write book: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "library")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink library: %v", err)
+	}
+
+	addr := freeAddr(t)
+	dbPath := filepath.Join(t.TempDir(), "library.db")
+	t.Setenv("ADDR", addr)
+	t.Setenv("DB_PATH", dbPath)
+	t.Setenv("LIBRARY_DIR", link)
+	t.Setenv("COVERS_DIR", t.TempDir())
+	t.Setenv("WATCH_ENABLED", "false")
+	t.Setenv("METADATA_PROVIDERS", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("run: %v", err)
+		}
+	}()
+
+	// /healthz answering is the signal that run has opened the database
+	// and applied its migrations. The test must not open it before that:
+	// storage.Open applies migrations too, and two handles doing so at
+	// once fail each other — a race the test would own rather than
+	// observe
+	waitFor(t, done, "the server to answer /healthz", func() bool {
+		resp, err := http.Get("http://" + addr + "/healthz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	defer db.Close()
+
+	waitFor(t, done, "the first sweep to index the book behind the link", func() bool {
+		n, err := db.CountBooks(ctx)
+		return err == nil && n == 1
+	})
+}
+
+// freeAddr returns a loopback address nothing is listening on. run needs a
+// fixed one — with :0 the chosen port is only ever named in a log line the
+// test cannot read, since run installs its own logger
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatalf("release the reserved port: %v", err)
+	}
+	return addr
+}
+
+// waitFor polls until ready reports true, failing the test if run returns
+// first (its error is the useful one) or if the wait runs out
+func waitFor(t *testing.T, done <-chan error, what string, ready func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !ready() {
+		select {
+		case err := <-done:
+			t.Fatalf("run returned while waiting for %s: %v", what, err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after 10s waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A LIBRARY_DIR that resolves nowhere is a mount that did not come up.
+// Startup is where that has to be said: reaching the scanner, it is one
+// unfollowable entry and an empty library, which the sweep can report but
+// cannot refuse to run on
+func TestRunRejectsADanglingLibraryDir(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "volume1", "books")
+	link := filepath.Join(t.TempDir(), "library")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink library: %v", err)
+	}
+
+	t.Setenv("ADDR", "127.0.0.1:0")
+	t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "library.db"))
+	t.Setenv("LIBRARY_DIR", link)
+	t.Setenv("COVERS_DIR", t.TempDir())
+	t.Setenv("METADATA_PROVIDERS", "")
+
+	err := run(context.Background())
+	if err == nil {
+		t.Fatal("run with a dangling LIBRARY_DIR: want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), target) {
+		t.Errorf("error = %q, want both the configured link %q and its target %q named", err, link, target)
 	}
 }

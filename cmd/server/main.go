@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"syscall"
@@ -96,12 +97,33 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("resolve METADATA_PROVIDERS: %w", err)
 	}
 
-	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
-		return fmt.Errorf("create library directory: %w", err)
+	// filepath.WalkDir Lstats its root and never follows a link, so a
+	// symlinked LIBRARY_DIR — ~/Books -> /volume1/books, the ordinary NAS
+	// shape — is visited once as a non-directory entry and the walk ends:
+	// zero books, one "library appeared empty" Warn, no error at all. The
+	// resolution lives here rather than in the scanner because every
+	// consumer has to agree on one root: the walk, the watcher, and the
+	// sender worker resolving a book's file. Relative file_path storage is
+	// unaffected, since every stored path is made relative to whatever
+	// root the scanner is handed
+	libraryDir, err = resolveDir("library directory", libraryDir)
+	if err != nil {
+		return err
 	}
-	if err := os.MkdirAll(coversDir, 0o755); err != nil {
-		return fmt.Errorf("create covers directory: %w", err)
+	coversDir, err = resolveDir("covers directory", coversDir)
+	if err != nil {
+		return err
 	}
+	// DB_PATH is never walked; it is resolved so the listening line names
+	// the file the process actually opened. Only the directory can be
+	// resolved before storage.Open, since on a first run the database file
+	// itself does not exist yet — filepath.EvalSymlinks needs every
+	// element of a path to be there
+	dbDir, err := resolveDir("database directory", filepath.Dir(dbPath))
+	if err != nil {
+		return err
+	}
+	dbPath = filepath.Join(dbDir, filepath.Base(dbPath))
 
 	db, err := storage.Open(dbPath)
 	if err != nil {
@@ -180,7 +202,10 @@ func run(ctx context.Context) error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("listening", "addr", addr, "db_path", dbPath)
+		// The three paths are the resolved ones, which is the point of
+		// logging them: a symlinked LIBRARY_DIR is exactly the configuration
+		// whose effective root nothing else on the box makes visible
+		slog.Info("listening", "addr", addr, "db_path", dbPath, "library_dir", libraryDir, "covers_dir", coversDir)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 			return
@@ -323,6 +348,77 @@ func run(ctx context.Context) error {
 	waitForBackground(cancelScan, enrichDone, shutdownCtx.Done(), "enrichment")
 
 	return db.Close()
+}
+
+// resolveDir creates dir if it is absent and returns it with every symlink
+// along it resolved, so that nothing downstream is handed a path whose
+// meaning depends on whether links are followed.
+//
+// A link that resolves nowhere is reported before MkdirAll rather than
+// after: MkdirAll fails on one too (Stat follows the link and finds
+// nothing, Mkdir then fails EEXIST on the link itself), but its message
+// names the link it could not replace and never the target that is
+// missing — which is the whole question when ~/Books points at a volume
+// that did not mount
+func resolveDir(label, dir string) (string, error) {
+	if link, target, ok := brokenLink(dir); ok {
+		if link == dir {
+			return "", fmt.Errorf("%s %s is a symlink to %s, which is not there", label, dir, target)
+		}
+		return "", fmt.Errorf("%s %s: %s is a symlink to %s, which is not there", label, dir, link, target)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create %s %s: %w", label, dir, err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s %s: %w", label, dir, err)
+	}
+	return resolved, nil
+}
+
+// brokenLink returns the first component of path that is a symlink whose
+// target is not there, along with that target. Every component is checked
+// and not just the last, since the link is as likely to be an ancestor as
+// the configured path itself — /mnt/nas/books with /mnt/nas -> /volume1
+// unmounted is the same failure one level up.
+//
+// A component that is merely absent is not a broken link: creating it is
+// MkdirAll's job, and a link is the one shape MkdirAll cannot describe. A
+// relative target is joined onto its link's directory, so what the message
+// names is a path the reader can go and look at rather than the text of
+// the link
+func brokenLink(path string) (link, target string, ok bool) {
+	for _, p := range ancestors(path) {
+		if _, err := os.Stat(p); err == nil {
+			continue
+		}
+		t, err := os.Readlink(p)
+		if err != nil {
+			return "", "", false
+		}
+		if !filepath.IsAbs(t) {
+			t = filepath.Join(filepath.Dir(p), t)
+		}
+		return p, t, true
+	}
+	return "", "", false
+}
+
+// ancestors lists path's components from the root down, ending with path
+// itself
+func ancestors(path string) []string {
+	var out []string
+	for p := filepath.Clean(path); ; {
+		out = append(out, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+		p = parent
+	}
+	slices.Reverse(out)
+	return out
 }
 
 // fetchMetadataGuard picks which of internal/web's two fetch-metadata
