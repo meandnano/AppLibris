@@ -66,26 +66,18 @@ func (s *Service) UpdateBookMetadata(ctx context.Context, bookID int64, update M
 	return s.GetBook(ctx, bookID)
 }
 
-// Field length limits, in bytes of UTF-8 rather than runes: they exist to
-// bound what reaches the database and the request body, and bytes are the
-// unit both of those are measured in. MaxDescriptionBytes is exported
-// because internal/web sizes its request-body cap from it — the encoded
-// body is a multiple of the decoded value, so the two limits have to be
-// derived from one number to stay consistent.
-const (
-	MaxDescriptionBytes = 64 * 1024
-	maxTitleBytes       = 1024
-	maxAuthorNameBytes  = 1024
-	maxScalarBytes      = 4096
-	maxAuthors          = 100
-)
+// MaxDescriptionBytes is storage.MaxDescriptionBytes under the name
+// internal/web sizes its request-body cap from — the encoded body is a
+// multiple of the decoded value, so the two limits have to be derived from
+// one number to stay consistent
+const MaxDescriptionBytes = storage.MaxDescriptionBytes
 
 // MaxMetadataValueBytes is the largest single submitted value any field
 // will accept, exported so internal/web can size its request-body cap from
 // one number rather than guessing. It is the author list, not the
 // description: 100 names of 1 KiB each, plus a separating newline apiece,
 // outweighs 64 KiB of prose.
-const MaxMetadataValueBytes = maxAuthors * (maxAuthorNameBytes + 1)
+const MaxMetadataValueBytes = storage.MaxAuthors * (storage.MaxAuthorNameBytes + 1)
 
 func normalizeField(field storage.MetadataField, value string) (string, error) {
 	value = strings.TrimSpace(value)
@@ -102,12 +94,12 @@ func normalizeField(field storage.MetadataField, value string) (string, error) {
 		if value == "" {
 			return "", metadataValidationError{message: "Title is required"}
 		}
-		if len(value) > maxTitleBytes {
+		if len(value) > storage.MaxTitleBytes {
 			return "", metadataValidationError{message: "Title is too long"}
 		}
 		return value, nil
 	}
-	limit := maxScalarBytes
+	limit := storage.MaxScalarBytes
 	if field == storage.FieldDescription {
 		limit = MaxDescriptionBytes
 	}
@@ -126,13 +118,13 @@ func normalizeAuthors(value string) ([]string, error) {
 		if name == "" || seen[name] {
 			continue
 		}
-		if len(name) > maxAuthorNameBytes {
+		if len(name) > storage.MaxAuthorNameBytes {
 			return nil, metadataValidationError{message: "An author name is too long"}
 		}
 		seen[name] = true
 		names = append(names, name)
-		if len(names) > maxAuthors {
-			return nil, metadataValidationError{message: fmt.Sprintf("Too many authors (maximum %d)", maxAuthors)}
+		if len(names) > storage.MaxAuthors {
+			return nil, metadataValidationError{message: fmt.Sprintf("Too many authors (maximum %d)", storage.MaxAuthors)}
 		}
 	}
 	return names, nil

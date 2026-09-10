@@ -10,10 +10,12 @@ here. See Documentation below for what these files may and may not say.
 
 ## Code map
 
-- `cmd/server` — entrypoint. Reads configuration, resolves every configured
-  path through `resolveDir` (create, then `EvalSymlinks`; a dangling link in
-  any component fails startup naming link and target), opens the database,
-  serves immediately, and runs the scan loop, the sender worker and the
+- `cmd/server` — entrypoint. Reads configuration, resolves the library
+  through `requireExistingDir` (stat, then `EvalSymlinks`) and the covers
+  and database directories through `resolveDir` (create, then
+  `EvalSymlinks`); a dangling link in any component fails startup naming
+  link and target, and a refused `MkdirAll` names both uids. Opens the
+  database, serves immediately, and runs the scan loop, the sender worker and the
   enrichment worker on one cancellable `scanCtx`. Shutdown order: HTTP
   server, then `waitForBackground` (10s), then the database. Notes:
   `docs/notes/scanner.md`, `docs/notes/design.md`.
@@ -23,7 +25,9 @@ here. See Documentation below for what these files may and may not say.
   file. Tables: `books`, `authors`, `book_authors`, `book_files`,
   `field_sources`, `books_fts`, `recipients`, `send_log`,
   `enrichment_jobs`. Search sanitisation (`SanitizeFTSQuery`,
-  `NormalizeSearchQuery`) and the keyset cursor (`BookPage`) live here.
+  `NormalizeSearchQuery`), the keyset cursor (`BookPage`), and the
+  derivations and limits every writer of a metadata column shares
+  (`SortTitle`, `NormalizeISBN`, the `Max*` constants) live here.
   Note: `docs/notes/storage.md`.
 - `internal/epub`, `internal/fb2` — embedded metadata and cover bytes from
   each format, same `Metadata` shape so the scanner treats them alike.
@@ -119,7 +123,9 @@ tidy-up would break. The note named in the heading carries the reasoning.
   held; never add an uncapped read in `internal/epub` or `internal/fb2`.
   `maxZipDocumentBytes` (128 MiB) bounds the whole `.fb2` inside an
   archive because `encoding/xml` buffers a full text node before returning
-  it.
+  it, and is applied on **both sides** of the charset decoder — a decoder
+  only grows a byte count, so capping the read alone leaves the figure two
+  to three times looser than it says.
 - `cover.MaxCoverBytes` (8 MiB) and `enrich.MaxCoverBytes` (512 KiB) are
   separate constants, never aliases. Google Books' cover-size choice is
   calibrated against the second.
@@ -130,7 +136,16 @@ tidy-up would break. The note named in the heading carries the reasoning.
   on that split.
 - Publication date is the edition's: never `creation`/`modification` in
   EPUB, never `title-info/date` over `publish-info/year` in FB2.
-- FB2's declared charset is passed through unchanged (`CharsetReader`).
+- Every reader of an ISBN calls `storage.NormalizeISBN` — `internal/epub`'s
+  three branches, `internal/fb2`'s `<isbn>`, both providers' `ByISBN` and
+  `bestISBN`. Never a private copy. It ignores text around the run, which is
+  safe only because every caller reads a slot already claiming to hold an
+  ISBN; `internal/epub`'s bare branch is the exception and carries its own
+  guard (`bareISBN`, the whole identifier must be the run) rather than
+  making the shared function pay for it. A scheme-marked EPUB identifier
+  holding no run falls through to the next.
+- FB2's declared charset is decoded through `htmlindex`; only a label
+  `htmlindex` does not know passes through unchanged.
 - Cover files are named by the *book's* content hash, not the thumbnail's
   bytes, so `/covers/` is never served `immutable`.
 
@@ -139,6 +154,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Identity is the content hash; path is an attribute. Known content at a
   new path is a `book_files` row, not a new book. `file_path` is relative to
   `LIBRARY_DIR`, slash-separated.
+- `capMetadata` caps embedded metadata in `createBook`, through
+  `storage.Max*`: truncate on a rune boundary and log at Info, never reject
+  the file, and the field stays `embedded`.
+- `LIBRARY_DIR` is stat'd, never created, so a read-only mount works and an
+  absent one fails startup. `COVERS_DIR` and `DB_PATH`'s directory are
+  created.
 - The watcher never reads, hashes or parses a file. It pokes the one scan
   goroutine, so two sweeps can never overlap and correctness never depends
   on an event arriving.
@@ -214,10 +235,10 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Both workers `recover` inside `process` and write the row terminal with
   `crashedReason`. A panicking enrichment job left `running` is requeued
   into a crash loop; the panic value goes to the log, never the status box.
-- `sanitizeValue`'s limits equal `internal/service`'s (1024 for a title and
-  a name, 4096 for other scalars, 64 KiB for a description, 100 names), or
-  a provider-written value becomes uneditable. A description also caps
-  consecutive newlines at two.
+- All three writers of the metadata columns — `internal/service`,
+  `sanitizeValue` here and `internal/scanner`'s `capMetadata` — cap through
+  `storage.Max*`; never restate a number, or a value one writes becomes
+  uneditable. A description also caps consecutive newlines at two.
 - Providers name a cover URL and never download it. The worker fetches
   under `enrich.MaxCoverBytes` with the scheme checked on every redirect
   hop, and refuses loopback, private, link-local, multicast and

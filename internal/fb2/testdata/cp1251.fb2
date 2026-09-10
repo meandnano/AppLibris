@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+  <description>
+    <title-info>
+      <book-title>Мастер и Маргарита</book-title>
+      <author>
+        <first-name>Михаил</first-name>
+        <middle-name>Афанасьевич</middle-name>
+        <last-name>Булгаков</last-name>
+      </author>
+      <lang>ru</lang>
+      <annotation>
+        <p>Роман о дьяволе в Москве.</p>
+      </annotation>
+    </title-info>
+    <publish-info>
+      <publisher>Художественная литература</publisher>
+      <year>1973</year>
+      <isbn>978-5-17-118366-1</isbn>
+    </publish-info>
+  </description>
+  <body></body>
+</FictionBook>

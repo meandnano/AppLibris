@@ -319,6 +319,103 @@ func TestReadMetadataISBNFromBareHyphenated(t *testing.T) {
 	}
 }
 
+// What a publisher actually writes under the ISBN scheme. Stored as
+// written, "ISBN9780000000000(ebook)" is a lookup nobody answers and a
+// field nothing re-derives, since enrichment only asks about empty ones
+func TestReadMetadataSchemeISBNWithSurroundingText(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>Annotated ISBN</dc:title>
+    <dc:identifier opf:scheme="ISBN">ISBN 978-0-306-40615-7 (ebook)</dc:identifier>
+  </metadata>
+</package>`
+
+	got, err := ReadMetadata(buildTestEPUB(t, opfXML))
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.ISBN != "9780306406157" {
+		t.Errorf("ISBN = %q, want %q", got.ISBN, "9780306406157")
+	}
+}
+
+// An ISBN-scheme'd identifier holding no ISBN at all must not end the
+// search: a publisher who writes "Not available" there and the real number
+// under urn:isbn: still has a book with an ISBN
+func TestReadMetadataSchemeISBNNotAvailableFallsThrough(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>Unhelpful ISBN Scheme</dc:title>
+    <dc:identifier opf:scheme="ISBN">Not available</dc:identifier>
+    <dc:identifier id="pub-id">urn:isbn:978-0-306-40615-7</dc:identifier>
+  </metadata>
+</package>`
+
+	got, err := ReadMetadata(buildTestEPUB(t, opfXML))
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.ISBN != "9780306406157" {
+		t.Errorf("ISBN = %q, want %q (the urn:isbn: identifier)", got.ISBN, "9780306406157")
+	}
+}
+
+// The one thing the bare branch adds to storage.NormalizeISBN, which is
+// willing to pull a run out of surrounding text because every other caller
+// reads a slot already claiming to hold an ISBN. A scheme-less identifier
+// claims nothing, so here the whole identifier must be the run
+func TestReadMetadataBareIdentifierWithSurroundingTextIsNotAnISBN(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value string
+	}{
+		{"an ISBN-13 in prose", "Catalogue 978-0-306-40615-7 second printing"},
+		// The case that makes the guard worth having: ten digits in a
+		// sentence are as likely a control number as an ISBN
+		{"a ten-digit LCCN in prose", "Library of Congress 2005012345 catalogue"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Prose Identifier</dc:title>
+    <dc:identifier id="pub-id">` + tt.value + `</dc:identifier>
+  </metadata>
+</package>`
+
+			got, err := ReadMetadata(buildTestEPUB(t, opfXML))
+			if err != nil {
+				t.Fatalf("ReadMetadata: %v", err)
+			}
+			if got.ISBN != "" {
+				t.Errorf("ISBN = %q, want empty (a scheme-less identifier that is not wholly an ISBN)", got.ISBN)
+			}
+		})
+	}
+}
+
+// The same value under an ISBN scheme is a different question: the
+// attribute is the claim the bare branch lacks, so the digits are taken
+func TestReadMetadataSchemeISBNTakesABareNumberBesideText(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>Paperback</dc:title>
+    <dc:identifier opf:scheme="ISBN">0306406152 (pbk.)</dc:identifier>
+  </metadata>
+</package>`
+
+	got, err := ReadMetadata(buildTestEPUB(t, opfXML))
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.ISBN != "0306406152" {
+		t.Errorf("ISBN = %q, want %q", got.ISBN, "0306406152")
+	}
+}
+
 func TestReadMetadataPublisherAndDate(t *testing.T) {
 	opfXML := `<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">

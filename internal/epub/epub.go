@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"library/internal/cover"
+	"library/internal/storage"
 )
 
 // maxPackageDocBytes bounds container.xml and the OPF package document, the
@@ -246,19 +247,25 @@ func readOPFPackage(zr *zip.Reader, opfPath string) (opfPackage, error) {
 // urn:isbn: identifier, and a bare ISBN-shaped identifier — a publisher who
 // marks an identifier as an ISBN at all almost always uses one of the first
 // two forms, so the refines-based EPUB3 form isn't worth the extra
-// resolution logic. The check digit is never validated: a malformed ISBN in
-// the file is still the best identifier it offers.
+// resolution logic.
+//
+// Every branch goes through storage.NormalizeISBN, so what is stored is the
+// lookup key and not the publisher's prose: "ISBN 978-0-00-000000-0
+// (ebook)" yields the digits. A branch whose value holds no ISBN-shaped run
+// at all falls through to the next identifier rather than ending the
+// search, so a publisher who writes "Not available" under the ISBN scheme
+// and the real number under urn:isbn: still gets the real number
 func findISBN(pkg opfPackage) string {
 	for _, id := range pkg.Metadata.Identifier {
 		if strings.EqualFold(id.Scheme, "ISBN") {
-			if isbn := normalizeISBN(id.Value); isbn != "" {
+			if isbn := storage.NormalizeISBN(id.Value); isbn != "" {
 				return isbn
 			}
 		}
 	}
 	for _, id := range pkg.Metadata.Identifier {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(id.Value)), "urn:isbn:") {
-			if isbn := normalizeISBN(id.Value); isbn != "" {
+			if isbn := storage.NormalizeISBN(id.Value); isbn != "" {
 				return isbn
 			}
 		}
@@ -273,58 +280,29 @@ func findISBN(pkg opfPackage) string {
 		if strings.TrimSpace(id.Scheme) != "" {
 			continue
 		}
-		if isBareISBN(id.Value) {
-			return normalizeISBN(id.Value)
+		if isbn := bareISBN(id.Value); isbn != "" {
+			return isbn
 		}
 	}
 	return ""
 }
 
-// isBareISBN reports whether raw, with no scheme or urn:isbn: marker, is
-// still shaped like an ISBN-10 or ISBN-13: digits, hyphens and spaces, with
-// a trailing X permitted only where an ISBN-10 check digit allows one. This
-// is what keeps an unrelated identifier (a UUID, say) from being mistaken
-// for an unmarked ISBN.
-func isBareISBN(raw string) bool {
-	v := strings.TrimSpace(raw)
-	if v == "" {
-		return false
-	}
-	runes := []rune(v)
-	for i, r := range runes {
-		switch {
-		case r >= '0' && r <= '9':
-		case r == '-' || r == ' ':
-		case (r == 'x' || r == 'X') && i == len(runes)-1:
-		default:
-			return false
-		}
-	}
-	switch normalized := normalizeISBN(v); len(normalized) {
-	case 10:
-		return true
-	case 13:
-		return !strings.HasSuffix(normalized, "X")
-	default:
-		return false
-	}
-}
-
-// normalizeISBN strips a urn:isbn: prefix and any hyphens or spaces, and
-// upper-cases a trailing check-digit X.
-func normalizeISBN(raw string) string {
-	v := strings.TrimSpace(raw)
-	if strings.HasPrefix(strings.ToLower(v), "urn:isbn:") {
-		v = v[len("urn:isbn:"):]
-	}
-	v = strings.NewReplacer("-", "", " ", "").Replace(v)
-	if v == "" {
+// bareISBN reads raw as an ISBN only when the whole identifier is one: an
+// identifier with no scheme and no urn:isbn: marker is evidence of nothing,
+// so a run with anything else beside it — a ten-digit LCCN in a sentence,
+// say — must not be read as an ISBN just for its shape. That is the one
+// thing this adds to storage.NormalizeISBN, which is deliberately willing
+// to pull a marked or grouped run out of surrounding text
+func bareISBN(raw string) string {
+	isbn := storage.NormalizeISBN(raw)
+	if isbn == "" {
 		return ""
 	}
-	if last := v[len(v)-1]; last == 'x' {
-		v = v[:len(v)-1] + "X"
+	bare := strings.NewReplacer("-", "", " ", "").Replace(strings.TrimSpace(raw))
+	if !strings.EqualFold(bare, isbn) {
+		return ""
 	}
-	return v
+	return isbn
 }
 
 // findPublishedDate picks the publication date among possibly-repeated

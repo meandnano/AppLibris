@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"library/internal/enrich"
+	"library/internal/storage"
 )
 
 // Timeout bounds one lookup end to end. Enrichment is a background nicety,
@@ -124,7 +125,7 @@ func (c *Client) Name() string { return providerName }
 // date is the work's first publication, 75 years before the edition the
 // ISBN identifies.
 func (c *Client) ByISBN(ctx context.Context, isbn string) (enrich.Metadata, error) {
-	normalized := normalizeISBN(isbn)
+	normalized := storage.NormalizeISBN(isbn)
 	if normalized == "" {
 		return enrich.Metadata{}, nil
 	}
@@ -459,7 +460,7 @@ func isRetryableStatus(status int) bool {
 func bestISBN(isbns []string) string {
 	var best string
 	for _, raw := range isbns {
-		n := normalizeISBN(raw)
+		n := storage.NormalizeISBN(raw)
 		switch len(n) {
 		case 13:
 			return n
@@ -470,20 +471,4 @@ func bestISBN(isbns []string) string {
 		}
 	}
 	return best
-}
-
-// normalizeISBN mirrors internal/epub's own unexported normalizeISBN:
-// strips hyphens and spaces and upper-cases a trailing check-digit X. It is
-// duplicated rather than imported — internal/storage's own
-// normalizeIfISBNShaped makes the same choice — because the rule is small,
-// stable, and each caller applies it to a different shape of input.
-func normalizeISBN(raw string) string {
-	v := strings.NewReplacer("-", "", " ", "").Replace(strings.TrimSpace(raw))
-	if v == "" {
-		return ""
-	}
-	if last := v[len(v)-1]; last == 'x' {
-		v = v[:len(v)-1] + "X"
-	}
-	return v
 }

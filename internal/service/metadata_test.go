@@ -66,9 +66,9 @@ func TestUpdateBookMetadataValidation(t *testing.T) {
 		want  string
 	}{
 		{"blank title", "title", "   ", "Title is required"},
-		{"overlong title", "title", strings.Repeat("x", maxTitleBytes+1), "Title is too long"},
+		{"overlong title", "title", strings.Repeat("x", storage.MaxTitleBytes+1), "Title is too long"},
 		{"overlong description", "description", strings.Repeat("x", MaxDescriptionBytes+1), "Value is too long"},
-		{"overlong publisher", "publisher", strings.Repeat("x", maxScalarBytes+1), "Value is too long"},
+		{"overlong publisher", "publisher", strings.Repeat("x", storage.MaxScalarBytes+1), "Value is too long"},
 		{"unknown field", "cover_path", "x", "Unknown metadata field"},
 	}
 	for _, tc := range cases {
@@ -100,7 +100,7 @@ func TestUpdateBookMetadataAuthorLimits(t *testing.T) {
 	svc, _, id := newMetadataTestService(t)
 	ctx := context.Background()
 
-	tooMany := make([]string, maxAuthors+1)
+	tooMany := make([]string, storage.MaxAuthors+1)
 	for i := range tooMany {
 		tooMany[i] = "Author " + strings.Repeat("x", i%5+1) + string(rune('a'+i%26)) + itoa(i)
 	}
@@ -110,21 +110,21 @@ func TestUpdateBookMetadataAuthorLimits(t *testing.T) {
 	}
 
 	if _, err := svc.UpdateBookMetadata(ctx, id,
-		MetadataUpdate{Field: "authors", Value: strings.Repeat("x", maxAuthorNameBytes+1)}); !errors.Is(err, ErrInvalidMetadata) {
+		MetadataUpdate{Field: "authors", Value: strings.Repeat("x", storage.MaxAuthorNameBytes+1)}); !errors.Is(err, ErrInvalidMetadata) {
 		t.Errorf("overlong author name error = %v, want ErrInvalidMetadata", err)
 	}
 
 	// Exactly at the limit is accepted — the check is off-by-one prone.
-	atLimit := make([]string, maxAuthors)
+	atLimit := make([]string, storage.MaxAuthors)
 	for i := range atLimit {
 		atLimit[i] = "Author " + itoa(i)
 	}
 	detail, err := svc.UpdateBookMetadata(ctx, id, MetadataUpdate{Field: "authors", Value: strings.Join(atLimit, "\n")})
 	if err != nil {
-		t.Fatalf("%d authors: %v", maxAuthors, err)
+		t.Fatalf("%d authors: %v", storage.MaxAuthors, err)
 	}
-	if len(detail.Authors) != maxAuthors {
-		t.Errorf("Authors = %d, want %d", len(detail.Authors), maxAuthors)
+	if len(detail.Authors) != storage.MaxAuthors {
+		t.Errorf("Authors = %d, want %d", len(detail.Authors), storage.MaxAuthors)
 	}
 }
 

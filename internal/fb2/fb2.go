@@ -16,7 +16,11 @@ import (
 	"slices"
 	"strings"
 
+	"golang.org/x/text/encoding/htmlindex"
+	"golang.org/x/text/transform"
+
 	"library/internal/cover"
+	"library/internal/storage"
 )
 
 // maxCoverBase64Bytes bounds the copy readCoverBinary accumulates of the
@@ -41,7 +45,12 @@ const maxCoverBase64Bytes = (cover.MaxCoverBytes + 2) / 3 * 4
 // line with the ~300 MB internal/cover's maxPixels already accepts from a
 // progressive JPEG header. A real document whose cover binary sits past this
 // much of other illustrations loses its cover and keeps its text. A plain
-// .fb2 has no such cap, since it already costs its own size on disk
+// .fb2 has no such cap, since it already costs its own size on disk.
+//
+// It is applied on both sides of the charset decoder (readCappedDocument),
+// which is what keeps the figure honest: a decoder only grows a byte count,
+// so bounding the archive's bytes alone would let a cp1251 document hold
+// twice this and a legacy CJK one three times
 const maxZipDocumentBytes = 128 << 20
 
 // errDocumentTooLarge is what a cappedReader returns once its cap is
@@ -169,7 +178,7 @@ func ReadMetadata(path string) (Metadata, error) {
 			return Metadata{}, fmt.Errorf("open fb2: %w", err)
 		}
 		defer f.Close()
-		return readMetadata(f)
+		return readMetadata(f, 0)
 	default:
 		return Metadata{}, fmt.Errorf("unsupported fb2 path %q", path)
 	}
@@ -207,7 +216,20 @@ func readMetadataFromZip(path string) (Metadata, error) {
 	}
 	defer rc.Close()
 
-	return readMetadata(&cappedReader{r: rc, remaining: maxZipDocumentBytes})
+	return readCappedDocument(rc, maxZipDocumentBytes)
+}
+
+// readCappedDocument parses a document that must not be allowed to inflate,
+// bounding it at both ends of the charset decoder.
+//
+// One cap is not enough once the declared encoding is honoured. The cap on
+// the archive's bytes bounds what is read; what encoding/xml holds is a
+// whole decoded text node, and a decoder only ever grows the byte count —
+// every cp1251 Cyrillic byte becomes two of UTF-8, and a legacy CJK
+// encoding's byte can become three. Capping the read alone would hand an
+// untrusted archive two to three times the budget the constant names
+func readCappedDocument(r io.Reader, max int64) (Metadata, error) {
+	return readMetadata(&cappedReader{r: r, remaining: max}, max)
 }
 
 // cappedReader is io.LimitReader with a distinct error at the cap instead of
@@ -230,6 +252,35 @@ func (c *cappedReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// budgetReader stops a stream once it has produced more than budget bytes,
+// with the same error cappedReader gives.
+//
+// It counts whole reads instead of trimming the caller's buffer to what is
+// left, which is what makes it right for the far side of a charset decoder:
+// a trimmed read cuts the decoder's output mid-rune, and encoding/xml then
+// reports invalid UTF-8 rather than the size refusal that actually
+// happened. The overshoot is one read buffer against a budget in megabytes
+type budgetReader struct {
+	r      io.Reader
+	budget int64
+	read   int64
+}
+
+func (b *budgetReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if b.read+int64(n) > b.budget {
+		// The crossing read is refused whole rather than trimmed to what
+		// is left. Trimming would cut the decoder's output mid-rune, and
+		// encoding/xml reports invalid UTF-8 for that before it ever asks
+		// for the byte that would carry this error. Refusing the whole
+		// read keeps every rune intact and makes the refusal the reason
+		// the parse stops
+		return 0, fmt.Errorf("%w (%d bytes decoded)", errDocumentTooLarge, b.budget)
+	}
+	b.read += int64(n)
+	return n, err
+}
+
 // readMetadata parses an FB2 document from r: the <description> through a
 // struct, then a walk of the remaining top-level elements that decodes only
 // the <binary> the coverpage names and skips every other one token by token.
@@ -239,16 +290,18 @@ func (c *cappedReader) Read(p []byte) (int, error) {
 // at an id that does not exist. Reading stops as soon as nothing more is
 // wanted — after the description when it names no cover, after the cover's
 // binary otherwise — so the rest of an illustrated book is never read
-func readMetadata(r io.Reader) (Metadata, error) {
+//
+// maxDecoded bounds what the charset decoder may produce, and is zero for a
+// document read straight off disk, which costs its own size and needs no
+// bound. See readCappedDocument for why the two caps are separate
+func readMetadata(r io.Reader, maxDecoded int64) (Metadata, error) {
 	decoder := xml.NewDecoder(r)
-	// A declared non-UTF-8 encoding would otherwise fail the whole parse
-	// outright ("encoding ... declared but Decoder.CharsetReader is nil"),
-	// not degrade to mojibake. The library's FB2 files are UTF-8
-	// regardless of what they declare, so trust the byte content over the
-	// label: pass the stream through unchanged for any charset name,
-	// known or not. A best-effort parse beats a filename title.
-	decoder.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) {
-		return input, nil
+	decoder.CharsetReader = func(label string, input io.Reader) (io.Reader, error) {
+		decoded, err := decodeCharset(label, input)
+		if err != nil || maxDecoded == 0 {
+			return decoded, err
+		}
+		return &budgetReader{r: decoded, budget: maxDecoded}, nil
 	}
 
 	if _, err := nextStartElement(decoder); err != nil {
@@ -312,12 +365,38 @@ walk:
 		Title:         strings.TrimSpace(ti.BookTitle),
 		Authors:       authorNames(ti.Author),
 		Language:      strings.TrimSpace(ti.Lang),
-		ISBN:          strings.TrimSpace(desc.PublishInfo.ISBN),
+		ISBN:          storage.NormalizeISBN(desc.PublishInfo.ISBN),
 		Description:   annotationText(ti.Annotation.P),
 		Publisher:     strings.TrimSpace(desc.PublishInfo.Publisher),
 		PublishedDate: findPublishedDate(desc),
 		Cover:         coverData,
 	}, nil
+}
+
+// decodeCharset is the xml.Decoder.CharsetReader every FB2 parse installs:
+// it wraps the document in the decoder for the charset it declares, so an
+// honestly labelled windows-1251 file — which is most of a legacy Russian
+// collection — parses instead of failing on "invalid UTF-8" and landing
+// under its filename. encoding/xml never calls this for a UTF-8 label, and
+// rejects non-UTF-8 bytes whatever Strict says, so the declaration is the
+// only thing that can make those bytes readable.
+//
+// A label htmlindex does not know is passed through unchanged, which is
+// also what happens to a UTF-8 file that lies about its label: its title
+// becomes mojibake rather than the parse failing. That is the trade — the
+// cost falls on a file that misdescribes itself, and mojibake is one edit
+// away from right where a parse failure is a book nobody finds.
+//
+// The .fb2.zip cap sits beneath this untouched: the cap bounds the bytes
+// read out of the archive, and a decoder over a capped reader stops where
+// the reader does
+func decodeCharset(label string, input io.Reader) (io.Reader, error) {
+	enc, err := htmlindex.Get(strings.TrimSpace(label))
+	if err != nil {
+		slog.Debug("fb2 declares an unknown charset", "charset", label)
+		return input, nil
+	}
+	return transform.NewReader(input, enc.NewDecoder()), nil
 }
 
 // nextStartElement consumes tokens up to and including the first start

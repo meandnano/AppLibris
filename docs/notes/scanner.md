@@ -19,6 +19,19 @@ A cheap `path + size + mtime` comparison against `book_files` skips an
 unchanged file entirely. Only a mismatch pays for a SHA-256 hash and a
 metadata parse, which is what keeps a rescan of a large library fast.
 
+**Embedded metadata is capped where it is extracted** (`capMetadata`), to
+the same limits a person's edit and a provider's answer meet — one set of
+constants in `internal/storage`, below all three writers. Scalars are
+truncated on a UTF-8 boundary and the author list is cut at
+`storage.MaxAuthors`, with an Info line naming the path and the field: a
+verbose file is worth knowing about and is not an error. Truncated, never
+rejected, because a book whose description is too long is still a book and a
+filename title is worse than prose cut at 64 KiB. A cut field is still
+`embedded` in `field_sources`: provenance says where a value came from, not
+whether it arrived whole. The point is that a length the editor refuses is
+never stored — a 10 MB `<dc:description>` in the column is a description
+that can no longer be saved unchanged, and nothing re-derives it.
+
 **Identity is the content hash, not the path.** Known content at a new
 path gets an additional `book_files` row rather than a new book. A moved
 file and a genuine duplicate copy are indistinguishable from any single
@@ -80,20 +93,50 @@ container). A directory the walk cannot read costs its subtree and counts
 an error; it does not abort the sweep.
 
 `cmd/server` resolves `LIBRARY_DIR`, `COVERS_DIR` and `DB_PATH`'s directory
-through `resolveDir` (create if absent, then `filepath.EvalSymlinks`), so
-every consumer is handed one root that means the same thing whether or not
-links are followed. `LIBRARY_DIR` is the one that needs it:
+so every consumer is handed one root that means the same thing whether or
+not links are followed, and the two halves resolve differently.
+
+**The library must exist and may be read-only** (`requireExistingDir`): it
+is stat'd, never created, and an absent one is a startup error naming
+`LIBRARY_DIR`. Creating it is the single call that would turn a
+legitimately read-only mount into a startup failure — the scanner only
+reads the library, and the watcher's delivery probe already treats an
+unwritable root as an Info-level skip. Creating it and warning would hide
+the misconfiguration under an empty grid, which is exactly what
+`LIBRARY_DIR` pointing at the wrong volume already looks like, leaving the
+log as the only place the mistake shows.
+
+**The covers and database directories are created** (`resolveDir`), and a
+permission failure names both uids: the uid the process runs as and the
+owner of the nearest *existing* ancestor, since the target is what
+`MkdirAll` could not make. `mkdir /data/covers: permission denied` names
+neither side of the mismatch it reports, and both are needed to fix it —
+the container runs as whatever uid it was given while a NAS bind mount is
+owned by the share's user, an Unraid one by `nobody`, and a fresh named
+volume by root. The ancestor is named as an absolute path: the configured
+defaults are relative against a working directory of `/`, so the ancestor of
+`./data/covers` reads back as `data`, which is not the mount the person
+wrote and not a path they can go and look at. The
+owner comes from the platform's stat struct, so `ownerUID` is build-tagged
+`unix` — not `linux`, though the image is: `syscall.Stat_t` carries `Uid` on
+every unix, and the test asserting the message runs on the development
+machine and on non-Linux CI runners, where a narrower tag would take the
+fallback and fail — and reports nothing elsewhere.
+
+`LIBRARY_DIR` is the resolution that matters most:
 `filepath.WalkDir` `Lstat`s its root and never follows a link, so a
 symlinked root (`~/Books -> /volume1/books`, the ordinary NAS shape) would
 otherwise walk as a single non-directory entry and report an empty library
 with no error. A **dangling** link anywhere in a configured path is a
-startup error naming both the link and its target, checked before
-`MkdirAll`: `MkdirAll` also fails on one, but its message names only the
-link, never the missing target, which is the whole question when a volume
-did not mount. `brokenLink` walks every component because the link is as
-likely to be the mount point as the directory under it; a component that
-is merely absent is `MkdirAll`'s job. `DB_PATH` cannot be resolved before
-the first run (the file does not exist yet), so only its directory is.
+startup error naming both the link and its target, and `brokenLink` runs
+in front of both resolution halves: `MkdirAll` fails on a dangling link
+too, but its message names only the link and never the missing target,
+which is the whole question when a volume did not mount. It walks every
+component, because the link is as likely to be the mount point as the
+directory under it, and a merely absent component is not a broken link —
+that one is `MkdirAll`'s job on the writable half and the `LIBRARY_DIR`
+error on the other. `DB_PATH` cannot be resolved before the first run (the
+file does not exist yet), so only its directory is.
 
 Inside the library, **a symlinked directory is not followed**, and is
 reported rather than passed over. `WalkDir` delivers it as a non-directory

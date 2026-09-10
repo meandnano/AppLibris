@@ -452,7 +452,7 @@ func TestResolveKeepsFirstProvidersCoverAnswer(t *testing.T) {
 func TestResolveSanitizesProviderValues(t *testing.T) {
 	book := storage.Book{ID: 1, Title: "", ISBN: "9780000000001"}
 	sources := map[storage.MetadataField]string{}
-	longDescription := strings.Repeat("x", maxEnrichedDescriptionBytes+500)
+	longDescription := strings.Repeat("x", storage.MaxDescriptionBytes+500)
 
 	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 		return Metadata{
@@ -478,18 +478,24 @@ func TestResolveSanitizesProviderValues(t *testing.T) {
 	if got := res.Values[storage.FieldAuthors]; got != "First Author\nSecond Author" {
 		t.Errorf("authors = %q, want two names with the interior break collapsed and the blank dropped", got)
 	}
-	if got := len(res.Values[storage.FieldDescription]); got > maxEnrichedDescriptionBytes {
-		t.Errorf("description is %d bytes, want at most %d", got, maxEnrichedDescriptionBytes)
+	if got := len(res.Values[storage.FieldDescription]); got > storage.MaxDescriptionBytes {
+		t.Errorf("description is %d bytes, want at most %d", got, storage.MaxDescriptionBytes)
 	}
 }
 
 // Truncation must not leave a half-written rune behind: the column is text,
 // and invalid UTF-8 in it renders as a replacement character forever.
+//
+// The filler has to straddle the limit for this to test anything. Every
+// Max* is even, so a two-byte rune is cut on a boundary by arithmetic alone
+// and the cap could stop trimming with the assertion still green;
+// three-byte runes behind a two-byte lead-in do not divide any of them
 func TestSanitizeValueTruncatesOnARuneBoundary(t *testing.T) {
-	value := strings.Repeat("é", maxEnrichedScalarBytes)
+	value := "aa" + strings.Repeat("€", storage.MaxScalarBytes)
 	got := sanitizeValue(storage.FieldPublisher, value)
-	if len(got) > maxEnrichedScalarBytes {
-		t.Errorf("length = %d, want at most %d", len(got), maxEnrichedScalarBytes)
+	if len(got) != storage.MaxScalarBytes-2 {
+		t.Errorf("length = %d, want %d — the last whole rune before the %d-byte limit",
+			len(got), storage.MaxScalarBytes-2, storage.MaxScalarBytes)
 	}
 	if !utf8.ValidString(got) {
 		t.Error("truncated value is not valid UTF-8")
@@ -501,7 +507,7 @@ func TestSanitizeValueTruncatesOnARuneBoundary(t *testing.T) {
 // leaves the field un-editable through the app: opening the editor and
 // pressing Save unchanged fails on a value nobody typed.
 func TestResolveCapsMatchTheEditableLimits(t *testing.T) {
-	names := make([]string, maxEnrichedAuthors+20)
+	names := make([]string, storage.MaxAuthors+20)
 	for i := range names {
 		names[i] = fmt.Sprintf("Author %d", i)
 	}
@@ -509,7 +515,7 @@ func TestResolveCapsMatchTheEditableLimits(t *testing.T) {
 	book := storage.Book{ID: 1, ISBN: "9780000000001"}
 	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 		return Metadata{
-			Title:   strings.Repeat("t", maxEnrichedTitleBytes+500),
+			Title:   strings.Repeat("t", storage.MaxTitleBytes+500),
 			Authors: names,
 		}, nil
 	}}
@@ -518,12 +524,12 @@ func TestResolveCapsMatchTheEditableLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(res.Values[storage.FieldTitle]); got != maxEnrichedTitleBytes {
-		t.Errorf("title is %d bytes, want it truncated to %d", got, maxEnrichedTitleBytes)
+	if got := len(res.Values[storage.FieldTitle]); got != storage.MaxTitleBytes {
+		t.Errorf("title is %d bytes, want it truncated to %d", got, storage.MaxTitleBytes)
 	}
 	got := strings.Split(res.Values[storage.FieldAuthors], authorsJoin)
-	if len(got) != maxEnrichedAuthors {
-		t.Errorf("authors = %d names, want the list cut at %d", len(got), maxEnrichedAuthors)
+	if len(got) != storage.MaxAuthors {
+		t.Errorf("authors = %d names, want the list cut at %d", len(got), storage.MaxAuthors)
 	}
 	if got[0] != "Author 0" {
 		t.Errorf("first author = %q, want the list cut from the end, not the front", got[0])
@@ -533,9 +539,9 @@ func TestResolveCapsMatchTheEditableLimits(t *testing.T) {
 // An over-long single name is capped on its own, not by the joined list's
 // length — the same reason each name is sanitised separately.
 func TestSanitizeValueCapsOneAuthorName(t *testing.T) {
-	got := sanitizeValue(storage.FieldAuthors, strings.Repeat("a", maxEnrichedAuthorNameBytes+10))
-	if len(got) != maxEnrichedAuthorNameBytes {
-		t.Errorf("length = %d, want %d", len(got), maxEnrichedAuthorNameBytes)
+	got := sanitizeValue(storage.FieldAuthors, strings.Repeat("a", storage.MaxAuthorNameBytes+10))
+	if len(got) != storage.MaxAuthorNameBytes {
+		t.Errorf("length = %d, want %d", len(got), storage.MaxAuthorNameBytes)
 	}
 }
 
