@@ -118,8 +118,12 @@ func setFieldSourceTx(ctx context.Context, tx *sql.Tx, bookID int64, field Metad
 	return err
 }
 
-func setEmbeddedFieldSourcesTx(ctx context.Context, tx *sql.Tx, bookID int64, b Book, authorNames []string) error {
-	values := map[MetadataField]string{
+// scalarFieldValues maps each scalar metadata field to the value b holds
+// for it. Shared so provenance-writing and provenance-reading callers
+// cannot disagree about which column a field names; cover is absent, since
+// its value is a path rather than metadata and no caller here may write it.
+func scalarFieldValues(b Book) map[MetadataField]string {
+	return map[MetadataField]string{
 		FieldTitle:         b.Title,
 		FieldPublisher:     b.Publisher,
 		FieldPublishedDate: b.PublishedDate,
@@ -127,7 +131,10 @@ func setEmbeddedFieldSourcesTx(ctx context.Context, tx *sql.Tx, bookID int64, b 
 		FieldISBN:          b.ISBN,
 		FieldDescription:   b.Description,
 	}
-	for field, value := range values {
+}
+
+func setEmbeddedFieldSourcesTx(ctx context.Context, tx *sql.Tx, bookID int64, b Book, authorNames []string) error {
+	for field, value := range scalarFieldValues(b) {
 		if value != "" {
 			if err := setFieldSourceTx(ctx, tx, bookID, field, "embedded"); err != nil {
 				return err

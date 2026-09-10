@@ -115,7 +115,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 	}
 
 	seen := make(map[string]bool)
-	var skippedDirs []string
+	var skippedDirs, linkedDirs []string
 
 	err := filepath.WalkDir(libraryDir, func(walkPath string, d fs.DirEntry, err error) error {
 		// Checked first, ahead of everything below: a per-file error (this
@@ -158,6 +158,17 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 				}
 				slog.Warn("symlinked directory is not followed", attrs...)
 				result.Errors++
+				// Recorded so reconciliation can refuse to prune the rows
+				// under it. Their Lstat resolves every component but the
+				// leaf, so it succeeds through the link and, under the rule
+				// above, would otherwise mark them and then delete them
+				// after the grace period — deleting a book whose file is
+				// sitting there, readable through the link the walk
+				// declined to follow. Not skippedDirs: those rows are left
+				// entirely alone, where these deserve the annotation.
+				if rel := relSlash(libraryDir, walkPath); rel != "" {
+					linkedDirs = append(linkedDirs, rel)
+				}
 				return nil
 			case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
 				// A cycle (ELOOP), a target that may not be stat'd
@@ -191,7 +202,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 		return result, fmt.Errorf("walk %s: %w", libraryDir, err)
 	}
 
-	reconcileMissing(ctx, db, libraryDir, skippedDirs, seen, missingGrace, &result)
+	reconcileMissing(ctx, db, libraryDir, skippedDirs, linkedDirs, seen, missingGrace, &result)
 
 	return result, nil
 }
@@ -254,16 +265,23 @@ func relSlash(libraryDir, path string) string {
 // Scanned == 0 guard alone, the root case of the same rule kept for its
 // specific message
 //
+// The same refusal covers a directory the walk declined to follow because
+// it is a symlink. It yielded no files at any depth, exactly as an offline
+// sub-mount does, but the top-level test misses it wherever the link is
+// nested under a directory that still holds books — and its rows' Lstat
+// resolves through the link and succeeds, so the rule below would mark
+// them and then delete them, destroying a book whose file is sitting there
+// and readable.
+//
 // Every unseen, non-excluded row is re-checked with os.Lstat this same
 // sweep — including one already marked missing from an earlier sweep.
 // Deletion eligibility (past missingGrace) is necessary but never
-// sufficient on its own: only a row this exact sweep's Lstat confirms
-// fs.ErrNotExist for is ever handed to PruneMissingFiles, so a path whose
-// failure mode changes while it waits out its grace period (say, from
-// ErrNotExist to EACCES, or to a directory sitting where the file used to
-// be) can never be deleted on the strength of a confirmation that's since
-// gone stale.
-func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, skippedDirs []string, seen map[string]bool, missingGrace time.Duration, result *Result) {
+// sufficient on its own: only a row this exact sweep's Lstat answers for,
+// with fs.ErrNotExist or with success, is ever handed to PruneMissingFiles,
+// so a path whose failure mode changes while it waits out its grace period
+// (say, from ErrNotExist to EACCES) can never be deleted on the strength of
+// a confirmation that's since gone stale.
+func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, skippedDirs, linkedDirs []string, seen map[string]bool, missingGrace time.Duration, result *Result) {
 	if result.Scanned == 0 {
 		slog.Warn("library appeared empty, skipping missing-file reconciliation", "library_dir", libraryDir)
 		return
@@ -304,10 +322,9 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 		// or the file arrived between the walk and this check, which the
 		// next sweep sees and clears. Neither leaves the row live under a
 		// spelling the walk disagrees with, so it falls through to marking
-		// like an absence does — and the top-level guard below is what keeps
-		// that safe where the success is legitimately ambiguous, a real
-		// directory since replaced by a symlink resolving every component
-		// but the leaf.
+		// like an absence does — and the two guards below are what keep that
+		// safe where the success is legitimately ambiguous, a real directory
+		// since replaced by a symlink resolving every component but the leaf.
 		absPath := filepath.Join(libraryDir, filepath.FromSlash(f.FilePath))
 		if _, statErr := os.Lstat(absPath); statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
 			slog.Warn("could not confirm missing file", "path", absPath, "error", statErr)
@@ -320,13 +337,24 @@ func reconcileMissing(ctx context.Context, db *storage.DB, libraryDir string, sk
 		if top := topLevelDir(f.FilePath); top != "" && !populated[top] {
 			unconfirmed[top]++
 			unconfirmedDir = true
+		} else if dir := matchingPrefix(f.FilePath, linkedDirs); dir != "" {
+			// A directory the walk declined to follow because it is now a
+			// symlink yielded no files at any depth, exactly as an offline
+			// sub-mount does, but the top-level test above misses it when
+			// the link is nested under a directory that still holds books.
+			// Its rows' Lstat succeeds through the link, so without this
+			// they would be marked and then deleted after the grace period,
+			// destroying a book whose file is sitting there and readable.
+			unconfirmed[dir]++
+			unconfirmedDir = true
 		}
 		switch {
 		case !f.MissingSince.Valid:
 			toMark = append(toMark, f.ID)
 		case unconfirmedDir:
-			// Marked, but an empty top-level directory is not evidence its
-			// books are gone, so the prune is refused whatever the mark's age
+			// Marked, but a directory that yielded no files is not evidence
+			// its books are gone, so the prune is refused whatever the
+			// mark's age
 		case f.MissingSince.Time.Before(cutoff):
 			toPrune = append(toPrune, f.ID)
 		}
@@ -434,12 +462,19 @@ func populatedTopLevelDirs(seen map[string]bool) map[string]bool {
 
 // underAny reports whether relPath is nested under any of prefixes.
 func underAny(relPath string, prefixes []string) bool {
+	return matchingPrefix(relPath, prefixes) != ""
+}
+
+// matchingPrefix returns whichever of prefixes relPath is nested under, or
+// "" if none is. Callers that need to name the directory in a log line or a
+// per-directory count take this; underAny is the boolean form.
+func matchingPrefix(relPath string, prefixes []string) string {
 	for _, p := range prefixes {
 		if relPath == p || strings.HasPrefix(relPath, p+"/") {
-			return true
+			return p
 		}
 	}
-	return false
+	return ""
 }
 
 func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) error {

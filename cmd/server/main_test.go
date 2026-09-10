@@ -517,13 +517,67 @@ func TestUnconfirmedDirLogLevel(t *testing.T) {
 
 // The set handed to the next sweep is this sweep's, not a union: a
 // directory that recovers and later empties again is news the second time.
-func TestLogUnconfirmedDirsReturnsThisSweepsSet(t *testing.T) {
+//
+// The emitted level is asserted here rather than left to unconfirmedLevel's
+// own test, because logUnconfirmedDirs adds each directory to the new set
+// on the line before it picks the level: passing that set instead of the
+// previous one would make every line Info, and no pure-function test would
+// notice.
+func TestLogUnconfirmedDirsLogsAgainstThePreviousSweepsSet(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	got := logUnconfirmedDirs(map[string]bool{"recovered": true, "novels": true},
+		map[string]int{"fiction": 2, "novels": 1})
+
+	if len(got) != 2 || !got["fiction"] || !got["novels"] {
+		t.Errorf("logUnconfirmedDirs = %v, want exactly fiction and novels", got)
+	}
+	for _, want := range []string{`level=WARN`, `dir=fiction`, `rows=2`} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log does not carry %q for a newly unconfirmed directory:\n%s", want, logs.String())
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(line, "dir=novels") && !strings.Contains(line, "level=INFO") {
+			t.Errorf("a directory unconfirmed last sweep logged at the wrong level: %s", line)
+		}
+		if strings.Contains(line, "dir=fiction") && !strings.Contains(line, "level=WARN") {
+			t.Errorf("a newly unconfirmed directory logged at the wrong level: %s", line)
+		}
+	}
+}
+
+// A sweep that reconciled nothing reported on no directory, so its empty
+// set must not replace the previous one — otherwise the next real sweep
+// Warns afresh about residue it has already named. Both shapes: Scan
+// failing outright, and Scan succeeding over a library that read as empty.
+func TestRunScanKeepsTheReportedSetWhenNothingWasReconciled(t *testing.T) {
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	got := logUnconfirmedDirs(map[string]bool{"recovered": true}, map[string]int{"fiction": 2})
-	if len(got) != 1 || !got["fiction"] {
-		t.Errorf("logUnconfirmedDirs = %v, want only fiction", got)
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
 	}
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	reported := map[string]bool{"fiction": true}
+
+	t.Run("scan fails", func(t *testing.T) {
+		got := runScan(ctx, db, filepath.Join(t.TempDir(), "not-there"), t.TempDir(), time.Hour, reported)
+		if len(got) != 1 || !got["fiction"] {
+			t.Errorf("runScan over a missing library = %v, want the previous set kept", got)
+		}
+	})
+
+	t.Run("library reads as empty", func(t *testing.T) {
+		got := runScan(ctx, db, t.TempDir(), t.TempDir(), time.Hour, reported)
+		if len(got) != 1 || !got["fiction"] {
+			t.Errorf("runScan over an empty library = %v, want the previous set kept", got)
+		}
+	})
 }

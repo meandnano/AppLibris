@@ -767,6 +767,69 @@ func TestSendUnderPopulatedTopLevelDirRecordsGone(t *testing.T) {
 	}
 }
 
+// The directory test failing is a third answer, not a vote for "gone": it
+// says nothing about whether the volume is there, and an unknown is not
+// evidence.
+func TestSendWhenTheDirectoryTestFailsRecordsUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory mode bits aren't enforced")
+	}
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// The book's own directory is gone, so the walk reaches the sibling —
+	// unreadable — and TopLevelDirHasBooks returns its error rather than
+	// "no books here".
+	if err := os.MkdirAll(filepath.Join(libraryDir, "vol", "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir vol/sub: %v", err)
+	}
+	bookID := setupBookWithFile(t, db, libraryDir, "vol/sub/book.epub", []byte("x"))
+	if err := os.RemoveAll(filepath.Join(libraryDir, "vol", "sub")); err != nil {
+		t.Fatalf("remove vol/sub: %v", err)
+	}
+	locked := filepath.Join(libraryDir, "vol", "other")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("mkdir vol/other: %v", err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+
+	sendID, _, err := db.EnqueueSend(ctx, bookID, "Unknown", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	stub := &stubTransport{sendFunc: func(context.Context, string, resend.Attachment) (string, error) {
+		t.Error("transport called for a file that is not there")
+		return "", nil
+	}}
+	New(db, stub, libraryDir).drain(ctx)
+
+	got, err := db.GetSend(ctx, sendID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSend: %+v, %v", got, err)
+	}
+	if got.FailureReason != fileUnreadableReason {
+		t.Errorf("FailureReason = %q, want %q — the directory test could not answer", got.FailureReason, fileUnreadableReason)
+	}
+	if !strings.Contains(logged.String(), "could not check the library directory") {
+		t.Errorf("log does not say the check failed:\n%s", logged.String())
+	}
+	// The volume-is-offline line asserts a fact this branch has just said
+	// it could not establish, so it must not also appear.
+	if strings.Contains(logged.String(), "treating the volume as offline") {
+		t.Errorf("log claims the directory yielded no books, which was never established:\n%s", logged.String())
+	}
+}
+
 // A root-level file has no top-level directory to ask about, and is not a
 // mount shape either, so it keeps the plain answer — the same exception
 // reconcileMissing makes.

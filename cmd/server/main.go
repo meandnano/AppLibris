@@ -515,6 +515,15 @@ func runScan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, 
 		slog.Info("scan complete", attrs...)
 	}
 
+	if result.Scanned == 0 {
+		// Reconciliation was skipped entirely, so this sweep reported on no
+		// directory at all — an empty UnconfirmedDirs here means "did not
+		// look", not "nothing to say". Replacing the set with it would make
+		// the next real sweep Warn afresh about residue it has already
+		// named, and a library root that blinks out is exactly when that
+		// guard fires.
+		return reported
+	}
 	return logUnconfirmedDirs(reported, result.UnconfirmedDirs)
 }
 

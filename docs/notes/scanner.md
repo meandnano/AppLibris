@@ -116,8 +116,11 @@ per-file error only if its name carries a supported suffix.
 The cost of not following: a real directory later replaced by a link is
 never re-indexed. `reconcileMissing`'s `Lstat` follows the link (only the
 leaf is not resolved), so those rows pass it and are marked missing, which
-is the honest annotation for a path the walk no longer names; they are
-never pruned, since that top-level directory yielded no files (see below).
+is the honest annotation for a path the walk no longer names. They are
+never pruned: the walk records every unfollowed link in `linkedDirs`, and
+a row under one is refused whatever its mark's age (see Missing files),
+which is what keeps a book whose file is still readable through the link
+from being deleted after the grace period.
 
 ## Covers and regeneration
 
@@ -182,21 +185,24 @@ its mark cleared. `PruneMissingFiles` does no filtering of its own; every
 guard lives in the scanner, the only place with live filesystem state, and
 decides the id list.
 
-The guards, each against reading a transient failure as a deletion:
+The rules deciding eligibility, most of them guards against reading a
+transient failure as a deletion:
 
-- A row is eligible only if `os.Lstat` fails with `fs.ErrNotExist`
-  specifically. Any other error only warns. The check runs fresh every
-  sweep, including for a row already marked, so a row whose failure mode
-  changes (`ErrNotExist` to `EACCES`, or a directory now at that path) is
-  never deleted on a confirmation that has gone stale.
-- A **successful** `Lstat` on an unseen row is not an unknown, and is
-  treated exactly as an absence: marked, and prunable under the guards
-  below. The walk is the authority on names — it read that directory
+- A row is eligible when `os.Lstat` either fails with `fs.ErrNotExist`
+  specifically or succeeds. Any other error only warns. The check runs
+  fresh every sweep, including for a row already marked, so a row whose
+  failure mode changes (`ErrNotExist` to `EACCES`, say) is never deleted on
+  a confirmation that has gone stale.
+- The one rule running the other way: a **successful** `Lstat` on an unseen
+  row is not an unknown, and is treated exactly as an absence — marked, and
+  prunable under the guards below. The walk is the authority on names — it
+  read that directory
   cleanly and did not report that exact byte sequence — so a success means
   either the filesystem matched the recorded spelling to a file the walk
   recorded under another one, the case-only rename an SMB share or macOS
   allows, or the file arrived between the walk and the check, which the
-  next sweep sees and clears. Leaving the row live under a spelling the
+  next sweep clears if the row is still inside its grace period. Leaving
+  the row live under a spelling the
   walk disagrees with is what a case-only rename would otherwise cost for
   good: two live rows, "2 paths" on every card, no annotation, no log line,
   and `internal/sender` free to send from the stale spelling. Marking is
@@ -210,6 +216,15 @@ The guards, each against reading a transient failure as a deletion:
   `skippedDirs`, a negative list, because `WalkDir` only ever reports a
   directory-read failure as a second, error-bearing callback; a positive
   "cleanly read" list is not obtainable from the API.
+- A row under a directory the walk declined to follow because it is a
+  symlink (`linkedDirs`) is marked but never pruned. That directory yielded
+  no files at any depth, exactly as an offline sub-mount does, and the
+  top-level test below misses it wherever the link sits under a directory
+  that still holds books. Its rows' `Lstat` resolves through the link and
+  succeeds, so without this the rule above would mark them and the grace
+  period would then delete a book whose file is present and readable. They
+  are marked rather than left alone, since the annotation is true: the walk
+  does not name that path any more.
 - A row whose **top-level directory yielded no book files this sweep** is
   marked but never pruned, counted in `Result.Unconfirmed` and broken down
   per directory in `Result.UnconfirmedDirs`. That is what an
@@ -269,12 +284,15 @@ reasons, the state a person opens the list to disambiguate.
 `cmd/server` logs one line per unconfirmed directory with its row count,
 at Warn the first sweep that directory appears and Info while it stays
 there (`unconfirmedLevel`, against a set `periodicScan` carries between
-iterations). The Warn exists to point at residue nothing else surfaces; now
-that a person can clear it, repeating the same warning every fifteen
+iterations). The Warn exists to point at residue nothing else surfaces;
+since a person can clear it, repeating the same warning every fifteen
 minutes for the life of a renamed folder is how a log stops being read.
 The set is a loop variable, not a column: losing it on a restart Warns once
 more, which is the right thing to say to someone who has just started the
-server, and it keeps `Scan` stateless and its tests indifferent.
+server, and it keeps `Scan` stateless and its tests indifferent. A sweep
+that reconciled nothing — an apparently empty library — reported on no
+directory at all, so it leaves the set alone rather than replacing it with
+its own emptiness and re-Warning about everything next time.
 
 `TopLevelDirHasBooks` is the exported, one-path-at-a-time form of the same
 rule, for a caller with no walk of its own; `internal/sender` is its second

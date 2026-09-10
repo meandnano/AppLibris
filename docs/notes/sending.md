@@ -51,8 +51,8 @@ enqueues coalesces into one wake-up.
 A book's file is resolved at send time, not enqueue time. A queue is a
 promise to act later and the library moves underneath it, so the worker
 takes the first `ListBookFiles` row whose `missing_since` is `NULL` when it
-claims the job. Three failures are kept apart because they mean different
-things to the person reading the status box:
+claims the job. Three sentences are kept apart because they mean different
+things to the person reading the status box, decided by four conditions:
 
 - No live location (pruned, or every copy missing) is "the file is no
   longer in the library".

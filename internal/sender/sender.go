@@ -203,7 +203,7 @@ func (w *Worker) drain(ctx context.Context) {
 // a transport error — must never wedge the queue: it always ends in a
 // terminal MarkSend* call so drain moves on to the next job.
 func (w *Worker) process(ctx context.Context, send *storage.Send) {
-	path, relPath, filename, err := w.resolveFile(ctx, send)
+	relPath, filename, err := w.resolveFile(ctx, send)
 	if err != nil {
 		// Only errFileGone is a sentence written for a reader; anything
 		// else is a storage failure, whose text belongs in the log rather
@@ -218,9 +218,10 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 		return
 	}
 
+	path := filepath.Join(w.libraryDir, relPath)
 	info, err := os.Stat(path)
 	if err != nil {
-		w.failFileError(ctx, send.ID, path, relPath, err)
+		w.failFileError(ctx, send.ID, relPath, err)
 		return
 	}
 	if info.Size() > resend.MaxAttachmentSize {
@@ -231,7 +232,7 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 
 	content, err := os.ReadFile(path)
 	if err != nil {
-		w.failFileError(ctx, send.ID, path, relPath, err)
+		w.failFileError(ctx, send.ID, relPath, err)
 		return
 	}
 
@@ -302,46 +303,48 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 // The test failing is itself an unknown and takes the same branch. A
 // root-level file has no such directory and keeps fileGoneReason, as the
 // scanner's own rule does.
-func (w *Worker) failFileError(ctx context.Context, sendID int64, path, relPath string, err error) {
+func (w *Worker) failFileError(ctx context.Context, sendID int64, relPath string, err error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		hasBooks, dirErr := scanner.TopLevelDirHasBooks(w.libraryDir, relPath)
-		if dirErr != nil {
+		switch {
+		case dirErr != nil:
 			slog.Warn("could not check the library directory a missing send file sits under",
 				"send_id", sendID, "path", relPath, "error", dirErr)
-		}
-		if dirErr == nil && hasBooks {
+			w.fail(ctx, sendID, fileUnreadableReason)
+		case hasBooks:
 			w.fail(ctx, sendID, fileGoneReason)
-			return
+		default:
+			slog.Warn("send file is absent and its directory yielded no books, treating the volume as offline",
+				"send_id", sendID, "path", relPath)
+			w.fail(ctx, sendID, fileUnreadableReason)
 		}
-		slog.Warn("send file is absent and its directory yielded no books, treating the volume as offline",
-			"send_id", sendID, "path", relPath)
-		w.fail(ctx, sendID, fileUnreadableReason)
 		return
 	}
-	slog.Error("read send file", "send_id", sendID, "path", path, "error", err)
+	slog.Error("read send file", "send_id", sendID, "path", filepath.Join(w.libraryDir, relPath), "error", err)
 	w.fail(ctx, sendID, fileUnreadableReason)
 }
 
 // resolveFile picks send's book's first non-missing file location and
-// returns its full on-disk path, its path relative to the library root (the
-// form failFileError's directory test takes) and its display filename.
+// returns its path relative to the library root — the form book_files
+// stores and failFileError's directory test takes — plus its display
+// filename. The caller joins libraryDir onto it for the filesystem calls.
 // Resolution happens here, at send time, rather than at enqueue time — see
 // fileGoneReason.
-func (w *Worker) resolveFile(ctx context.Context, send *storage.Send) (path, relPath, filename string, err error) {
+func (w *Worker) resolveFile(ctx context.Context, send *storage.Send) (relPath, filename string, err error) {
 	if !send.BookID.Valid {
-		return "", "", "", errFileGone
+		return "", "", errFileGone
 	}
 
 	files, err := w.db.ListBookFiles(ctx, send.BookID.Int64)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 	for _, f := range files {
 		if !f.MissingSince.Valid {
-			return filepath.Join(w.libraryDir, f.FilePath), f.FilePath, filepath.Base(f.FilePath), nil
+			return f.FilePath, filepath.Base(f.FilePath), nil
 		}
 	}
-	return "", "", "", errFileGone
+	return "", "", errFileGone
 }
 
 // errFileGone is resolveFile's sentinel; its Error() is exactly

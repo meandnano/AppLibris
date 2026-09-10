@@ -177,6 +177,71 @@ func TestForgetLocationRedirectsWhenBookPruned(t *testing.T) {
 	}
 }
 
+// A forget that matches nothing is a slip, not a failure: a double click,
+// a row a sweep has cleared under the reader, a stale page naming another
+// book's row. The honest answer is the list as it stands.
+func TestForgetLocationThatMatchesNothingAnswersWithTheCurrentList(t *testing.T) {
+	handler, db, bookID, missingID := newLocationsTestBook(t)
+	ctx := context.Background()
+
+	live, err := db.FindFileByPath(ctx, "b/second.epub")
+	if err != nil || live == nil {
+		t.Fatalf("FindFileByPath = %+v, %v", live, err)
+	}
+
+	cases := []struct {
+		name   string
+		fileID int64
+	}{
+		{"a live row", live.ID},
+		{"a row id that never existed", 9999},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postForgetLocation(handler, bookID, tc.fileID, true, "same-origin")
+			if rec.Code != http.StatusOK {
+				t.Errorf("htmx POST = %d, want 200", rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), "<summary>2 paths</summary>") {
+				t.Errorf("fragment does not show the list unchanged; body = %q", rec.Body.String())
+			}
+
+			plain := postForgetLocation(handler, bookID, tc.fileID, false, "same-origin")
+			if plain.Code != http.StatusSeeOther {
+				t.Errorf("plain POST = %d, want 303", plain.Code)
+			}
+			if got := plain.Header().Get("Location"); got != "/books/"+itoa(bookID) {
+				t.Errorf("Location = %q, want the book", got)
+			}
+		})
+	}
+
+	// Nothing above may have touched the marked row.
+	if f, err := db.FindFileByPath(ctx, "a/first.epub"); err != nil || f == nil || f.ID != missingID {
+		t.Errorf("FindFileByPath = %+v, %v; want the marked row still there", f, err)
+	}
+}
+
+// A malformed or absent `file` field is a client error, and an unknown book
+// is the same plain 404 every other route answers.
+func TestForgetLocationRejectsABadFileFieldAndAnUnknownBook(t *testing.T) {
+	handler, _, bookID, fileID := newLocationsTestBook(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/books/"+itoa(bookID)+"/locations/forget",
+		strings.NewReader("file=not-a-number"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("POST with a non-numeric file = %d, want 400", rec.Code)
+	}
+
+	if rec := postForgetLocation(handler, 4242, fileID, true, "same-origin"); rec.Code != http.StatusNotFound {
+		t.Errorf("POST against an unknown book = %d, want 404", rec.Code)
+	}
+}
+
 // The button is the rule made visible: a path that is there is not
 // something to forget, and offering it would only invite a click the delete
 // then refuses.

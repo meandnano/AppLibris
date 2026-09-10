@@ -1514,6 +1514,52 @@ func TestCreateBookWithFileInheritsManualFields(t *testing.T) {
 	if len(found) != 1 || found[0].ID != newID {
 		t.Errorf("SearchBooks(Piranesi) = %+v, want the replacement book", found)
 	}
+
+	// The stamp comes from the row's own modified_at, read back inside the
+	// transaction. Taking it from the Book the caller passed writes the
+	// zero time, since neither the scanner nor createBookTx sets it.
+	if book.ModifiedAt.IsZero() {
+		t.Error("modified_at is the zero time, so the inheritance stamp came from an unset field")
+	}
+}
+
+// enrichment_jobs are the deliberate exception to inheritance: a pending
+// intention about the old content says nothing about the new bytes, so
+// those rows cascade with the book rather than following it.
+func TestCreateBookWithFileDoesNotCarryEnrichmentJobs(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	oldID, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: "hash-old", Title: "Book", SortTitle: "book", Format: "epub"},
+		nil, "x.epub", 100, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile old: %v", err)
+	}
+	if queued, err := db.EnqueueEnrichment(ctx, oldID, mtime); err != nil || !queued {
+		t.Fatalf("EnqueueEnrichment = %v, %v", queued, err)
+	}
+
+	newID, orphanedID, _, _, err := db.CreateBookWithFile(ctx, Book{
+		ContentHash: "hash-new", Title: "Book", SortTitle: "book", Format: "epub",
+	}, nil, "x.epub", 200, mtime)
+	if err != nil {
+		t.Fatalf("CreateBookWithFile new: %v", err)
+	}
+	if orphanedID != oldID {
+		t.Fatalf("orphanedID = %d, want %d", orphanedID, oldID)
+	}
+
+	for _, id := range []int64{oldID, newID} {
+		var count int
+		if err := db.Read().QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&count); err != nil {
+			t.Fatalf("count enrichment_jobs: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("enrichment_jobs for book %d = %d, want 0 — the job cascades, it does not follow", id, count)
+		}
+	}
 }
 
 // Only what a person is the author of moves. An embedded value is read

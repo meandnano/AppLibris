@@ -154,9 +154,10 @@ tidy-up would break. The note named in the heading carries the reasoning.
   (`cover.ErrUnsupportedCover`) is recorded as no cover and never retried.
 - `PruneMissingFiles` filters nothing; every prune guard lives in the
   scanner. A row under a top-level directory that yielded no book files
-  this sweep is marked but never pruned, until a person forgets the row;
-  a sweep that saw zero files reconciles nothing; a row under a directory
-  the walk could not read is left alone at both phases.
+  this sweep, or under a symlinked directory the walk declined to follow,
+  is marked but never pruned, until a person forgets the row; a sweep that
+  saw zero files reconciles nothing; a row under a directory the walk could
+  not read is left alone at both phases.
 - `ForgetMissingFile` is the person's delete, so its guards are clauses on
   the `DELETE`, never a read before it.
 - Symlinked directories are not followed; they are named at Warn and

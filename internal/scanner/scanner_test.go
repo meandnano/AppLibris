@@ -3415,10 +3415,13 @@ func TestReconcileMarksUnseenRowWhoseLstatSucceeds(t *testing.T) {
 
 // The other half of the rule above: a *failed* Lstat is still an unknown,
 // and an unknown is not evidence. Only success became a spelling mismatch.
+//
+// The failure has to be one the row actually reaches, which rules out an
+// unreadable parent: the walk reports that directory as unreadable, so the
+// row is excluded by the skippedDirs guard and never sees Lstat at all.
+// ENOTDIR does reach it — a regular file replacing a directory one level
+// up, with the grandparent still readable — and needs no permission trick.
 func TestReconcileLstatErrorStillLeavesRowAlone(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory mode bits aren't enforced")
-	}
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
 	db := openTestDB(t)
@@ -3426,14 +3429,14 @@ func TestReconcileLstatErrorStillLeavesRowAlone(t *testing.T) {
 
 	// top/ keeps a file throughout, so the row reaches Lstat rather than
 	// the unconfirmed-directory guard, and elsewhere.epub keeps the sweep
-	// out of the empty-library case even once top/ is unreadable.
-	locked := filepath.Join(libDir, "top", "locked")
-	if err := os.MkdirAll(locked, 0o755); err != nil {
-		t.Fatalf("mkdir top/locked: %v", err)
+	// out of the empty-library case.
+	sub := filepath.Join(libDir, "top", "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir top/sub: %v", err)
 	}
 	writeTestEPUB(t, filepath.Join(libDir, "elsewhere.epub"), "Elsewhere", "Author", nil)
 	writeTestEPUB(t, filepath.Join(libDir, "top", "sibling.epub"), "Sibling", "Author", nil)
-	writeTestEPUB(t, filepath.Join(locked, "book.epub"), "Locked Book", "Author", nil)
+	writeTestEPUB(t, filepath.Join(sub, "book.epub"), "Nested Book", "Author", nil)
 
 	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
 		t.Fatalf("first Scan: %v", err)
@@ -3441,27 +3444,115 @@ func TestReconcileLstatErrorStillLeavesRowAlone(t *testing.T) {
 		t.Fatalf("first scan = %+v, want New=3", first)
 	}
 
-	// EACCES on the leaf's parent: the walk reports the directory itself as
-	// unreadable, and Lstat on the file under it fails with EACCES rather
-	// than ErrNotExist.
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatalf("remove top/sub: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+	if err := os.WriteFile(sub, []byte("not a directory anymore"), 0o644); err != nil {
+		t.Fatalf("replace top/sub with a file: %v", err)
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
 	if err != nil {
 		t.Fatalf("second Scan: %v", err)
 	}
-	if result.Missing != 0 {
-		t.Errorf("second scan = %+v, want Missing=0 (EACCES is not proof of absence)", result)
+	// Without this the assertions below would pass on a row the walk
+	// excluded before it ever reached the branch under test.
+	if !strings.Contains(logs.String(), "could not confirm missing file") {
+		t.Fatalf("the row never reached the Lstat branch this test is about:\n%s", logs.String())
 	}
-	f, err := db.FindFileByPath(ctx, "top/locked/book.epub")
+	if result.Missing != 0 {
+		t.Errorf("second scan = %+v, want Missing=0 (ENOTDIR is not proof of absence)", result)
+	}
+	f, err := db.FindFileByPath(ctx, "top/sub/book.epub")
 	if err != nil || f == nil {
 		t.Fatalf("FindFileByPath = %+v, %v; want the row untouched", f, err)
 	}
 	if f.MissingSince.Valid {
 		t.Errorf("missing_since = %v, want NULL", f.MissingSince)
+	}
+}
+
+// A directory the walk declines to follow because it is now a symlink
+// yields no files at any depth, exactly as an offline sub-mount does. Its
+// rows' Lstat resolves through the link and succeeds, so the successful-
+// Lstat rule marks them; the prune must still be refused, or a book whose
+// file is sitting there readable is deleted after the grace period. The
+// top-level test alone does not catch it when the link is nested under a
+// directory that still holds books.
+func TestReconcileNeverPrunesUnderAnUnfollowedSymlinkedDirectory(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	shelf := filepath.Join(libDir, "top", "shelf")
+	if err := os.MkdirAll(shelf, 0o755); err != nil {
+		t.Fatalf("mkdir top/shelf: %v", err)
+	}
+	// A sibling keeps top/ populated, so the top-level guard does not fire
+	// and the symlink guard is the only thing left to refuse the prune.
+	writeTestEPUB(t, filepath.Join(libDir, "top", "sibling.epub"), "Sibling", "Author", nil)
+	writeTestEPUB(t, filepath.Join(shelf, "book.epub"), "Shelved Book", "Author", nil)
+
+	if first, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	} else if first.New != 2 {
+		t.Fatalf("first scan = %+v, want New=2", first)
+	}
+
+	// The same files, reached through a link instead of a real directory:
+	// the book is still there and still readable, and the walk still will
+	// not follow it.
+	target := filepath.Join(t.TempDir(), "shelf")
+	if err := os.Rename(shelf, target); err != nil {
+		t.Fatalf("move shelf out: %v", err)
+	}
+	if err := os.Symlink(target, shelf); err != nil {
+		t.Fatalf("symlink shelf: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shelf, "book.epub")); err != nil {
+		t.Fatalf("the book must still be readable through the link: %v", err)
+	}
+
+	marked, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("marking Scan: %v", err)
+	}
+	if marked.Missing != 1 {
+		t.Errorf("marking scan = %+v, want Missing=1 (the walk no longer names that path)", marked)
+	}
+	if marked.Unconfirmed != 1 {
+		t.Errorf("marking scan = %+v, want Unconfirmed=1", marked)
+	}
+	if got := marked.UnconfirmedDirs["top/shelf"]; got != 1 {
+		t.Errorf("UnconfirmedDirs = %v, want top/shelf:1", marked.UnconfirmedDirs)
+	}
+
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE book_files SET missing_since = ? WHERE file_path = ?`,
+			"2020-01-01T00:00:00.000000000Z", "top/shelf/book.epub")
+		return err
+	}); err != nil {
+		t.Fatalf("backdate missing_since: %v", err)
+	}
+
+	overdue, err := Scan(ctx, db, libDir, coversDir, time.Hour)
+	if err != nil {
+		t.Fatalf("pruning Scan: %v", err)
+	}
+	if overdue.Pruned != 0 {
+		t.Errorf("pruning scan = %+v, want Pruned=0 — the file is readable through the link", overdue)
+	}
+	if f, err := db.FindFileByPath(ctx, "top/shelf/book.epub"); err != nil || f == nil {
+		t.Fatalf("FindFileByPath = %+v, %v; want the row kept", f, err)
+	}
+	if book := bookByPath(t, ctx, db, "top/shelf/book.epub"); book == nil {
+		t.Error("the book was deleted though its file is still on disk")
 	}
 }
 

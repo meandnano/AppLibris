@@ -118,6 +118,13 @@ func (db *DB) FindBookByID(ctx context.Context, id int64) (*Book, error) {
 	return scanBook(row)
 }
 
+// findBookByIDTx is FindBookByID inside a caller's transaction, for a writer
+// that needs to read a book it is about to change. It must be called from
+// inside a DB.Write callback — see DB.Write's contract.
+func findBookByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*Book, error) {
+	return scanBook(tx.QueryRowContext(ctx, `SELECT `+bookColumns+` FROM books WHERE id = ?`, id))
+}
+
 // BookPage is a keyset cursor into the (sort_title, id) ordering both
 // ListBooks and SearchBooks return rows in. The zero value is the first
 // page.
@@ -588,25 +595,53 @@ func (db *DB) CreateBookWithFile(ctx context.Context, b Book, authorNames []stri
 			return err
 		}
 
-		inherited, err = inheritFromReplacedBookTx(ctx, tx, previousOwner, id)
+		// One question, asked once: is the path's previous owner a different
+		// book the upsert has just left with no locations? Inheritance and
+		// the prune both turn on it, and on the single write connection the
+		// answer cannot change between them.
+		replaced, wasReplaced, err := replacedBookTx(ctx, tx, previousOwner, id)
 		if err != nil {
 			return err
 		}
-
-		orphanedID, orphanedTitle, err = pruneOrphanIfEmptyTx(ctx, tx, previousOwner, id)
-		if err != nil {
-			return err
+		if wasReplaced {
+			if inherited, err = inheritFromReplacedBookTx(ctx, tx, replaced, id); err != nil {
+				return err
+			}
+			deleted, title, err := pruneOrphanedBookTx(ctx, tx, replaced)
+			if err != nil {
+				return err
+			}
+			if deleted {
+				orphanedID, orphanedTitle = replaced, title
+			}
 		}
 		return syncBookFTSTx(ctx, tx, id)
 	})
 	return id, orphanedID, orphanedTitle, inherited, err
 }
 
+// replacedBookTx reports whether previousOwner is a real, different book
+// that the caller's upsert has just left with no locations at all — the
+// state that says the path was not merely gained but taken over. It is the
+// test pruneOrphanIfEmptyTx makes internally, hoisted for a caller that has
+// to act on the answer twice. It must be called from inside a DB.Write
+// callback, after the upsert — see DB.Write's contract.
+func replacedBookTx(ctx context.Context, tx *sql.Tx, previousOwner sql.NullInt64, newOwnerID int64) (int64, bool, error) {
+	if !previousOwner.Valid || previousOwner.Int64 == newOwnerID {
+		return 0, false, nil
+	}
+	var stillHasFiles bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM book_files WHERE book_id = ?)`, previousOwner.Int64).Scan(&stillHasFiles); err != nil {
+		return 0, false, err
+	}
+	return previousOwner.Int64, !stillHasFiles, nil
+}
+
 // inheritFromReplacedBookTx carries what a person put into the book that
-// previously owned a path onto the book that now does. It runs only when
-// previousOwner is a real, different book the caller's upsert has just left
-// with no locations at all — the same test pruneOrphanIfEmptyTx makes, and
-// it must run before that deletion.
+// previously owned a path onto the book that now does. Its caller has
+// already established, through replacedBookTx, that oldID is a different
+// book left with no locations, and it must run before that book is deleted.
 //
 // That state is one path's whole view of two different events: the same
 // book rewritten (Calibre's metadata write-back, ebook-polish, kepubify, a
@@ -626,27 +661,16 @@ func (db *DB) CreateBookWithFile(ctx context.Context, b Book, authorNames []stri
 // field stays manual, and someone who cleared a wrong publisher does not
 // want the file's wrong publisher back.
 //
-// The stamp is the new book's own modified_at, read back rather than taken
-// from a clock: createBookTx leaves that column to its schema default, so
-// this is the instant the row was created and the whole creation carries
-// one.
+// The stamp is the new book's own modified_at, read back off the row rather
+// than taken from a clock: createBookTx leaves that column to its schema
+// default, so this is the instant the row was created and the whole
+// creation carries one. Both books are read whole, once, rather than a
+// column at a time: scalarFieldValues is the same field-to-column mapping
+// the provenance writer uses, so the two cannot drift.
 //
 // It must be called from inside a DB.Write callback — see DB.Write's
 // contract.
-func inheritFromReplacedBookTx(ctx context.Context, tx *sql.Tx, previousOwner sql.NullInt64, newOwnerID int64) ([]MetadataField, error) {
-	if !previousOwner.Valid || previousOwner.Int64 == newOwnerID {
-		return nil, nil
-	}
-	oldID := previousOwner.Int64
-
-	var stillHasFiles bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM book_files WHERE book_id = ?)`, oldID).Scan(&stillHasFiles); err != nil {
-		return nil, err
-	}
-	if stillHasFiles {
-		return nil, nil
-	}
-
+func inheritFromReplacedBookTx(ctx context.Context, tx *sql.Tx, oldID, newOwnerID int64) ([]MetadataField, error) {
 	if err := repointSendLogTx(ctx, tx, oldID, newOwnerID); err != nil {
 		return nil, err
 	}
@@ -655,10 +679,20 @@ func inheritFromReplacedBookTx(ctx context.Context, tx *sql.Tx, previousOwner sq
 	if err != nil || len(fields) == 0 {
 		return nil, err
 	}
-	modifiedAt, err := bookModifiedAtTx(ctx, tx, newOwnerID)
+
+	old, err := findBookByIDTx(ctx, tx, oldID)
 	if err != nil {
 		return nil, err
 	}
+	replacement, err := findBookByIDTx(ctx, tx, newOwnerID)
+	if err != nil {
+		return nil, err
+	}
+	if old == nil || replacement == nil {
+		return nil, nil
+	}
+	values := scalarFieldValues(*old)
+	modifiedAt := replacement.ModifiedAt
 
 	inherited := make([]MetadataField, 0, len(fields))
 	for _, field := range fields {
@@ -673,11 +707,7 @@ func inheritFromReplacedBookTx(ctx context.Context, tx *sql.Tx, previousOwner sq
 			inherited = append(inherited, field)
 			continue
 		}
-		value, err := bookScalarFieldTx(ctx, tx, oldID, field)
-		if err != nil {
-			return nil, err
-		}
-		if err := updateBookColumnTx(ctx, tx, newOwnerID, field, value, modifiedAt); err != nil {
+		if err := updateBookColumnTx(ctx, tx, newOwnerID, field, values[field], modifiedAt); err != nil {
 			return nil, err
 		}
 		if err := setFieldSourceTx(ctx, tx, newOwnerID, field, "manual"); err != nil {
@@ -724,18 +754,6 @@ func manualFieldSourcesTx(ctx context.Context, tx *sql.Tx, bookID int64) ([]Meta
 	return fields, nil
 }
 
-// bookScalarFieldTx reads the single books column field backs. It must be
-// called from inside a DB.Write callback — see DB.Write's contract.
-func bookScalarFieldTx(ctx context.Context, tx *sql.Tx, bookID int64, field MetadataField) (string, error) {
-	column, ok := scalarColumnName(field)
-	if !ok {
-		return "", ErrInvalidMetadataField
-	}
-	var value string
-	err := tx.QueryRowContext(ctx, `SELECT `+column+` FROM books WHERE id = ?`, bookID).Scan(&value)
-	return value, err
-}
-
 // bookAuthorNamesTx reads bookID's author names in the order the book
 // credits them, the form updateBookAuthorsTx takes. It must be called from
 // inside a DB.Write callback — see DB.Write's contract.
@@ -760,14 +778,6 @@ func bookAuthorNamesTx(ctx context.Context, tx *sql.Tx, bookID int64) ([]string,
 		names = append(names, name)
 	}
 	return names, rows.Err()
-}
-
-// bookModifiedAtTx reads bookID's current modified_at. It must be called
-// from inside a DB.Write callback — see DB.Write's contract.
-func bookModifiedAtTx(ctx context.Context, tx *sql.Tx, bookID int64) (time.Time, error) {
-	var at time.Time
-	err := tx.QueryRowContext(ctx, `SELECT modified_at FROM books WHERE id = ?`, bookID).Scan(&at)
-	return at, err
 }
 
 // repointSendLogTx moves every send_log row from one book to another.
