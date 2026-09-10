@@ -2958,10 +2958,10 @@ func TestScanKeepsAPresentProviderCoverWhenEmbeddedCoverIsUndecodable(t *testing
 // The motivation for cmd/server resolving LIBRARY_DIR before anything sees
 // it: filepath.WalkDir Lstats its root and never follows a link, so a
 // symlinked root is visited once as a non-directory entry and the walk
-// ends. Nothing here is an error, which is what makes it worth pinning —
-// the whole library reads as empty and only the resolution one layer up
-// prevents it. A change that made Scan resolve its own root should delete
-// this test rather than satisfy it.
+// ends. The sweep reports the link, but a report is all it can do — the
+// library is empty either way, and only the resolution one layer up gives
+// it any books. A change that made Scan resolve its own root should delete
+// this test rather than satisfy it
 func TestScanOfAnUnresolvedSymlinkedRootIndexesNothing(t *testing.T) {
 	target := t.TempDir()
 	coversDir := t.TempDir()
@@ -2984,8 +2984,8 @@ func TestScanOfAnUnresolvedSymlinkedRootIndexesNothing(t *testing.T) {
 		t.Errorf("scan = %+v, want Scanned=0 New=0 — WalkDir does not follow the root link", result)
 	}
 	// The root arrives at the callback as a symlink entry like any other,
-	// so the unfollowed-directory branch catches it too: still no books,
-	// but no longer in silence
+	// so the unfollowed-directory branch catches it too: no books, and the
+	// link named rather than passed over
 	if result.Errors != 1 {
 		t.Errorf("Errors = %d, want 1 — the root link itself is reported", result.Errors)
 	}
@@ -3013,10 +3013,9 @@ func TestScanOfAnUnresolvedSymlinkedRootIndexesNothing(t *testing.T) {
 
 // A symlinked subdirectory is not followed — following it needs a cycle
 // guard and would index files whose relative file_path cannot say where
-// they are — but it is not passed over in silence either, which is the
-// half that changed: the entry arrives as a non-directory whose name has
-// no supported suffix, so the ordinary filter would drop it without a
-// word.
+// they are — but it is named rather than passed over: the entry arrives as
+// a non-directory whose name has no supported suffix, so the ordinary
+// filter alone would drop it without a word
 func TestScanDoesNotFollowASymlinkedSubdirectory(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
@@ -3052,7 +3051,7 @@ func TestScanDoesNotFollowASymlinkedSubdirectory(t *testing.T) {
 
 // A symlinked *file* is indexed as any other: every read of it — the stat,
 // the open, the hash — goes through the link, so there is nothing about it
-// the index cannot express.
+// the index cannot express
 func TestScanIndexesASymlinkedFile(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
@@ -3077,11 +3076,13 @@ func TestScanIndexesASymlinkedFile(t *testing.T) {
 	}
 }
 
-// A link that resolves to nothing is not a directory, so it takes the
-// ordinary route rather than the new branch: with a supported suffix it is
-// a per-file error exactly as a deleted file would be, and without one it
-// is ignored. Getting this wrong the other way — treating any symlink as a
-// directory — would report a stray dangling link as a library problem.
+// A link that resolves to nothing is not a directory, and unlike one that
+// cannot be resolved at all it is not an unknown either: ErrNotExist is a
+// definite answer, so it takes the ordinary route. With a supported suffix
+// that is a per-file error exactly as a deleted file would be, and without
+// one it is ignored. Getting this wrong the other way — treating any
+// symlink as a directory — would report a stray dangling link as a library
+// problem
 func TestScanTreatsADanglingSymlinkAsAFile(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
@@ -3106,5 +3107,46 @@ func TestScanTreatsADanglingSymlinkAsAFile(t *testing.T) {
 	}
 	if got := logs.String(); strings.Contains(got, "symlinked directory is not followed") {
 		t.Errorf("a dangling link was reported as a directory:\n%s", got)
+	}
+}
+
+// A link that cannot be resolved at all — a cycle here, a target whose
+// directory denies a stat on a real library — is the third case, and the
+// one a bare "does it resolve to a directory" test drops on the floor: it
+// is neither a directory to refuse nor a file to index, and its name says
+// nothing about which it would have been. An unknown is not evidence, so
+// it is reported rather than passed over, the same posture missing-file
+// reconciliation takes toward a non-ErrNotExist Lstat
+func TestScanReportsASymlinkItCannotResolve(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author A", nil)
+
+	// a link to itself: Stat fails ELOOP, which is neither "gone" nor
+	// "here", and no filename suffix would tell us either
+	loop := filepath.Join(libDir, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatalf("symlink loop: %v", err)
+	}
+
+	logs := captureLogs(t)
+	result, err := Scan(ctx, db, libDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.Scanned != 1 || result.New != 1 {
+		t.Errorf("scan = %+v, want Scanned=1 New=1 (the sibling alone)", result)
+	}
+	if result.Errors != 1 {
+		t.Errorf("Errors = %d, want 1 (the unresolvable link)", result.Errors)
+	}
+	if got := logs.String(); !strings.Contains(got, "could not resolve symlink") {
+		t.Errorf("scan log = %q, want the unresolvable link reported", got)
+	}
+	if got := logs.String(); strings.Contains(got, "symlinked directory is not followed") {
+		t.Errorf("a link that does not resolve was reported as a directory:\n%s", got)
 	}
 }

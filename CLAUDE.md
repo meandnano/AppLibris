@@ -1267,24 +1267,45 @@ full design.
   badge in the UI should surface. Supported files are matched on filename
   *suffix* rather than `filepath.Ext`, since a `.fb2.zip` archive is two
   extensions and `Ext` would only ever see the last one. A **symlinked
-  subdirectory is not followed**, and — the half that changed — says so:
+  subdirectory is not followed**, and is named rather than passed over:
   `filepath.WalkDir` never follows a link, so such an entry arrives as a
   non-directory whose name has no supported suffix and the ordinary filter
-  would drop it in silence. It is logged at Warn (naming the link and its
-  target) and counted in `Result.Errors`, once per sweep, so the summary
+  alone would drop it in silence. It is logged at Warn (naming the link and
+  its target) and counted in `Result.Errors`, once per sweep, so the summary
   line carries it and the fifteen-minute repeat is pressure toward a bind
   mount. Following one was rejected rather than deferred: it needs a
   `(dev, ino)` cycle guard — the very inode tracking the mover paragraph
   below argues against — and a link pointing outside the library indexes
-  files whose relative `file_path` cannot express where they are. A
+  files whose relative `file_path` cannot express where they are.
+  The branch turns on what `os.Stat` says, and the **three** answers are
+  not two: a link resolving to a directory is the refusal above; a link
+  whose `Stat` fails with anything *but* `fs.ErrNotExist` — a cycle
+  (`ELOOP`), a target that may not be stat'd (`EACCES`) — is reported the
+  same way and likewise not followed, since an unknown is not evidence and
+  nothing about its name says which of the other two it would have been;
+  only `fs.ErrNotExist` or a link to a file takes the ordinary route. That
+  middle case is the one a "does it resolve to a directory" test drops
+  silently, which is the bug this branch exists to avoid rather than a
+  refinement of it. So a
   symlinked *file* is indexed as any other, since the stat, the open and
-  the hash all go through the link, and a **dangling** link is neither: it
-  resolves to no directory, so it takes the ordinary route and is a
-  per-file error only if its name carries a supported suffix. The root
+  the hash all go through the link, and a **dangling** link is a per-file
+  error only if its name carries a supported suffix. The root
   itself is caught by the same branch — a symlinked `LIBRARY_DIR` walks as
-  one entry and finds nothing — but `cmd/server` resolves it away before
-  the scanner ever sees it, so that Warn is a backstop for an embedded
-  caller rather than the fix. For known content,
+  one entry, so the sweep reports the link and still warns "library
+  appeared empty", since `Scanned == 0` — but `cmd/server` resolves it away
+  before the scanner ever sees it, so that Warn is a backstop for an
+  embedded caller rather than the fix.
+  **A real directory later replaced by a link is the cost this policy
+  carries**, and the surprising half is the one where nothing looks wrong:
+  its files are never seen, but `reconcileMissing`'s `os.Lstat` resolves
+  every component *but* the leaf, so it follows the link and succeeds — the
+  rows are neither marked nor cleared, the book stays live and is never
+  re-hashed, and each sweep only warns about the path. Where the link's
+  target does *not* hold the files, the rows fail `Lstat` with
+  `ErrNotExist`, are marked, and are then never pruned because that
+  directory yielded no files this sweep — the same phantom location
+  `docs/backlog/2026090901-forget-missing-location.md` records for a
+  renamed folder. For known content,
   a sweep re-extracts a recorded cover whose file is missing or zero bytes
   and refreshes its stored path, making `COVERS_DIR` disposable — but a
   cover a *provider* supplied has no original in the book to rebuild from,
@@ -2194,8 +2215,9 @@ full design.
   `run` resolves each configured path — `LIBRARY_DIR`, `COVERS_DIR`,
   `DB_PATH`'s directory — through `resolveDir`, which creates it if absent
   and then `filepath.EvalSymlinks` it, so every consumer downstream (the
-  walk, the watcher, both queue workers) is handed one root that means the
-  same thing whether or not links are followed. `LIBRARY_DIR` is the one
+  walk, the watcher, and the sender worker resolving a book's file — the
+  enrichment worker takes `COVERS_DIR`, not the library root) is handed one
+  root that means the same thing whether or not links are followed. `LIBRARY_DIR` is the one
   that has to be resolved here: `filepath.WalkDir` `Lstat`s its root and
   never follows a link, so `~/Books -> /volume1/books` — the ordinary NAS
   shape — was visited once as a non-directory entry, ending the walk with
@@ -2207,7 +2229,16 @@ full design.
   (`Stat` follows the link and finds nothing, `Mkdir` then fails `EEXIST`
   on the link itself), but its message names only the link it could not
   replace and never the target that is missing, which is the whole
-  question when a volume did not mount. `DB_PATH` is neither walked nor
+  question when a volume did not mount. `brokenLink` walks **every
+  component** of the configured path and not just its last, since the link
+  is as likely to be the mount point as the directory under it
+  (`/mnt/nas/books` with `/mnt/nas -> /volume1` offline is the same failure
+  one level up, and checking the leaf alone hands exactly that case back to
+  `MkdirAll`'s poorer message); a component that is merely *absent* is not
+  a broken link, since creating it is `MkdirAll`'s job and a link is the
+  one shape `MkdirAll` cannot describe. A relative target is joined onto
+  its link's own directory before it is named, so the message carries a
+  path the reader can go and look at rather than the text of the link. `DB_PATH` is neither walked nor
   itself resolvable before the first run — `EvalSymlinks` needs every
   element of a path to exist and the database file does not yet — so only
   its directory is resolved and the base name rejoined; the point there is

@@ -274,12 +274,12 @@ func TestFetchMetadataGuardMapsTheSettingToTheRightWrapper(t *testing.T) {
 	}
 }
 
-// Every consumer of a configured directory — the walk, the watcher, both
-// queue workers — has to be handed the same root, and filepath.WalkDir is
-// the one that cannot resolve it for itself. The dangling case is the
-// reason this is a function rather than a bare EvalSymlinks call: os.MkdirAll
-// fails on a dangling link too, but names only the link it could not
-// replace, never the target that is missing.
+// Every consumer of a configured directory — the walk, the watcher, the
+// sender worker — has to be handed the same root, and filepath.WalkDir is
+// the one that cannot resolve it for itself. A link resolving nowhere is
+// the reason this is a function rather than a bare EvalSymlinks call:
+// os.MkdirAll fails on one too, but names only the link it could not
+// replace, never the target that is missing
 func TestResolveDir(t *testing.T) {
 	t.Run("a symlink resolves to its target", func(t *testing.T) {
 		target := t.TempDir()
@@ -330,12 +330,52 @@ func TestResolveDir(t *testing.T) {
 			t.Errorf("error = %q, want both the link %q and its target %q named", err, link, target)
 		}
 	})
+
+	// The same failure one level up, and the ordinary NAS shape: it is the
+	// mount point that is a link, not the directory configured under it.
+	// Checking the final element alone leaves this case to MkdirAll, whose
+	// message names neither the link nor what it points at
+	t.Run("a dangling symlink at an ancestor names that link", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "volume1")
+		nas := filepath.Join(t.TempDir(), "nas")
+		if err := os.Symlink(target, nas); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		configured := filepath.Join(nas, "books")
+
+		_, err := resolveDir("library directory", configured)
+		if err == nil {
+			t.Fatal("resolveDir under a dangling ancestor: want an error, got nil")
+		}
+		if !strings.Contains(err.Error(), nas) || !strings.Contains(err.Error(), target) {
+			t.Errorf("error = %q, want the ancestor link %q and its target %q named", err, nas, target)
+		}
+	})
+
+	// os.Readlink hands back the text of the link, so a relative one names
+	// nothing the reader can go and look at
+	t.Run("a relative target is named as a path", func(t *testing.T) {
+		dir := t.TempDir()
+		link := filepath.Join(dir, "library")
+		if err := os.Symlink("../books", link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+
+		_, err := resolveDir("library directory", link)
+		if err == nil {
+			t.Fatal("resolveDir on a relative dangling link: want an error, got nil")
+		}
+		want := filepath.Join(filepath.Dir(dir), "books")
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want the target resolved to %q", err, want)
+		}
+	})
 }
 
 // The end-to-end shape the resolution exists for, and the one a unit test
 // of resolveDir alone cannot catch: a resolved value that is computed and
-// then not passed on would leave the scanner walking the link and finding
-// nothing, exactly as before.
+// then not passed on leaves the scanner walking the link, which finds
+// nothing behind it
 func TestRunIndexesALibraryBehindASymlink(t *testing.T) {
 	target := t.TempDir()
 	if err := os.WriteFile(filepath.Join(target, "book.fb2"), []byte("book content"), 0o644); err != nil {
@@ -369,7 +409,7 @@ func TestRunIndexesALibraryBehindASymlink(t *testing.T) {
 	// and applied its migrations. The test must not open it before that:
 	// storage.Open applies migrations too, and two handles doing so at
 	// once fail each other — a race the test would own rather than
-	// observe.
+	// observe
 	waitFor(t, done, "the server to answer /healthz", func() bool {
 		resp, err := http.Get("http://" + addr + "/healthz")
 		if err != nil {
@@ -393,7 +433,7 @@ func TestRunIndexesALibraryBehindASymlink(t *testing.T) {
 
 // freeAddr returns a loopback address nothing is listening on. run needs a
 // fixed one — with :0 the chosen port is only ever named in a log line the
-// test cannot read, since run installs its own logger.
+// test cannot read, since run installs its own logger
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -408,7 +448,7 @@ func freeAddr(t *testing.T) string {
 }
 
 // waitFor polls until ready reports true, failing the test if run returns
-// first (its error is the useful one) or if the wait runs out.
+// first (its error is the useful one) or if the wait runs out
 func waitFor(t *testing.T, done <-chan error, what string, ready func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -425,9 +465,10 @@ func waitFor(t *testing.T, done <-chan error, what string, ready func() bool) {
 	}
 }
 
-// A LIBRARY_DIR that resolves nowhere is a mount that did not come up, and
-// startup is the only place that can say so: today it reached the scanner
-// as an ordinary path and produced an empty library with no error at all.
+// A LIBRARY_DIR that resolves nowhere is a mount that did not come up.
+// Startup is where that has to be said: reaching the scanner, it is one
+// unfollowable entry and an empty library, which the sweep can report but
+// cannot refuse to run on
 func TestRunRejectsADanglingLibraryDir(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "volume1", "books")
 	link := filepath.Join(t.TempDir(), "library")
