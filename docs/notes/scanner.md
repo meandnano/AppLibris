@@ -204,8 +204,8 @@ directory gains a book again. The most ordinary way to pay it is a renamed
 top-level folder: every book under it gains a live row and keeps its old
 one marked for good, with the Warn firing on every sweep. A phantom card is
 recoverable where a pruned book's edits are not. The "forget this location"
-affordance that would be the honest fix is
-`docs/backlog/2026090901-forget-missing-location.md`.
+affordance that would be the honest fix is planned in
+`docs/plans/2026091001-library-changes-underneath-the-index.md`.
 
 ## Watcher
 

@@ -408,8 +408,8 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 //
 // The paragraph breaks reach books.description but not the page:
 // .detail__description sets no white-space, so HTML collapses them in the
-// read view and they are visible only in the edit textarea. Recorded in
-// docs/backlog/2026090610-description-paragraphs-do-not-render.md.
+// read view and they are visible only in the edit textarea. Planned in
+// docs/plans/2026091002-enrichment-hardening.md.
 //
 // The request is made for any matched volume that named an id, not only
 // one that also has a cover. Skipping a coverless volume would be free on

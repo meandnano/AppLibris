@@ -282,8 +282,7 @@ listing only the languages this library plausibly contains and passing
 anything else through unchanged, so the column does not hold `eng` for one
 book and `en` for the next. This does not make the column consistent on its
 own: `internal/epub` and `internal/fb2` pass a file's own value through, and
-EPUB's `dc:language` is BCP-47 by specification
-(`docs/backlog/2026090609-provider-language-can-be-wrong.md`).
+EPUB's `dc:language` is BCP-47 by specification.
 
 The client sets a descriptive `User-Agent`. Open Library's terms ask for one
 and throttle the generic Go default, and a block there is indistinguishable
@@ -323,8 +322,8 @@ into no cover. Rewriting the thumbnail URL's `zoom` parameter is the other
 shortcut to avoid: for a size a volume lacks, Google answers `200
 image/jpeg` with an "image not available" placeholder that nothing
 downstream can tell from a cover. Only a URL Google itself named is safe to
-fetch (Open Library has the same placeholder problem,
-`docs/backlog/2026090717-openlibrary-placeholder-cover.md`).
+fetch (Open Library has the same placeholder problem;
+`docs/plans/2026091002-enrichment-hardening.md` adds `?default=false`).
 
 Status classification is measured rather than read from the docs: a
 **rejected key is 400** (`API_KEY_INVALID`), an **exhausted quota is 429**
@@ -355,7 +354,7 @@ lives here rather than in `sanitizeValue` because Open Library's edition
 description is plain to begin with, and stripping tags from every provider
 would mangle one that legitimately contains a `<`. Paragraph breaks reach the
 column but not the page
-(`docs/backlog/2026090610-description-paragraphs-do-not-render.md`).
+(`docs/plans/2026091002-enrichment-hardening.md`).
 
 The optional `apiKey` travels in the query string and is scrubbed from every
 returned error's text (`redactKey`), in raw and percent-encoded form, since
@@ -380,7 +379,7 @@ enrichment quietly answering nothing. A same-host TLS downgrade is refused
 separately, because a `Location` writing the port out on both sides compares
 equal under the default-port normalisation. A refused redirect is still
 classified retryable on both clients
-(`docs/backlog/2026090611-refused-redirect-is-retried.md`).
+(`docs/plans/2026091002-enrichment-hardening.md`).
 
 `GOOGLE_BOOKS_API_KEY` is optional in the sense that startup only warns
 without it, but the anonymous quota is shared across every keyless caller
