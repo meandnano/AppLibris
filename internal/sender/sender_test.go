@@ -921,7 +921,13 @@ func TestWorkerRecoversAPanickingTransportAndFailsTheSend(t *testing.T) {
 	if !strings.Contains(log, "send job panicked") || !strings.Contains(log, "transport exploded") {
 		t.Errorf("log does not carry the panic and its value:\n%s", log)
 	}
-	if !strings.Contains(log, "stack") {
-		t.Errorf("log does not carry a stack:\n%s", log)
+	// On the stack's content, not the attribute key: "stack" alone is in
+	// every one of these lines whether debug.Stack() returned anything or
+	// nothing, so it would pass with the stack dropped entirely.
+	if !strings.Contains(log, "goroutine ") || !strings.Contains(log, "runtime/debug.Stack") {
+		t.Errorf("log does not carry an actual stack:\n%s", log)
+	}
+	if !strings.Contains(log, "book_id=") {
+		t.Errorf("log does not name the book the send was for:\n%s", log)
 	}
 }

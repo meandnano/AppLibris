@@ -357,6 +357,19 @@ book and `en` for the next. This does not make the column consistent on its
 own: `internal/epub` and `internal/fb2` pass a file's own value through, and
 EPUB's `dc:language` is BCP-47 by specification.
 
+Both cover URLs are built by one `coverURL` helper and carry
+`?default=false`, so a cover id with no image behind it is a `404` rather
+than a `200` and a stand-in. Measured against id 999999999: bare, it
+answers `200` and 43 bytes of 1x1 GIF; with the parameter, `404`. Nothing
+downstream can tell a stand-in from a cover — `FetchCover` sees a 200 and
+some bytes, and whatever survives `cover.Store` is written under this
+provider's name and, by the missing rule, never reconsidered — while a 404
+is a failed fetch the worker already handles, leaving the book an honest
+empty cover and a place in the next provider's missing set. A stale
+`cover_i` is ordinary in search results, so this is the common case rather
+than a corner. One helper for both call sites, or the parameter goes on one
+path and not the other.
+
 The client sets a descriptive `User-Agent`. Open Library's terms ask for one
 and throttle the generic Go default, and a block there is indistinguishable
 from any other transient failure, so the resolver would silently skip the
@@ -432,9 +445,9 @@ the column and the page alike: `.detail__description` renders with
 A detail-request failure leaves the list answer exactly as it was and marks
 it `Metadata.Partial`. `WithCache` declines to store a partial answer, so
 the next lookup for that key asks again and the second request gets another
-chance. Without the mark one transient failure was remembered as a complete
-answer for the life of the process, costing that book its larger cover and
-fuller description until a restart. Every failure counts — transport, a
+chance. Without the mark one transient failure would be remembered as a
+complete answer for the life of the process, costing that book its larger
+cover and fuller description until a restart. Every failure counts — a
 non-200, a malformed body, a body naming another volume — because each
 leaves the same two fields unfilled and each might not happen next time.
 Nothing else reads `Partial`: `Resolve` counts the answer as answered, so
@@ -444,24 +457,14 @@ The optional `apiKey` travels in the query string and is scrubbed from every
 returned error's text (`redactKey`), in raw and percent-encoded form, since
 a transport error embeds the full request URL. The redacting error keeps an
 `Unwrap`, so `errors.Is(err, context.Canceled)` works whether or not a key is
-configured. The same credential is why this client's `checkRedirect` refuses
-a redirect that **leaves the host the lookup started against**, which
-`internal/openlibrary`'s otherwise identical policy does not need: net/http
-sets `Referer` on every hop from the previous request's full URL,
-suppressing it only on https→http, so an ordinary https→https redirect hands
-`?key=…` to whichever host answered. Moving the key to a header would not
-substitute, since Go forwards non-sensitive headers across hosts. The same
-check also stops a redirect off Google making this client adopt the
-answering host's whole response, which the detail request nothing gates.
-
-`sameHost` compares as a host and not as a string: case-insensitively, with
-the scheme's default port and an explicit one treated alike, and a fully
-qualified trailing dot ignored. A byte compare admits nothing wrong, but the
-refusal surfaces as a *retryable* error, so a `Location` that merely spells
-the same host differently would burn every retry attempt and leave
-enrichment quietly answering nothing. A same-host TLS downgrade is refused
-separately, because a `Location` writing the port out on both sides compares
-equal under the default-port normalisation.
+configured. The same credential is the stronger of the two reasons the
+shared redirect policy refuses a hop that **leaves the host the lookup
+started against**: net/http sets `Referer` on every hop from the previous
+request's full URL, suppressing it only on https→http, so an ordinary
+https→https redirect hands `?key=…` to whichever host answered. Moving the
+key to a header would not substitute, since Go forwards non-sensitive
+headers across hosts. The weaker reason applies to both clients and is
+under Shared provider contract.
 
 `GOOGLE_BOOKS_API_KEY` is optional in the sense that startup only warns
 without it, but the anonymous quota is shared across every keyless caller
@@ -485,27 +488,42 @@ errors wrapping `enrich.ErrRetryable`. Folding the first two into the third
 would turn "this book is obscure" into a logged error on most books, and an
 error log that fires constantly is one nobody reads.
 
-**A refused redirect is not retryable**, on either client. Each `checkRedirect`
-wraps its own `errRedirectRefused` on every return, and the lookup path
-tests for it before the retryable wrap that would otherwise catch it along
-with real transport failures — a refusal arrives as a transport error,
-since it comes back from `Do`. The classification follows from the policy
-being a pure function of URLs that do not change between attempts: a second
-attempt reaches the identical refusal, which is the same argument already
-written beside 400 and 403. Retrying one spends three lookups to be told
-the same thing three times.
+Both carry the same redirect policy, and it is one function rather than a
+copy each: `enrich.CheckLookupRedirect`, over `enrich.SameHost`. Two copies
+of a check that decides whether a credential leaves the host is not a thing
+to let drift. It bounds the hops, checks every hop's scheme rather than
+only the first URL's, and refuses a hop that leaves the starting host or
+drops off TLS. A same-host downgrade is a clause of its own, because a
+`Location` writing the port out on both sides compares equal under
+`SameHost`'s default-port normalisation.
 
-Both policies now carry the host check, `enrich.SameHost` shared between
-them so two normalisations cannot drift. On Google it guards a credential
-(above). On Open Library there is none to guard, and the reason is the
-other one that check closes: a cross-host hop would make the client adopt
-the answering host's whole response, gated by title and author on the
-search path and by nothing at all on the ISBN path. Following redirects is
-not optional there — an ISBN is frequently an alias for the canonical
-edition key — but every hop the API was observed to issue stays on
-`openlibrary.org`: the Read API answers ISBNs directly, and the
-`/isbn/{isbn}` aliases hop once or twice, same-host each time. The check
-costs nothing that was ever seen to work.
+`SameHost` compares as a host and not as a string: case-insensitively, with
+the scheme's default port and an explicit one treated alike, and a fully
+qualified trailing dot ignored. A byte compare admits nothing wrong, but a
+refusal is a lookup failure, so a `Location` that merely spells the same
+host differently would leave enrichment quietly answering nothing for that
+book.
+
+The host clause earns its place twice over, once per client. On Google it
+guards the credential above. On Open Library there is none to guard, and
+the reason is the other one the clause closes for both: a cross-host hop
+makes the client adopt the answering host's whole response, gated by title
+and author on the search path and by nothing at all on the ISBN path.
+Following redirects is not optional there — an ISBN is frequently an alias
+for the canonical edition key — but every hop that API was observed to
+issue stays on `openlibrary.org`: the Read API answers ISBNs directly, and
+the `/isbn/{isbn}` aliases hop once or twice, same-host each time. The
+check costs nothing that was ever seen to work.
+
+**A refused redirect is not retryable**, on either client. Every return in
+the policy wraps `enrich.ErrRedirectRefused`, and each lookup path tests
+for it before the retryable wrap that would otherwise catch it along with
+real transport failures — a refusal arrives as a transport error, since it
+comes back from `Do`. The classification follows from the policy being a
+pure function of URLs that do not change between attempts: a second attempt
+reaches the identical refusal, the same argument already written beside 400
+and 403. Retrying one spends three lookups to be told the same thing three
+times.
 
 A matched result's cover is **named, not downloaded**: it comes back as
 `Metadata.CoverURL` and the fetch is the worker's. Fetching inside the

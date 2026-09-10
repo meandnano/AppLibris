@@ -58,84 +58,6 @@ const maxErrorBodyBytes = 512
 // response nothing here should be parsing anyway.
 const maxResponseBytes = 4 * 1024 * 1024
 
-// maxRedirects bounds how many hops a lookup follows. Setting CheckRedirect
-// at all replaces net/http's own default limit, so a policy that only
-// checked the scheme would follow a redirect chain forever.
-const maxRedirects = 5
-
-// errRedirectRefused marks every refusal checkRedirect issues, so a lookup
-// can classify one as non-retryable. Each of its clauses is a pure function
-// of URLs that do not change between attempts, so a second attempt reaches
-// the identical refusal — the same reason a 400 or a 403 is not retried.
-// Without the sentinel a refusal burns DefaultRetryAttempts, three lookups
-// spent to be told the same thing three times.
-//
-// http.Client.Do returns a CheckRedirect error inside a *url.Error, which
-// unwraps, so errors.Is reaches this through the wrapping the client adds.
-var errRedirectRefused = errors.New("redirect refused")
-
-// checkRedirect bounds a lookup's hops and refuses one that leaves the host
-// the lookup started against. It is internal/openlibrary's policy of the
-// same name plus the host check, which that one does not have.
-//
-// The host check is the load-bearing half, and the reason is a credential
-// rather than a hop count. This client carries its API key in the query
-// string, and net/http sets Referer on every hop from the previous
-// request's full URL — suppressing it only on https→http, so an ordinary
-// https→https redirect hands "?key=…" to whatever host answered, in a
-// header. That is worse than the log-line leak the whole redactKey
-// apparatus exists to prevent: a key in a log stays on the box.
-//
-// It closes two more holes at the same time. A redirect off Google makes
-// this client adopt the answering host's entire response — and on the list
-// request internal/enrich's plausibleMatch would gate only its title and
-// authors,
-// which that host supplies. On the detail request nothing gates it at all.
-//
-// Refusing outright costs nothing measurable: neither the Volumes API nor
-// Google's cover host was observed to redirect cross-host. Moving the key
-// to a header would not substitute for this, since Go forwards
-// non-sensitive headers across hosts.
-//
-// Every refusal wraps errRedirectRefused, which is what keeps the lookup
-// paths from retrying it.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
-		return fmt.Errorf("stopped after %d redirects: %w", maxRedirects, errRedirectRefused)
-	}
-	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect scheme %q is not http or https: %w", req.URL.Scheme, errRedirectRefused)
-	}
-	// The credential clause refuses an empty via rather than passing it.
-	// net/http always supplies the requests already made, so this cannot
-	// happen — but it is the one clause guarding a credential, and a
-	// clause that fails open is one a future reuse can walk through.
-	if len(via) == 0 {
-		return fmt.Errorf("redirect with no originating request to compare against: %w", errRedirectRefused)
-	}
-	// Compared against via[0], the request this lookup made, rather than
-	// the previous hop. The two are equivalent — every hop is checked, so
-	// the host can never change and the previous hop's host is always the
-	// first's — but via[0] states the invariant the policy actually has:
-	// a lookup never leaves the host it started against.
-	if !enrich.SameHost(req.URL, via[0].URL) {
-		return fmt.Errorf("redirect to %q leaves the host the lookup started against: %w", req.URL.Host, errRedirectRefused)
-	}
-	// A same-host downgrade off TLS is refused too. The key does not leak
-	// on that hop — Go suppresses Referer https→http — but a policy added
-	// to protect a credential should not then hand the request itself to
-	// cleartext when refusing costs one clause.
-	//
-	// It reads as redundant and is not: the default-port normalisation
-	// above already refuses an ordinary https→http hop as a port change,
-	// 443 against 80, but a Location that writes the port out on both
-	// sides compares equal there and reaches this.
-	if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect downgrades from https to %q: %w", req.URL.Scheme, errRedirectRefused)
-	}
-	return nil
-}
-
 // Client looks books up against the Google Books Volumes API.
 type Client struct {
 	baseURL    string
@@ -152,7 +74,7 @@ func New(apiKey string) *Client {
 	return &Client{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: Timeout, CheckRedirect: checkRedirect},
+		httpClient: &http.Client{Timeout: Timeout, CheckRedirect: enrich.CheckLookupRedirect},
 	}
 }
 
@@ -331,7 +253,7 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 		// change between attempts, so a retry reaches the same refusal.
 		// Checked before the retryable wrap below, which would otherwise
 		// catch it along with every real transport failure.
-		if errors.Is(err, errRedirectRefused) {
+		if errors.Is(err, enrich.ErrRedirectRefused) {
 			return enrich.Metadata{}, fmt.Errorf("googlebooks: request failed: %w", c.redactKey(err))
 		}
 		// A transport or timeout failure is the retryable case: nothing
@@ -417,9 +339,9 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 //
 // The difference from silent is the returned error, which the caller turns
 // into Metadata.Partial. Without it a transient failure of this request
-// was stored by enrich.WithCache as a complete answer and served for the
-// life of the process, so one timeout cost that book its cover and fuller
-// description until a restart.
+// would be stored by enrich.WithCache as a complete answer and served for
+// the life of the process, so one timeout would cost that book its cover
+// and fuller description until a restart.
 func (c *Client) enrichVolume(ctx context.Context, id string, m *enrich.Metadata) error {
 	if id == "" {
 		// Not a failure: a volume with no id has no detail endpoint to

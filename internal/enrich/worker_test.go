@@ -1114,8 +1114,11 @@ func TestWorkerRecoversAPanickingProviderAndFailsTheJob(t *testing.T) {
 	if !strings.Contains(log, "enrichment job panicked") || !strings.Contains(log, "provider exploded") {
 		t.Errorf("log does not carry the panic and its value:\n%s", log)
 	}
-	if !strings.Contains(log, "stack") {
-		t.Errorf("log does not carry a stack:\n%s", log)
+	// On the stack's content, not the attribute key: "stack" alone is in
+	// every one of these lines whether debug.Stack() returned anything or
+	// nothing, so it would pass with the stack dropped entirely.
+	if !strings.Contains(log, "goroutine ") || !strings.Contains(log, "runtime/debug.Stack") {
+		t.Errorf("log does not carry an actual stack:\n%s", log)
 	}
 	if strings.Contains(reason, "provider exploded") {
 		t.Errorf("failure_reason = %q, want the panic value kept out of the status box", reason)
@@ -1172,5 +1175,47 @@ func TestWorkerRefusesACoverOnALoopbackAddress(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), "is loopback") {
 		t.Errorf("log does not name the refused address:\n%s", logged.String())
+	}
+}
+
+// The guard hangs on Transport.DialContext, which https reaches only
+// because DialTLSContext is nil — the transport connects and then wraps.
+// Setting DialTLSContext would leave every https cover unguarded with the
+// http test above still green, and https is what a real cover URL uses.
+func TestWorkerRefusesAnHTTPSCoverOnALoopbackAddress(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "worker-loopback-tls", Title: "Book", SortTitle: "book", ISBN: "9780000000001",
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Write(solidPNG(t))
+	}))
+	t.Cleanup(server.Close)
+
+	p := &fakeProvider{name: "fake", byISBN: func(context.Context, string) (Metadata, error) {
+		return Metadata{Publisher: "Ace Books", CoverURL: server.URL + "/cover.jpg"}, nil
+	}}
+	New(db, []Provider{p}, t.TempDir()).drain(ctx)
+
+	if requests != 0 {
+		t.Errorf("cover requests = %d, want 0 — the dial is refused before the TLS handshake", requests)
+	}
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID: %+v, %v", book, err)
+	}
+	if book.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", book.CoverPath)
 	}
 }

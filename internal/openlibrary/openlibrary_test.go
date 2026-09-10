@@ -64,8 +64,8 @@ func testClient(t *testing.T, handler http.HandlerFunc) (*Client, *int) {
 	httpClient := server.Client()
 	// The production redirect policy, not net/http's default: without it
 	// the redirect tests below would assert the standard library's
-	// behaviour rather than checkRedirect's.
-	httpClient.CheckRedirect = checkRedirect
+	// behaviour rather than the shared policy's.
+	httpClient.CheckRedirect = enrich.CheckLookupRedirect
 
 	return &Client{
 		baseURL:      server.URL,
@@ -509,6 +509,9 @@ func TestByISBNAuthorsFallBackToTheEditionRecord(t *testing.T) {
 // normal answer and has to be followed — but every hop is chosen by
 // whatever host answered, not by this package, so each one's scheme is
 // checked rather than only the first URL's.
+// This is also the half the host check must not break: the hop is
+// same-host, which is every hop this API was observed to issue, so adding
+// SameHost to the policy must leave these books resolving.
 func TestByISBNFollowsARedirect(t *testing.T) {
 	client, hits := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/volumes/brief/isbn/9780547928227.json" {
@@ -614,7 +617,7 @@ func TestCoverURLAsksForA404NotAPlaceholder(t *testing.T) {
 	})
 }
 
-// A refused redirect belongs with 400 and 403: checkRedirect is a pure
+// A refused redirect belongs with 400 and 403: the policy is a pure
 // function of URLs that do not change between attempts, so a retry reaches
 // the same refusal. internal/googlebooks carries the same test, since
 // docs/notes/enrichment.md describes the two policies as shaped alike.
@@ -667,30 +670,6 @@ func TestByISBNRefusesARedirectOffHost(t *testing.T) {
 	}
 	if got.Title != "" {
 		t.Errorf("Title = %q, want nothing adopted from the answering host", got.Title)
-	}
-}
-
-// The half the host check must not break: an ISBN aliasing the canonical
-// edition key is answered with a same-host redirect, and following it is
-// how those books resolve at all.
-func TestByISBNStillFollowsASameHostRedirect(t *testing.T) {
-	client, hits := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/canonical.json" {
-			w.Write(readFixture(t, "edition_match.json"))
-			return
-		}
-		http.Redirect(w, r, "/canonical.json", http.StatusFound)
-	})
-
-	got, err := client.ByISBN(context.Background(), "9780547928227")
-	if err != nil {
-		t.Fatalf("ByISBN: %v", err)
-	}
-	if got.Title != "The Hobbit" {
-		t.Errorf("Title = %q, want the redirected-to record", got.Title)
-	}
-	if *hits != 2 {
-		t.Errorf("requests = %d, want 2 — the redirect must still be followed", *hits)
 	}
 }
 

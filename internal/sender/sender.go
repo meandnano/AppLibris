@@ -226,8 +226,12 @@ func (w *Worker) process(ctx context.Context, send *storage.Send) {
 		if r == nil {
 			return
 		}
-		slog.Error("send job panicked", "send_id", send.ID,
-			"panic", r, "stack", string(debug.Stack()))
+		attrs := []any{"send_id", send.ID, "book_title", send.BookTitle}
+		if send.BookID.Valid {
+			attrs = append(attrs, "book_id", send.BookID.Int64)
+		}
+		attrs = append(attrs, "panic", r, "stack", string(debug.Stack()))
+		slog.Error("send job panicked", attrs...)
 		w.fail(ctx, send.ID, crashedReason)
 	}()
 

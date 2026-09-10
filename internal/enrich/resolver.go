@@ -148,10 +148,21 @@ func sanitizeValue(field storage.MetadataField, value string) string {
 // this costs nothing there today.
 //
 // It normalises \r\n first, so a CRLF description is not left with a lone
-// carriage return in the middle of a paragraph.
+// carriage return in the middle of a paragraph, and strips each line's
+// trailing whitespace before counting. A line of two spaces is a blank
+// line to a reader, and `pre-line` collapses the spaces while keeping both
+// newlines around them, so without the strip a blurb padded with spaces
+// renders exactly the run of blank lines this exists to prevent.
 func capBlankLines(value string) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
+
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	value = strings.Join(lines, "\n")
+
 	for strings.Contains(value, "\n\n\n") {
 		value = strings.ReplaceAll(value, "\n\n\n", "\n\n")
 	}

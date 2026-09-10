@@ -967,7 +967,7 @@ func TestResolveCountsAPartialAnswerAsAnswered(t *testing.T) {
 	}
 }
 
-// A description keeps its line breaks, and now the page renders them, so
+// A description keeps its line breaks, and the page renders them, so
 // what a provider sends is what a reader sees. One blank line between
 // paragraphs is structure; four is a scraped blurb's noise.
 func TestSanitizeDescriptionCapsBlankLines(t *testing.T) {
@@ -983,6 +983,16 @@ func TestSanitizeDescriptionCapsBlankLines(t *testing.T) {
 		{"two runs are both capped", "one\n\n\ntwo\n\n\n\nthree", "one\n\ntwo\n\nthree"},
 		{"CRLF is normalised first", "one\r\n\r\n\r\ntwo", "one\n\ntwo"},
 		{"a lone CR is a newline too", "one\r\r\rtwo", "one\n\ntwo"},
+		// A line of spaces is a blank line to a reader, and pre-line
+		// collapses the spaces while keeping both newlines around them,
+		// so without the trailing-whitespace strip these render as the
+		// run of blank lines the cap exists to prevent.
+		{"blank lines made of spaces are capped", "one\n \n \n \ntwo", "one\n\ntwo"},
+		{"blank lines made of tabs are capped", "one\n\t\n\t\ntwo", "one\n\ntwo"},
+		{"trailing spaces do not stop a cap", "one   \n\n\ntwo", "one\n\ntwo"},
+		// Leading indentation is not trailing whitespace and survives the
+		// cap; pre-line is what collapses it at render time.
+		{"leading indentation is left alone", "one\n  two", "one\n  two"},
 		// The outer TrimSpace already handled these; pinned so the cap
 		// cannot be rewritten in a way that leaves them behind.
 		{"leading blank lines are trimmed", "\n\n\none", "one"},

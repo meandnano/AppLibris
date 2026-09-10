@@ -108,7 +108,7 @@ func detailClient(t *testing.T, list, detail http.HandlerFunc) (*Client, *int) {
 // unnoticed even with a redirect test in the file.
 func testHTTPClient(server *httptest.Server) *http.Client {
 	c := server.Client()
-	c.CheckRedirect = checkRedirect
+	c.CheckRedirect = enrich.CheckLookupRedirect
 	return c
 }
 
@@ -1212,11 +1212,18 @@ func TestDetailRequestIsSkippedWithoutAVolumeID(t *testing.T) {
 			t.Error("the detail endpoint was called")
 		})
 
-	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
 	if *detailHits != 0 {
 		t.Errorf("detail requests = %d, want 0", *detailHits)
+	}
+	// Not Partial: there is no detail endpoint to ask for a volume with no
+	// id, so nothing a later attempt would do differently. Marking it
+	// would make every id-less volume permanently uncacheable.
+	if got.Partial {
+		t.Error("Partial = true, but no request was skipped that a retry could make")
 	}
 }
 
@@ -1465,87 +1472,6 @@ func TestAPIKeyNeverAppearsInTheDetailPathsTransportErrorLog(t *testing.T) {
 	}
 }
 
-// Setting CheckRedirect at all replaces net/http's own hop limit, so the
-// policy has to supply both halves itself. Both are checked here because
-// each is invisible when the other works.
-func TestCheckRedirect(t *testing.T) {
-	hop := func(rawurl string) *http.Request {
-		req, err := http.NewRequest(http.MethodGet, rawurl, nil)
-		if err != nil {
-			t.Fatalf("build request: %v", err)
-		}
-		return req
-	}
-	from := func(rawurl string) []*http.Request { return []*http.Request{hop(rawurl)} }
-
-	const origin = "https://www.googleapis.com/books/v1/volumes?key=secret"
-
-	allowed := []struct{ name, to string }{
-		{"same host, same scheme", "https://www.googleapis.com/books/v1/volumes/abc"},
-		{"an explicit default port is the same host", "https://www.googleapis.com:443/books/v1/volumes/abc"},
-		{"case is not part of a host's identity", "https://WWW.GOOGLEAPIS.COM/books/v1/volumes/abc"},
-		{"a fully qualified trailing dot is the same host", "https://www.googleapis.com./books/v1/volumes/abc"},
-	}
-	for _, c := range allowed {
-		t.Run(c.name, func(t *testing.T) {
-			// These are refused by a byte compare of URL.Host, and the
-			// refusal surfaces as a retryable error — so getting them
-			// wrong burns every retry attempt and leaves enrichment
-			// quietly answering nothing.
-			if err := checkRedirect(hop(c.to), from(origin)); err != nil {
-				t.Errorf("refused: %v", err)
-			}
-		})
-	}
-
-	refused := []struct{ name, to, why string }{
-		{"another host", "https://elsewhere.example/volumes", "net/http would send it the key in Referer"},
-		{"another host on the same suffix", "https://evil.googleapis.com.attacker.example/volumes", "a suffix is not a host"},
-		{"a non-default port", "https://www.googleapis.com:8443/books/v1/volumes/abc", "a different port is a different service"},
-		{"a downgrade off TLS", "http://www.googleapis.com/books/v1/volumes/abc", "a credential-guarding policy should not hand the request to cleartext"},
-		{"a foreign scheme", "file:///etc/passwd", "not http or https"},
-	}
-	for _, c := range refused {
-		t.Run(c.name, func(t *testing.T) {
-			if err := checkRedirect(hop(c.to), from(origin)); err == nil {
-				t.Errorf("allowed, but %s", c.why)
-			}
-		})
-	}
-
-	t.Run("a downgrade keeping an explicit port", func(t *testing.T) {
-		// The default-port normalisation refuses an ordinary https->http
-		// hop as a port change (443 against 80), so the scheme clause
-		// looks redundant. It is not: with the port written out on both
-		// sides, the hosts compare equal and only the scheme differs.
-		if err := checkRedirect(hop("http://www.googleapis.com:8443/x"), from("https://www.googleapis.com:8443/volumes?key=secret")); err == nil {
-			t.Error("allowed a cleartext hop on the same explicit port")
-		}
-	})
-	t.Run("an http origin may stay on http", func(t *testing.T) {
-		if err := checkRedirect(hop("http://books.example/next"), from("http://books.example/first")); err != nil {
-			t.Errorf("refused: %v", err)
-		}
-	})
-	t.Run("no originating request", func(t *testing.T) {
-		// Unreachable through net/http, which always supplies via. The
-		// clause exists so the one guard protecting a credential does not
-		// fail open for a future caller.
-		if err := checkRedirect(hop("https://www.googleapis.com/x"), nil); err == nil {
-			t.Error("allowed with an empty via")
-		}
-	})
-	t.Run("the hop bound", func(t *testing.T) {
-		via := make([]*http.Request, maxRedirects)
-		for i := range via {
-			via[i] = hop(origin)
-		}
-		if err := checkRedirect(hop("https://www.googleapis.com/books/v1/volumes/abc"), via); err == nil {
-			t.Errorf("hop %d was allowed; without a bound the chain runs forever", maxRedirects+1)
-		}
-	})
-}
-
 // A redirect off Google is followed by default, and on the detail path the
 // whole answer — the cover URL and the description — would come from
 // whichever host replied, with plausibleMatch none the wiser since it gates
@@ -1571,7 +1497,7 @@ func TestDetailRequestDoesNotFollowARedirectToAnotherScheme(t *testing.T) {
 // this test hang instead of fail, and a hang is a far worse signal than a
 // red line.
 func TestDetailRequestBoundsARedirectLoop(t *testing.T) {
-	const ceiling = maxRedirects * 4
+	const ceiling = enrich.MaxLookupRedirects * 4
 
 	hops := 0
 	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1587,9 +1513,9 @@ func TestDetailRequestBoundsARedirectLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	// maxRedirects hops after the first request, so maxRedirects+1 in all.
-	if hops > maxRedirects+1 {
-		t.Errorf("followed %d hops, want at most %d", hops, maxRedirects+1)
+	// MaxLookupRedirects hops after the first request, so +1 in all.
+	if hops > enrich.MaxLookupRedirects+1 {
+		t.Errorf("followed %d hops, want at most %d", hops, enrich.MaxLookupRedirects+1)
 	}
 	assertListAnswerIntact(t, got)
 }
@@ -1671,7 +1597,7 @@ func TestARedirectOffTheAPIHostNeverCarriesTheKey(t *testing.T) {
 	t.Cleanup(home.Close)
 
 	httpClient := foreign.Client()
-	httpClient.CheckRedirect = checkRedirect
+	httpClient.CheckRedirect = enrich.CheckLookupRedirect
 	client := &Client{baseURL: home.URL, apiKey: key, httpClient: httpClient}
 
 	got, err := client.ByISBN(context.Background(), "9780547928227")

@@ -88,57 +88,6 @@ const maxErrorBodyBytes = 512
 // nothing here should be parsing anyway.
 const maxResponseBytes = 4 * 1024 * 1024
 
-// maxRedirects bounds how many hops a lookup follows. Setting CheckRedirect
-// at all replaces net/http's own default limit, so a policy that only
-// checked the scheme would follow a redirect chain forever.
-const maxRedirects = 5
-
-// errRedirectRefused marks every refusal checkRedirect issues, so a lookup
-// can classify one as non-retryable — internal/googlebooks carries the same
-// sentinel for the same reason, stated there.
-var errRedirectRefused = errors.New("redirect refused")
-
-// checkRedirect bounds a lookup's hops, checks every hop's scheme rather
-// than only the first URL's — each one after the first is chosen by
-// whatever host answered, not by this package — and refuses a hop that
-// leaves openlibrary.org.
-//
-// Following a redirect at all is not optional here: an ISBN is frequently
-// an alias for the canonical edition key, so the Read API answers a hop
-// rather than a record, and refusing outright would lose those books.
-//
-// The host check is the same rule internal/googlebooks applies, arrived at
-// for a weaker reason and kept for a real one. There is no credential in
-// these requests, so nothing leaks on a cross-host hop; what a cross-host
-// hop would do is make this client adopt the answering host's whole
-// response, gated by title and author on the search path and by nothing at
-// all on the ISBN path. Every redirect observed on this API stays on
-// openlibrary.org — the Read API answers ISBNs directly, and the
-// /isbn/{isbn} aliases hop once or twice, same-host each time — so the
-// check costs nothing that was ever seen to work.
-//
-// A same-host downgrade off TLS is refused separately, for the reason
-// enrich.SameHost's default-port normalisation makes it necessary: a
-// Location writing the port out on both sides compares equal there.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
-		return fmt.Errorf("stopped after %d redirects: %w", maxRedirects, errRedirectRefused)
-	}
-	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect scheme %q is not http or https: %w", req.URL.Scheme, errRedirectRefused)
-	}
-	if len(via) == 0 {
-		return fmt.Errorf("redirect with no originating request to compare against: %w", errRedirectRefused)
-	}
-	if !enrich.SameHost(req.URL, via[0].URL) {
-		return fmt.Errorf("redirect to %q leaves the host the lookup started against: %w", req.URL.Host, errRedirectRefused)
-	}
-	if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect downgrades from https to %q: %w", req.URL.Scheme, errRedirectRefused)
-	}
-	return nil
-}
-
 // Client looks books up against Open Library's Search API.
 type Client struct {
 	baseURL      string
@@ -153,7 +102,7 @@ func New() *Client {
 	return &Client{
 		baseURL:      baseURL,
 		coverBaseURL: coverBaseURL,
-		httpClient:   &http.Client{Timeout: Timeout, CheckRedirect: checkRedirect},
+		httpClient:   &http.Client{Timeout: Timeout, CheckRedirect: enrich.CheckLookupRedirect},
 	}
 }
 
@@ -410,7 +359,7 @@ func (c *Client) get(ctx context.Context, reqURL string) ([]byte, error) {
 		// change between attempts, so a retry reaches the same refusal.
 		// Checked before the retryable wrap below, which would otherwise
 		// catch it along with every real transport failure.
-		if errors.Is(err, errRedirectRefused) {
+		if errors.Is(err, enrich.ErrRedirectRefused) {
 			return nil, fmt.Errorf("openlibrary: request failed: %w", err)
 		}
 		// A transport or timeout failure is the retryable case: nothing

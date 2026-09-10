@@ -130,15 +130,25 @@ func New(db *storage.DB, providers []Provider, coversDir string) *Worker {
 		dialGuard: RefusePrivateAddress,
 	}
 
-	// Cloned from the default rather than built from nothing, so proxy
-	// support and the TLS and idle-connection defaults survive; only the
-	// dial is this package's business.
+	// Cloned from the default rather than built from nothing, so the TLS
+	// and idle-connection defaults survive; only the dial and the proxy
+	// are this package's business.
+	//
+	// Proxy is cleared, and that is the guard's doing rather than a
+	// preference. Control sees the address the dialer actually connects
+	// to, which through a proxy is the proxy's: a proxy on a LAN address
+	// would be refused as private and no cover would ever be fetched,
+	// while a proxy on a public one would let a cover URL reach anything
+	// the proxy can, with the guard checking the wrong host and reporting
+	// success. A cover is a direct GET of a public image; a proxy adds
+	// nothing here and cannot be honoured without giving up the check.
 	//
 	// The guard is read off the Worker at dial time rather than captured
 	// here, so replacing the field in a test reaches a client already
 	// built. Transport dials through this for https too — it connects and
 	// then wraps — so both schemes are covered.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	transport.DialContext = coverDialContext(func(ip net.IP) error { return w.dialGuard(ip) })
 	w.coverClient = &http.Client{
 		Timeout:       coverFetchTimeout,

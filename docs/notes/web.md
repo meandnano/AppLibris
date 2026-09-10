@@ -526,13 +526,18 @@ the markup names has a rule, since a mistyped modifier renders as a bare
 `.button` with every handler test still green. Known limit:
 `docs/backlog/2026090702-button-base-carries-the-editors-size.md`.
 
-`.detail__description` is `white-space: pre-line`, which is contract
-rather than styling and has a test of its own. A description is stored
-with its paragraph breaks — Google's flattened HTML supplies them and the
-edit textarea preserves them — and this is what makes them visible in the
-read view. `pre-wrap` is the wrong half of the pair: it would also
-reproduce a provider's leading indentation and its stray double spaces,
-which is the trade that kept the breaks collapsed until the two could be
-separated. The rule is on the class, so it reaches the read view and the
-`<textarea>` alike; the textarea preserved whitespace already and is
-unchanged by it.
+`white-space: pre-line` on the description's read view is contract rather
+than styling, and has two tests: one that the rule is there, one that the
+break survives to the markup, since a handler-side join would defeat the
+first while it stayed green. A description is stored with its paragraph
+breaks — Google's flattened HTML supplies them and the edit textarea
+preserves them — and this is what makes them visible. `pre-wrap` is the
+wrong half of the pair: it also reproduces a provider's leading
+indentation and its stray double spaces.
+
+The selector is `.editable__read.detail__description`, not the bare class,
+because the edit `<textarea>` carries `.detail__description` too. A
+textarea's user-agent default is `pre-wrap` and an author `white-space`
+overrides it, so the bare class would collapse runs of spaces inside a
+control whose submitted value keeps them, putting the caret where the text
+is not.
