@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"syscall"
+	"time"
 )
 
 // MaxCoverBytes bounds a fetched cover image's response body, checked
@@ -39,6 +43,136 @@ const coverUserAgent = "library/1.0 (+https://github.com/meandnano/AppLibris)"
 // coverSchemeAllowed reports whether a URL is one a cover fetch may follow.
 func coverSchemeAllowed(scheme string) bool {
 	return scheme == "http" || scheme == "https"
+}
+
+// refusedPrefixes are the ranges net.IP's own predicates do not cover.
+// Every one of them is reachable from the deployment and not from the
+// internet, which is the whole test a cover host has to pass.
+//
+// 100.64.0.0/10 is the one that matters most here rather than least: it is
+// carrier-grade NAT, and it is also the range Tailscale assigns, so on the
+// deployment this project's README recommends every tailnet peer of the
+// host sits in it. The rest are ranges no cover host can legitimately
+// answer from — "this network" (RFC 1122), IETF protocol assignments,
+// benchmarking, the reserved former class E, the broadcast address, and
+// IPv6 site-local, which is deprecated but still routed by some stacks.
+var refusedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("fec0::/10"),
+}
+
+// translatedPrefixes embed an IPv4 address, at a different offset each, so
+// an address inside one is checked again as the IPv4 address it names. On
+// a host with either route configured, 64:ff9b::7f00:1 and 2002:7f00:1::
+// both reach 127.0.0.1.
+//
+// The offsets are not interchangeable: NAT64's well-known prefix is /96 and
+// carries the address in the last four bytes, while 6to4 is /16 and carries
+// it in the four bytes straight after the prefix.
+var translatedPrefixes = []struct {
+	prefix netip.Prefix
+	offset int
+}{
+	{netip.MustParsePrefix("64:ff9b::/96"), 12},
+	{netip.MustParsePrefix("2002::/16"), 2},
+}
+
+// RefusePrivateAddress reports an error for any address a cover fetch must
+// not connect to: loopback, an RFC 1918 or IPv6 unique-local address,
+// link-local unicast (which is where a cloud metadata endpoint lives),
+// multicast, the unspecified address, and the ranges in refusedPrefixes.
+// Everything else is allowed.
+//
+// A cover URL is chosen by whichever host answered a provider lookup, and
+// each redirect hop by whichever host answered the one before it. Without
+// this the fetch is a blind GET at any address the deployment can reach —
+// another container on the same Docker network, a tailnet peer, a router's
+// admin page, the link-local metadata service. Only image bytes are ever
+// kept, so the exposure is small, but "small" is not the same as bounded.
+//
+// It is a deny list of the ranges that are unreachable from the internet
+// rather than an allow list of public ones: an allow list has to be revised
+// every time IANA assigns a block, and a cover host is an ordinary public
+// server.
+//
+// An IPv4-mapped IPv6 address needs no special case: net.IP's predicates
+// go through To4, so ::ffff:127.0.0.1 is loopback to all of them, and the
+// netip conversion below unmaps for the prefix checks.
+func RefusePrivateAddress(ip net.IP) error {
+	switch {
+	case ip == nil:
+		return fmt.Errorf("cover address is not an IP")
+	case ip.IsLoopback():
+		return fmt.Errorf("cover address %s is loopback", ip)
+	case ip.IsPrivate():
+		return fmt.Errorf("cover address %s is private", ip)
+	case ip.IsLinkLocalUnicast():
+		return fmt.Errorf("cover address %s is link-local", ip)
+	case ip.IsMulticast():
+		return fmt.Errorf("cover address %s is multicast", ip)
+	case ip.IsUnspecified():
+		return fmt.Errorf("cover address %s is unspecified", ip)
+	}
+
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return fmt.Errorf("cover address %s is not 4 or 16 bytes", ip)
+	}
+	addr = addr.Unmap()
+	for _, p := range refusedPrefixes {
+		if p.Contains(addr) {
+			return fmt.Errorf("cover address %s is in the reserved range %s", addr, p)
+		}
+	}
+	for _, t := range translatedPrefixes {
+		if !t.prefix.Contains(addr) {
+			continue
+		}
+		b := addr.As16()
+		if err := RefusePrivateAddress(net.IP(b[t.offset : t.offset+4])); err != nil {
+			return fmt.Errorf("cover address %s translates to a refused address: %w", addr, err)
+		}
+	}
+	return nil
+}
+
+// coverDialContext builds the DialContext a cover client uses, applying
+// guard to the address every connection attempt actually resolves to.
+//
+// The check belongs here rather than on the URL's host for two reasons a
+// URL check cannot cover. A hostname that resolves to a public address when
+// the URL is inspected and a private one when the connection is made — DNS
+// rebinding, or simply a short TTL — is caught, because this runs at the
+// moment of connection with the address the dialer settled on. And every
+// redirect hop goes through the same dialer, so a Location naming a bare
+// private IP is refused without CheckCoverRedirect having to parse it.
+//
+// net.Dialer.Control is the hook rather than a resolve-then-dial of our
+// own: Go calls it once per candidate address after resolution and before
+// the connect, so there is no window between the address being checked and
+// the address being used. Resolving by hand and then dialing the hostname
+// would reopen exactly that window.
+func coverDialContext(guard func(net.IP) error) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout:   coverFetchTimeout,
+		KeepAlive: 30 * time.Second,
+		// Not logged here: the refusal travels back through FetchCover as
+		// an ordinary fetch failure and storeCover already warns with it,
+		// and the message carries the address, so a line here would say
+		// the same thing twice with less context.
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return fmt.Errorf("cover dial address %q: %w", address, err)
+			}
+			return guard(net.ParseIP(host))
+		},
+	}
+	return dialer.DialContext
 }
 
 // CheckCoverRedirect is the CheckRedirect a client passed to FetchCover

@@ -7,10 +7,12 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,10 +50,15 @@ func openTestDB(t *testing.T) *storage.DB {
 }
 
 // newTestWorker wires a fresh, per-test covers directory — tests that don't
-// exercise the cover path never need to know it exists.
+// exercise the cover path never need to know it exists — and opts the
+// worker out of the address guard, since every cover server here listens on
+// loopback and RefusePrivateAddress refuses that by design. A test about
+// the guard itself builds its worker with New directly.
 func newTestWorker(t *testing.T, db *storage.DB, providers []Provider) *Worker {
 	t.Helper()
-	return New(db, providers, t.TempDir())
+	w := New(db, providers, t.TempDir())
+	allowAnyCoverAddress(w)
+	return w
 }
 
 func TestWorkerAppliesResolvedFieldsAndMarksDone(t *testing.T) {
@@ -499,6 +506,7 @@ func TestWorkerStoresFetchedCoverUnderContentHashWithProvenance(t *testing.T) {
 		return Metadata{CoverURL: coverURL}, nil
 	}}
 	w := New(db, []Provider{p}, coversDir)
+	allowAnyCoverAddress(w)
 	w.drain(ctx)
 
 	if *requests != 1 {
@@ -549,6 +557,7 @@ func TestWorkerNeverOverwritesAnExistingCover(t *testing.T) {
 		return Metadata{CoverURL: coverURL}, nil
 	}}
 	w := New(db, []Provider{p}, coversDir)
+	allowAnyCoverAddress(w)
 	w.drain(ctx)
 
 	// The stronger half of "never asked for one": no image is downloaded
@@ -604,7 +613,9 @@ func TestWorkerCoverFailureStillFinishesTheJob(t *testing.T) {
 			p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 				return Metadata{CoverURL: coverURL, Publisher: "Ace Books"}, nil
 			}}
-			New(db, []Provider{p}, coversDir).drain(ctx)
+			w := New(db, []Provider{p}, coversDir)
+			allowAnyCoverAddress(w)
+			w.drain(ctx)
 
 			if got := jobStatus(t, db, id); got != "done" {
 				t.Errorf("job status = %q, want done — a lost cover must not fail a job whose text fields resolved", got)
@@ -647,7 +658,9 @@ func TestWorkerRefusesANonHTTPCoverURL(t *testing.T) {
 	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 		return Metadata{CoverURL: "file:///etc/passwd"}, nil
 	}}
-	New(db, []Provider{p}, coversDir).drain(ctx)
+	w := New(db, []Provider{p}, coversDir)
+	allowAnyCoverAddress(w)
+	w.drain(ctx)
 
 	// The scheme check itself is pinned by cover_test.go's
 	// TestFetchCoverRefusesANonHTTPScheme; what this holds is that the
@@ -690,7 +703,9 @@ func TestWorkerClearsCoverRetryWhenItStoresACover(t *testing.T) {
 	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 		return Metadata{CoverURL: coverURL}, nil
 	}}
-	New(db, []Provider{p}, coversDir).drain(ctx)
+	w := New(db, []Provider{p}, coversDir)
+	allowAnyCoverAddress(w)
+	w.drain(ctx)
 
 	book, err := db.FindBookByID(ctx, id)
 	if err != nil || book == nil {
@@ -1038,5 +1053,169 @@ func TestWorkerCoverOnlyCancellationLeavesJobRunning(t *testing.T) {
 
 	if got := jobStatus(t, db, id); got != string(storage.EnrichmentRunning) {
 		t.Errorf("status = %q, want running — an abandoned fetch is not a verdict", got)
+	}
+}
+
+// A panic in a job must not take the process with it, and must not leave
+// the row running: RequeueInterruptedEnrichment would put the same input
+// back at the next start and Run drains immediately, which under a restart
+// policy is a loop nothing but hand-editing the row escapes.
+func TestWorkerRecoversAPanickingProviderAndFailsTheJob(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	crashID, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-panic-1", Title: "Crasher", SortTitle: "crasher"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	nextID, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-panic-2", Title: "Next", SortTitle: "next"}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	for _, id := range []int64{crashID, nextID} {
+		if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+			t.Fatalf("EnqueueEnrichment: %v", err)
+		}
+	}
+
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	p := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+		if title == "Crasher" {
+			panic("provider exploded")
+		}
+		return Metadata{Publisher: "Ace Books"}, nil
+	}}
+	w := newTestWorker(t, db, []Provider{p})
+	w.drain(ctx)
+
+	if got := jobStatus(t, db, crashID); got != string(storage.EnrichmentFailed) {
+		t.Errorf("crashed job status = %q, want failed — running would be requeued into a loop", got)
+	}
+	var reason string
+	if err := db.Read().QueryRow(`SELECT failure_reason FROM enrichment_jobs WHERE book_id = ?`, crashID).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != crashedReason {
+		t.Errorf("failure_reason = %q, want %q", reason, crashedReason)
+	}
+
+	// drain must have carried on to the next job, which is the whole point
+	// of recovering per job rather than per loop.
+	if got := jobStatus(t, db, nextID); got != string(storage.EnrichmentDone) {
+		t.Errorf("following job status = %q, want done — the queue wedged behind the panic", got)
+	}
+
+	// The reason is a sentence; the diagnosis is the log's job.
+	log := logged.String()
+	if !strings.Contains(log, "enrichment job panicked") || !strings.Contains(log, "provider exploded") {
+		t.Errorf("log does not carry the panic and its value:\n%s", log)
+	}
+	// On the stack's content, not the attribute key: "stack" alone is in
+	// every one of these lines whether debug.Stack() returned anything or
+	// nothing, so it would pass with the stack dropped entirely.
+	if !strings.Contains(log, "goroutine ") || !strings.Contains(log, "runtime/debug.Stack") {
+		t.Errorf("log does not carry an actual stack:\n%s", log)
+	}
+	if strings.Contains(reason, "provider exploded") {
+		t.Errorf("failure_reason = %q, want the panic value kept out of the status box", reason)
+	}
+}
+
+// The guard is the real one here, not the test opt-out: every cover server
+// in this package listens on loopback, which is exactly what a cover fetch
+// must refuse. Losing the cover must not fail a job whose text fields
+// resolved.
+func TestWorkerRefusesACoverOnALoopbackAddress(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	coversDir := t.TempDir()
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "worker-loopback", Title: "Book", SortTitle: "book", ISBN: "9780000000001",
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	coverURL, requests := coverServer(t, solidPNG(t))
+	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+		return Metadata{Publisher: "Ace Books", CoverURL: coverURL}, nil
+	}}
+	// Deliberately no allowAnyCoverAddress: this is the one test about the
+	// guard, so it uses the client New actually builds.
+	New(db, []Provider{p}, coversDir).drain(ctx)
+
+	if *requests != 0 {
+		t.Errorf("cover requests = %d, want 0 — the dial must be refused before any bytes move", *requests)
+	}
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID: %+v, %v", book, err)
+	}
+	if book.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", book.CoverPath)
+	}
+	if book.Publisher != "Ace Books" {
+		t.Errorf("Publisher = %q, want the text field still written", book.Publisher)
+	}
+	if got := jobStatus(t, db, id); got != string(storage.EnrichmentDone) {
+		t.Errorf("job status = %q, want done — a lost cover beside written fields is not a failed job", got)
+	}
+	if !strings.Contains(logged.String(), "is loopback") {
+		t.Errorf("log does not name the refused address:\n%s", logged.String())
+	}
+}
+
+// The guard hangs on Transport.DialContext, which https reaches only
+// because DialTLSContext is nil — the transport connects and then wraps.
+// Setting DialTLSContext would leave every https cover unguarded with the
+// http test above still green, and https is what a real cover URL uses.
+func TestWorkerRefusesAnHTTPSCoverOnALoopbackAddress(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "worker-loopback-tls", Title: "Book", SortTitle: "book", ISBN: "9780000000001",
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	if _, err := db.EnqueueEnrichment(ctx, id, time.Now()); err != nil {
+		t.Fatalf("EnqueueEnrichment: %v", err)
+	}
+
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Write(solidPNG(t))
+	}))
+	t.Cleanup(server.Close)
+
+	p := &fakeProvider{name: "fake", byISBN: func(context.Context, string) (Metadata, error) {
+		return Metadata{Publisher: "Ace Books", CoverURL: server.URL + "/cover.jpg"}, nil
+	}}
+	New(db, []Provider{p}, t.TempDir()).drain(ctx)
+
+	if requests != 0 {
+		t.Errorf("cover requests = %d, want 0 — the dial is refused before the TLS handshake", requests)
+	}
+	book, err := db.FindBookByID(ctx, id)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID: %+v, %v", book, err)
+	}
+	if book.CoverPath != "" {
+		t.Errorf("CoverPath = %q, want empty", book.CoverPath)
 	}
 }

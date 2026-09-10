@@ -39,7 +39,9 @@ here. See Documentation below for what these files may and may not say.
   `docs/notes/sending.md`.
 - `internal/enrich` — the enrichment `Worker`, the `Provider` interface,
   the pure `Resolve` function and `plausibleMatch` (`match.go`), the
-  three decorators (`decorator.go`) and `FetchCover`.
+  three decorators (`decorator.go`), `FetchCover` and the guards both
+  providers share: `RefusePrivateAddress` (`cover.go`) and
+  `CheckLookupRedirect`/`SameHost` (`redirect.go`).
   `internal/openlibrary`, `internal/googlebooks` — the two providers.
   `internal/providers` — the name → constructor registry
   (`METADATA_PROVIDERS`). Note: `docs/notes/enrichment.md`.
@@ -187,6 +189,8 @@ tidy-up would break. The note named in the heading carries the reasoning.
   only when `EnqueueSend` reports `inserted`.
 - Only formats Amazon accepts are offered (`sendableFormat`, today `epub`);
   `QueueSend` does not refuse others, the button is simply not rendered.
+- `process` recovers a panic and writes the row `failed` with
+  `crashedReason`, the same shape as enrichment's.
 
 ### Enrichment (`docs/notes/enrichment.md`)
 
@@ -205,21 +209,41 @@ tidy-up would break. The note named in the heading carries the reasoning.
   terminal branch, including the all-providers-failed one, guards itself
   with its own `ctx.Err()` check.
 - `failed` means the job went wrong: book gone, write failed,
-  `Asked > 0 && Failed == Asked`, or a lost cover with nothing else written.
-  "Nothing to add" is a success.
+  `Asked > 0 && Failed == Asked`, a lost cover with nothing else written,
+  or a recovered panic. "Nothing to add" is a success.
+- Both workers `recover` inside `process` and write the row terminal with
+  `crashedReason`. A panicking enrichment job left `running` is requeued
+  into a crash loop; the panic value goes to the log, never the status box.
 - `sanitizeValue`'s limits equal `internal/service`'s (1024 for a title and
   a name, 4096 for other scalars, 64 KiB for a description, 100 names), or
-  a provider-written value becomes uneditable.
+  a provider-written value becomes uneditable. A description also caps
+  consecutive newlines at two.
 - Providers name a cover URL and never download it. The worker fetches
-  under `enrich.MaxCoverBytes` with the scheme checked on every redirect hop.
+  under `enrich.MaxCoverBytes` with the scheme checked on every redirect
+  hop, and refuses loopback, private, link-local, multicast and
+  unspecified addresses at dial time (`RefusePrivateAddress`) so every hop
+  and every DNS answer is covered. Tests opt out through a `_test.go`-only
+  helper; production has no switch.
+- `Metadata.Partial` describes the answer, not the book. Only `WithCache`
+  reads it, and only to decline storing; `Resolve` and `IsEmpty` ignore it.
+- A refused redirect is **not** retryable: every return in
+  `enrich.CheckLookupRedirect` wraps `enrich.ErrRedirectRefused`, and each
+  client tests for it before its retryable wrap.
 - Compose `WithCache(WithRetry(WithRateLimit(p)))`: cache outermost, rate
   limit innermost.
 - Open Library `ByISBN` uses the edition-scoped Read API; `Search` answers
-  about works and returns neither language nor publication date.
+  about works and returns neither language nor publication date. Its cover
+  URL carries `?default=false`, or a stale id is a 200 placeholder stored
+  as a real cover.
 - Google's `best()` prefers `medium` and omits `extraLarge`. Never rewrite
-  a thumbnail URL's `zoom` parameter. `internal/googlebooks` refuses a
-  redirect that leaves the host (`sameHost`), because the key travels in
-  the query string and `Referer` would carry it.
+  a thumbnail URL's `zoom` parameter.
+- Both clients share one redirect policy, `enrich.CheckLookupRedirect` over
+  `enrich.SameHost` — never a copy per package. It refuses a hop leaving
+  the starting host: on Google because the key travels in the query string
+  and `Referer` would carry it, on Open Library because the client would
+  otherwise adopt the answering host's response.
+- A Google detail-request failure marks the answer `Partial` and leaves
+  the list answer standing. It never fails the lookup.
 - Fixtures are live captures except `internal/openlibrary`'s
   `search_*.json`; each test file says which. Never hand-edit a fixture to
   make a test pass.

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +42,27 @@ const baseURL = "https://openlibrary.org"
 // coverBaseURL is Open Library's separate covers host — a cover is fetched
 // by numeric cover_i id, not by anything search.json itself serves.
 const coverBaseURL = "https://covers.openlibrary.org"
+
+// coverURL builds the address of a cover by its numeric id.
+//
+// default=false is the load-bearing part. Without it a cover id with no
+// image behind it is answered 200 with a stand-in rather than 404 —
+// measured 2026-09-10 against id 999999999, which answers 200 and 43 bytes
+// of 1x1 GIF bare, and 404 with the parameter. Nothing downstream can tell
+// a stand-in from a cover: enrich.FetchCover sees a 200 and some bytes, and
+// whatever survives cover.Store is written under this provider's name and,
+// by the missing rule, never reconsidered. A 404 is a failed fetch
+// FetchCover already handles, so the book keeps an honest empty cover and
+// stays in the missing set for the next provider and the next run. A stale
+// cover_i is ordinary in search results, so this is the common case rather
+// than a corner.
+//
+// One helper for both call sites — the search document's cover_i and the
+// edition's covers[0] — so the parameter cannot be added to one and
+// forgotten on the other.
+func (c *Client) coverURL(id int) string {
+	return fmt.Sprintf("%s/b/id/%d-L.jpg?default=false", c.coverBaseURL, id)
+}
 
 const providerName = "openlibrary"
 
@@ -66,28 +88,6 @@ const maxErrorBodyBytes = 512
 // nothing here should be parsing anyway.
 const maxResponseBytes = 4 * 1024 * 1024
 
-// maxRedirects bounds how many hops a lookup follows. Setting CheckRedirect
-// at all replaces net/http's own default limit, so a policy that only
-// checked the scheme would follow a redirect chain forever.
-const maxRedirects = 5
-
-// checkRedirect mirrors the policy enrich.CheckCoverRedirect applies to
-// cover fetches — bounded hops, and every hop's scheme checked rather than
-// only the first URL's, since each one after the first is chosen by
-// whatever host answered rather than by this package. It is a separate
-// function rather than a call to that one because the error text reaches a
-// different failure path and naming covers in it would misdescribe what
-// failed.
-func checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
-		return fmt.Errorf("stopped after %d redirects", maxRedirects)
-	}
-	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect scheme %q is not http or https", req.URL.Scheme)
-	}
-	return nil
-}
-
 // Client looks books up against Open Library's Search API.
 type Client struct {
 	baseURL      string
@@ -102,7 +102,7 @@ func New() *Client {
 	return &Client{
 		baseURL:      baseURL,
 		coverBaseURL: coverBaseURL,
-		httpClient:   &http.Client{Timeout: Timeout, CheckRedirect: checkRedirect},
+		httpClient:   &http.Client{Timeout: Timeout, CheckRedirect: enrich.CheckLookupRedirect},
 	}
 }
 
@@ -205,7 +205,7 @@ func (c *Client) toMetadata(doc searchDoc) enrich.Metadata {
 		m.Publisher = doc.Publisher[0]
 	}
 	if doc.CoverID > 0 {
-		m.CoverURL = fmt.Sprintf("%s/b/id/%d-L.jpg", c.coverBaseURL, doc.CoverID)
+		m.CoverURL = c.coverURL(doc.CoverID)
 	}
 	return m
 }
@@ -332,7 +332,7 @@ func (c *Client) editionMetadata(record readAPIRecord) enrich.Metadata {
 	}
 
 	if len(details.Covers) > 0 && details.Covers[0] > 0 {
-		m.CoverURL = fmt.Sprintf("%s/b/id/%d-L.jpg", c.coverBaseURL, details.Covers[0])
+		m.CoverURL = c.coverURL(details.Covers[0])
 	}
 
 	return m
@@ -354,6 +354,14 @@ func (c *Client) get(ctx context.Context, reqURL string) ([]byte, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// A refused redirect is this client's own policy answering, not
+		// the network: the policy is a pure function of URLs that do not
+		// change between attempts, so a retry reaches the same refusal.
+		// Checked before the retryable wrap below, which would otherwise
+		// catch it along with every real transport failure.
+		if errors.Is(err, enrich.ErrRedirectRefused) {
+			return nil, fmt.Errorf("openlibrary: request failed: %w", err)
+		}
 		// A transport or timeout failure is the retryable case: nothing
 		// about the request itself was rejected.
 		return nil, fmt.Errorf("openlibrary: request failed: %w: %w", enrich.ErrRetryable, err)

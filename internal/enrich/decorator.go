@@ -104,6 +104,15 @@ const DefaultCacheSize = 512
 // four-case contract treats an error as a transient, retryable condition,
 // not an answer worth remembering.
 //
+// Nor is an answer marked Metadata.Partial, for the same reason one step
+// further in: the provider spoke, so it is not an error, but it is missing
+// something a later attempt could supply, and there is no expiry here to
+// undo the mistake. Storing it would turn one failed request into a
+// permanently degraded answer for that key until the process restarts.
+// This is deliberately narrower than a TTL, which would change the
+// argument the cache rests on; the specific thing not worth remembering is
+// the thing that says so.
+//
 // internal/providers wraps it outermost, so a hit costs neither a
 // rate-limit token nor a retry attempt — the whole point of having
 // answered once already. Cached values are Metadata, which holds only
@@ -141,7 +150,9 @@ func (c *cachedProvider) ByISBN(ctx context.Context, isbn string) (Metadata, err
 	if err != nil {
 		return m, err
 	}
-	c.cache.put(key, m)
+	if !m.Partial {
+		c.cache.put(key, m)
+	}
 	return m, nil
 }
 
@@ -154,7 +165,9 @@ func (c *cachedProvider) Search(ctx context.Context, title string, authors []str
 	if err != nil {
 		return m, err
 	}
-	c.cache.put(key, m)
+	if !m.Partial {
+		c.cache.put(key, m)
+	}
 	return m, nil
 }
 

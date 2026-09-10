@@ -105,6 +105,17 @@ side of the request a dead process was on is unknowable, and requeueing
 risks a silent duplicate delivery, while failing surfaces the ambiguity and
 leaves retry one click away.
 
+**A panic inside `process` is recovered** and recorded as `failed` with
+`crashedReason`, the panic value and `debug.Stack()` going to the log at
+Error, the same shape `internal/enrich` uses and for the same reasons
+(`enrichment.md`, Job outcomes): the reason is a sentence for the status
+box, since a panic value carries nothing a person can act on, and the
+recovery is per job rather than in `Run`'s loop, where the send id is no
+longer in hand. The blast radius here is smaller than enrichment's —
+`FailInterruptedSends` would fail the row at the next start rather than
+requeue it into a loop — but one restart of the whole server for one send
+is still the server down, and the guard is the same few lines.
+
 **Retry is a new row.** The retry button re-posts the form and calls
 `EnqueueSend` again rather than flipping the failed row back to `queued`.
 The log keeps the fact that the first attempt failed, which is what makes

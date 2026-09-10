@@ -955,6 +955,19 @@ a.masthead__link:hover {
   overflow-wrap: anywhere;
 }
 
+/* A stored description carries paragraph breaks worth rendering, and
+   nothing else about its whitespace is: pre-wrap would also reproduce a
+   provider's leading indentation and its stray double spaces.
+
+   Scoped to the read view rather than set on .detail__description, which
+   the edit <textarea> also carries. A textarea's UA default is pre-wrap,
+   an author white-space overrides it, and collapsing runs of spaces in a
+   control whose submitted value keeps them puts the caret where the text
+   is not. */
+.editable__read.detail__description {
+  white-space: pre-line;
+}
+
 .detail__description--empty {
   font-family: var(--sans);
   font-size: 14px;

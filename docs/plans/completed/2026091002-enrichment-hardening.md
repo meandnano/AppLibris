@@ -130,6 +130,40 @@ v6), multicast, or unspecified. A refused dial surfaces as an ordinary
 fetch failure, which `storeCover` already tolerates, logged at Debug with
 the resolved address so a misconfigured local mirror can be diagnosed.
 
+**Correction, found while implementing.** Resolving the host and then
+dialing it is the hole this decision exists to close, one layer down: the
+address checked and the address connected to are two separate lookups, so
+a short TTL or a rebinding answer slips between them. The implementation
+uses `net.Dialer.Control` instead, which Go calls once per candidate
+address *after* resolution and *before* the connect, with the address the
+dialer actually settled on — no window, no manual resolve, and the
+per-hop and per-DNS-answer coverage the decision asks for. The exported
+predicate is still `RefusePrivateAddress(net.IP) error`, as specified;
+only the hook it hangs on differs. The transport is a clone of
+`http.DefaultTransport` so proxy and TLS defaults survive.
+
+**Second correction, from review.** Two more things this decision's list of
+ranges got wrong, both found by probing the implemented predicate rather
+than reading it. `net.IP`'s own methods do not cover 100.64.0.0/10, which
+is carrier-grade NAT *and* the range Tailscale assigns — so on the
+deployment the README recommends, every tailnet peer was reachable by a
+cover URL, which is precisely the address class this decision exists to
+refuse. Nor do they cover 0.0.0.0/8, 192.0.0.0/24, 198.18.0.0/15,
+240.0.0.0/4, 255.255.255.255 or the deprecated IPv6 site-local fec0::/10,
+or the IPv4 embedded in a NAT64 (64:ff9b::/96) or 6to4 (2002::/16)
+address. All are refused explicitly now, the translated ones by re-checking
+the address they carry — at byte 12 for NAT64 and byte 2 for 6to4, which
+are not interchangeable. IPv4-mapped IPv6 needed nothing: `net.IP`'s
+predicates go through `To4`.
+
+And the transport's proxy is cleared rather than kept. `Control` sees the
+address the dialer connects to, which through a proxy is the proxy's: a
+proxy on a LAN address would be refused as private and no cover would ever
+be fetched, while a public one would let a cover URL reach anything the
+proxy can with the guard checking the wrong host and reporting success. A
+cover is a direct GET of a public image, so honouring a proxy here buys
+nothing and cannot be done without giving up the check.
+
 Checking at dial rather than on the URL string is what makes the check
 cover every redirect hop and DNS rebinding alike: a hostname that resolves
 to a public address when the URL is inspected and a private one when the
@@ -166,6 +200,16 @@ A live capture of the `404` body is committed beside the existing
 it is not, the test asserts the URL shape only and its comment says the
 `404` behaviour is documented rather than captured, per the fixture
 convention in `docs/notes/enrichment.md`.
+
+**Correction, found while implementing.** Network access was available and
+the behaviour was verified live on 2026-09-10, but no fixture was
+committed: the `404` body is the thirteen bytes `404 Not Found`, and
+nothing in this package parses a covers-host response at all — only the
+URL shape is its business, which is what the test asserts. A file no test
+reads is not a fixture. The measurement is recorded in
+`openlibrary_test.go`'s provenance comment instead, including the finding
+that the placeholder the parameter suppresses is a 43-byte 1x1 GIF for an
+unknown id rather than the grey cover image the Decision assumed.
 
 Rejected: detecting a placeholder from the bytes. Nothing in `FetchCover` or
 `cover.Store` can tell a small JPEG that says "no cover" from a small JPEG
@@ -222,6 +266,23 @@ carries is added here, with a same-host downgrade refused as well. If a
 legitimate cross-host hop is observed, the check is not added and the
 observation is recorded in `docs/notes/enrichment.md` as the reason.
 `sameHost` moves to `internal/enrich` so both clients use one comparison.
+
+**Verified while implementing (2026-09-10).** The Read API answers an ISBN
+directly — `/api/volumes/brief/isbn/{isbn}.json` was `200` with no redirect
+for every ISBN probed — and the `/isbn/{isbn}` and `/isbn/{isbn}.json`
+aliases redirect one and two hops respectively, every hop on
+`openlibrary.org`. No cross-host hop was observed, so the check is added.
+
+**Correction, found while implementing.** Adding it made the two
+`checkRedirect` functions identical — five clauses, the same messages, the
+same hop bound, and two sentinels differing only in which package they sat
+in. A per-package sentinel was right while the policies differed and stopped
+being right the moment this decision made them the same. So the whole policy
+is shared, not only the comparison: `enrich.CheckLookupRedirect`,
+`enrich.ErrRedirectRefused` and `enrich.MaxLookupRedirects` live beside
+`SameHost` in `internal/enrich/redirect.go`, which is also why that file
+earns its place. Each client keeps its own one-line `errors.Is` test, which
+has to stay per-client because it sits where each wraps `ErrRetryable`.
 
 ## Decision 6: description paragraphs render, and only paragraphs
 

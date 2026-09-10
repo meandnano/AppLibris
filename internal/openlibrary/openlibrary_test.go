@@ -32,6 +32,13 @@ import (
 // Neither is hand-edited to fit a change: a fixture adjusted until the code
 // passes tests the parser against its author's expectations instead of
 // against the API.
+//
+// The covers host has no fixture and needs none, since nothing here parses
+// its response — only the URL shape is this package's business. The
+// behaviour that shape turns on was measured live on 2026-09-10:
+// /b/id/999999999-L.jpg answers 200 with 43 bytes of 1x1 GIF, and the same
+// URL with ?default=false answers 404 and the body "404 Not Found". A
+// thirteen-byte capture of that would be a file no test reads.
 
 // testClient wires coverBaseURL to its own isolated server that 404s by
 // default, kept separate from the search server and its hits counter: a
@@ -57,8 +64,8 @@ func testClient(t *testing.T, handler http.HandlerFunc) (*Client, *int) {
 	httpClient := server.Client()
 	// The production redirect policy, not net/http's default: without it
 	// the redirect tests below would assert the standard library's
-	// behaviour rather than checkRedirect's.
-	httpClient.CheckRedirect = checkRedirect
+	// behaviour rather than the shared policy's.
+	httpClient.CheckRedirect = enrich.CheckLookupRedirect
 
 	return &Client{
 		baseURL:      server.URL,
@@ -378,7 +385,7 @@ func TestByISBNNamesCoverURLWithoutFetchingIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	want := coverServer.URL + "/b/id/12003329-L.jpg"
+	want := coverServer.URL + "/b/id/12003329-L.jpg?default=false"
 	if got.CoverURL != want {
 		t.Errorf("CoverURL = %q, want %q", got.CoverURL, want)
 	}
@@ -502,6 +509,9 @@ func TestByISBNAuthorsFallBackToTheEditionRecord(t *testing.T) {
 // normal answer and has to be followed — but every hop is chosen by
 // whatever host answered, not by this package, so each one's scheme is
 // checked rather than only the first URL's.
+// This is also the half the host check must not break: the hop is
+// same-host, which is every hop this API was observed to issue, so adding
+// SameHost to the policy must leave these books resolving.
 func TestByISBNFollowsARedirect(t *testing.T) {
 	client, hits := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/volumes/brief/isbn/9780547928227.json" {
@@ -568,6 +578,98 @@ func TestErrorsAreClassifiedRetryableOrNot(t *testing.T) {
 		if got := errors.Is(err, enrich.ErrRetryable); got != c.wantRetryable {
 			t.Errorf("status %d: errors.Is(err, ErrRetryable) = %v, want %v", c.status, got, c.wantRetryable)
 		}
+	}
+}
+
+// Without default=false a cover id with no image behind it is answered 200
+// with a placeholder, which nothing downstream can tell from a real cover:
+// it would be stored under this provider's name and, by the missing rule,
+// never reconsidered. Both paths, since one helper builds both and the
+// point is that neither can drift.
+func TestCoverURLAsksForA404NotAPlaceholder(t *testing.T) {
+	t.Run("ByISBN", func(t *testing.T) {
+		client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write(readFixture(t, "edition_match.json"))
+		})
+		got, err := client.ByISBN(context.Background(), "9780547928227")
+		if err != nil {
+			t.Fatalf("ByISBN: %v", err)
+		}
+		if !strings.Contains(got.CoverURL, "?default=false") {
+			t.Errorf("CoverURL = %q, want it to ask for a 404 rather than a placeholder", got.CoverURL)
+		}
+	})
+
+	t.Run("Search", func(t *testing.T) {
+		client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write(readFixture(t, "search_match.json"))
+		})
+		got, err := client.Search(context.Background(), "The Hobbit", []string{"J.R.R. Tolkien"})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if got.CoverURL == "" {
+			t.Fatal("CoverURL is empty, so this test proves nothing")
+		}
+		if !strings.Contains(got.CoverURL, "?default=false") {
+			t.Errorf("CoverURL = %q, want it to ask for a 404 rather than a placeholder", got.CoverURL)
+		}
+	})
+}
+
+// A refused redirect belongs with 400 and 403: the policy is a pure
+// function of URLs that do not change between attempts, so a retry reaches
+// the same refusal. internal/googlebooks carries the same test, since
+// docs/notes/enrichment.md describes the two policies as shaped alike.
+func TestRefusedRedirectIsNotRetryable(t *testing.T) {
+	cases := []struct {
+		name     string
+		location func(base string) string
+	}{
+		{"off-host", func(string) string { return "https://elsewhere.example/record.json" }},
+		{"non-http scheme", func(string) string { return "file:///etc/passwd" }},
+		{"endless chain", func(string) string { return "/next.json" }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var base string
+			client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, c.location(base), http.StatusFound)
+			})
+			base = client.baseURL
+
+			_, err := client.ByISBN(context.Background(), "9780262011532")
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if errors.Is(err, enrich.ErrRetryable) {
+				t.Errorf("errors.Is(err, ErrRetryable) = true, want false: %v", err)
+			}
+		})
+	}
+}
+
+// A cross-host hop would make this client adopt the answering host's whole
+// response — gated by title and author on the search path and by nothing at
+// all on the ISBN path. No redirect this API was observed to issue leaves
+// openlibrary.org: the Read API answers ISBNs directly, and the
+// /isbn/{isbn} aliases hop once or twice, same-host each time.
+func TestByISBNRefusesARedirectOffHost(t *testing.T) {
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"records":{"x":{"data":{"title":"Not This Book"}}}}`))
+	}))
+	t.Cleanup(foreign.Close)
+
+	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, foreign.URL+"/record.json", http.StatusFound)
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err == nil {
+		t.Fatal("ByISBN across hosts: want an error")
+	}
+	if got.Title != "" {
+		t.Errorf("Title = %q, want nothing adopted from the answering host", got.Title)
 	}
 }
 

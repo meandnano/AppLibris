@@ -1178,6 +1178,75 @@ func TestButtonClassesInMarkupHaveRules(t *testing.T) {
 	}
 }
 
+// A description is stored with its paragraph breaks and is the one field
+// rendered as flowing prose, so the property that makes those breaks
+// visible is contract rather than styling. pre-line and not pre-wrap: the
+// second would also reproduce a provider's leading indentation and its
+// stray double spaces.
+//
+// The rule has to be the read view's alone. The edit <textarea> carries
+// .detail__description too, and an author white-space there overrides the
+// UA's pre-wrap, so a bare .detail__description rule would collapse runs
+// of spaces in a control whose submitted value keeps them.
+func TestDescriptionRendersParagraphBreaks(t *testing.T) {
+	css, err := fs.ReadFile(staticFS, "static/css/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	blocks := regexp.MustCompile(`(?s)([^{}]*)\{([^}]*)\}`).FindAllStringSubmatch(string(css), -1)
+	found := false
+	for _, b := range blocks {
+		selector, body := strings.TrimSpace(b[1]), b[2]
+		if !strings.Contains(body, "white-space: pre-line") {
+			continue
+		}
+		if !strings.Contains(selector, "detail__description") {
+			continue
+		}
+		found = true
+		if !strings.Contains(selector, "editable__read") {
+			t.Errorf("white-space: pre-line is on %q, which the edit textarea also matches", selector)
+		}
+	}
+	if !found {
+		t.Error("no rule sets white-space: pre-line on the description, so stored paragraph breaks collapse")
+	}
+
+	if regexp.MustCompile(`\.detail__description[^{]*\{[^}]*pre-wrap`).Match(css) {
+		t.Error("the description uses pre-wrap, which also preserves a provider's stray whitespace")
+	}
+}
+
+// The CSS above is only load-bearing if the break survives to the markup.
+// A handler-side strings.Fields join or a template trim would defeat it
+// with the stylesheet assertion still green.
+func TestDescriptionParagraphBreakReachesTheMarkup(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+
+	id, err := db.CreateBook(ctx, storage.Book{
+		ContentHash: "hash-1", Title: "Two Paragraphs", SortTitle: "two paragraphs", Format: "epub",
+		Description: "First paragraph.\n\nSecond paragraph.",
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+
+	handler := Routes(service.New(db), t.TempDir(), false, false)
+	req := httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if want := "First paragraph.\n\nSecond paragraph."; !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("the blank line between paragraphs did not survive to the page; body = %q", rec.Body.String())
+	}
+}
+
 // The two fetch-metadata wrappers are what turn the deployment requirement
 // (an HTTPS gateway in front, the plain listener unreachable otherwise)
 // into something the log can report as violated. Both are tested against a
