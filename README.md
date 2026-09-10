@@ -1,4 +1,4 @@
-# library
+# AppLibris
 
 A self-hosted ebook library server. Point it at a directory of EPUB and FB2
 files and it gives you a cover grid to browse, a search box, a detail page
