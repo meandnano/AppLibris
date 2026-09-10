@@ -9,6 +9,7 @@ package googlebooks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -62,6 +63,17 @@ const maxResponseBytes = 4 * 1024 * 1024
 // checked the scheme would follow a redirect chain forever.
 const maxRedirects = 5
 
+// errRedirectRefused marks every refusal checkRedirect issues, so a lookup
+// can classify one as non-retryable. Each of its clauses is a pure function
+// of URLs that do not change between attempts, so a second attempt reaches
+// the identical refusal — the same reason a 400 or a 403 is not retried.
+// Without the sentinel a refusal burns DefaultRetryAttempts, three lookups
+// spent to be told the same thing three times.
+//
+// http.Client.Do returns a CheckRedirect error inside a *url.Error, which
+// unwraps, so errors.Is reaches this through the wrapping the client adds.
+var errRedirectRefused = errors.New("redirect refused")
+
 // checkRedirect bounds a lookup's hops and refuses one that leaves the host
 // the lookup started against. It is internal/openlibrary's policy of the
 // same name plus the host check, which that one does not have.
@@ -84,27 +96,30 @@ const maxRedirects = 5
 // Google's cover host was observed to redirect cross-host. Moving the key
 // to a header would not substitute for this, since Go forwards
 // non-sensitive headers across hosts.
+//
+// Every refusal wraps errRedirectRefused, which is what keeps the lookup
+// paths from retrying it.
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
-		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		return fmt.Errorf("stopped after %d redirects: %w", maxRedirects, errRedirectRefused)
 	}
 	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect scheme %q is not http or https", req.URL.Scheme)
+		return fmt.Errorf("redirect scheme %q is not http or https: %w", req.URL.Scheme, errRedirectRefused)
 	}
 	// The credential clause refuses an empty via rather than passing it.
 	// net/http always supplies the requests already made, so this cannot
 	// happen — but it is the one clause guarding a credential, and a
 	// clause that fails open is one a future reuse can walk through.
 	if len(via) == 0 {
-		return fmt.Errorf("redirect with no originating request to compare against")
+		return fmt.Errorf("redirect with no originating request to compare against: %w", errRedirectRefused)
 	}
 	// Compared against via[0], the request this lookup made, rather than
 	// the previous hop. The two are equivalent — every hop is checked, so
 	// the host can never change and the previous hop's host is always the
 	// first's — but via[0] states the invariant the policy actually has:
 	// a lookup never leaves the host it started against.
-	if !sameHost(req.URL, via[0].URL) {
-		return fmt.Errorf("redirect to %q leaves the host the lookup started against", req.URL.Host)
+	if !enrich.SameHost(req.URL, via[0].URL) {
+		return fmt.Errorf("redirect to %q leaves the host the lookup started against: %w", req.URL.Host, errRedirectRefused)
 	}
 	// A same-host downgrade off TLS is refused too. The key does not leak
 	// on that hop — Go suppresses Referer https→http — but a policy added
@@ -116,45 +131,9 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	// 443 against 80, but a Location that writes the port out on both
 	// sides compares equal there and reaches this.
 	if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect downgrades from https to %q", req.URL.Scheme)
+		return fmt.Errorf("redirect downgrades from https to %q: %w", req.URL.Scheme, errRedirectRefused)
 	}
 	return nil
-}
-
-// sameHost compares two URLs' authorities the way a host is actually the
-// same rather than the way two strings are: case-insensitively, with the
-// scheme's default port and an explicit one treated alike, and a fully
-// qualified trailing dot ignored.
-//
-// A byte compare of URL.Host would refuse every one of those, which is
-// safe in the sense that nothing is admitted wrongly and unsafe in the
-// sense that matters here: the refusal surfaces as a retryable error, so a
-// Location that merely spells the same host differently would burn every
-// retry attempt and leave enrichment quietly answering nothing.
-func sameHost(a, b *url.URL) bool {
-	return strings.EqualFold(canonicalHostname(a), canonicalHostname(b)) &&
-		effectivePort(a) == effectivePort(b)
-}
-
-// canonicalHostname drops the trailing dot of a fully qualified name, which
-// names the same host as the form without it.
-func canonicalHostname(u *url.URL) string {
-	return strings.TrimSuffix(u.Hostname(), ".")
-}
-
-// effectivePort fills in the scheme's default, so an omitted port and an
-// explicitly written default one compare equal.
-func effectivePort(u *url.URL) string {
-	if p := u.Port(); p != "" {
-		return p
-	}
-	switch u.Scheme {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	}
-	return ""
 }
 
 // Client looks books up against the Google Books Volumes API.
@@ -347,6 +326,14 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// A refused redirect is this client's own policy answering, not
+		// the network: the policy is a pure function of URLs that do not
+		// change between attempts, so a retry reaches the same refusal.
+		// Checked before the retryable wrap below, which would otherwise
+		// catch it along with every real transport failure.
+		if errors.Is(err, errRedirectRefused) {
+			return enrich.Metadata{}, fmt.Errorf("googlebooks: request failed: %w", c.redactKey(err))
+		}
 		// A transport or timeout failure is the retryable case: nothing
 		// about the request itself was rejected.
 		return enrich.Metadata{}, fmt.Errorf("googlebooks: request failed: %w: %w", enrich.ErrRetryable, c.redactKey(err))
@@ -389,7 +376,14 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 
 	matched := parsed.Items[0]
 	m := c.toMetadata(matched)
-	c.enrichVolume(ctx, matched.ID, &m)
+	// The list answer stands whatever the detail request did; only the
+	// mark changes, and only WithCache reads it. Every failure counts —
+	// transport, non-200, a malformed body, a body naming another volume —
+	// because each one leaves the same fields unfilled and each one might
+	// not happen next time.
+	if err := c.enrichVolume(ctx, matched.ID, &m); err != nil {
+		m.Partial = true
+	}
 	return m, nil
 }
 
@@ -406,31 +400,37 @@ func (c *Client) search(ctx context.Context, q string) (enrich.Metadata, error) 
 // documented HTML form is the single-volume endpoint's — often different,
 // fuller text rather than the same text differently punctuated.
 //
-// The paragraph breaks reach books.description but not the page:
-// .detail__description sets no white-space, so HTML collapses them in the
-// read view and they are visible only in the edit textarea. Planned in
-// docs/plans/2026091002-enrichment-hardening.md.
+// Those paragraph breaks reach the page: .detail__description renders with
+// white-space: pre-line, so a stored break is a break in the read view.
 //
 // The request is made for any matched volume that named an id, not only
 // one that also has a cover. Skipping a coverless volume would be free on
 // the cover half and would silently drop the description half, which is
 // the payoff for a book whose blurb is the thing worth having.
 //
-// It fails silently on purpose. A larger cover and a paragraph break are
+// It fails softly, not silently. A larger cover and a paragraph break are
 // niceties; the six text fields already in hand are the answer, and losing
 // them because a second request timed out would be the wrong trade. So
 // every failure leaves m exactly as the list response built it and is
 // logged at Debug — this runs once per matched volume, and a Warn per
 // enriched book teaches people to ignore Warns.
-func (c *Client) enrichVolume(ctx context.Context, id string, m *enrich.Metadata) {
+//
+// The difference from silent is the returned error, which the caller turns
+// into Metadata.Partial. Without it a transient failure of this request
+// was stored by enrich.WithCache as a complete answer and served for the
+// life of the process, so one timeout cost that book its cover and fuller
+// description until a restart.
+func (c *Client) enrichVolume(ctx context.Context, id string, m *enrich.Metadata) error {
 	if id == "" {
-		return
+		// Not a failure: a volume with no id has no detail endpoint to
+		// ask, so there is nothing a later attempt would do differently.
+		return nil
 	}
 
 	detail, err := c.volumeByID(ctx, id)
 	if err != nil {
 		slog.Debug("googlebooks: volume detail lookup failed", "volume_id", id, "error", err)
-		return
+		return err
 	}
 	// A body describing some other volume is not an answer about this
 	// book, and nothing downstream would catch it: internal/enrich's
@@ -447,7 +447,7 @@ func (c *Client) enrichVolume(ctx context.Context, id string, m *enrich.Metadata
 	// costs the check.
 	if detail.ID != id {
 		slog.Debug("googlebooks: volume detail names a different volume", "requested", id, "answered", detail.ID)
-		return
+		return fmt.Errorf("googlebooks: volume detail names %q, not %q", detail.ID, id)
 	}
 
 	// Each field is replaced only by a present answer, never by an absent
@@ -464,6 +464,7 @@ func (c *Client) enrichVolume(ctx context.Context, id string, m *enrich.Metadata
 	if description := plainText(detail.VolumeInfo.Description); description != "" {
 		m.Description = description
 	}
+	return nil
 }
 
 // volumeByID reads one volume from /volumes/{id}. The endpoint answers a

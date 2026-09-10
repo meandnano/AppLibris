@@ -130,6 +130,18 @@ v6), multicast, or unspecified. A refused dial surfaces as an ordinary
 fetch failure, which `storeCover` already tolerates, logged at Debug with
 the resolved address so a misconfigured local mirror can be diagnosed.
 
+**Correction, found while implementing.** Resolving the host and then
+dialing it is the hole this decision exists to close, one layer down: the
+address checked and the address connected to are two separate lookups, so
+a short TTL or a rebinding answer slips between them. The implementation
+uses `net.Dialer.Control` instead, which Go calls once per candidate
+address *after* resolution and *before* the connect, with the address the
+dialer actually settled on — no window, no manual resolve, and the
+per-hop and per-DNS-answer coverage the decision asks for. The exported
+predicate is still `RefusePrivateAddress(net.IP) error`, as specified;
+only the hook it hangs on differs. The transport is a clone of
+`http.DefaultTransport` so proxy and TLS defaults survive.
+
 Checking at dial rather than on the URL string is what makes the check
 cover every redirect hop and DNS rebinding alike: a hostname that resolves
 to a public address when the URL is inspected and a private one when the
@@ -166,6 +178,16 @@ A live capture of the `404` body is committed beside the existing
 it is not, the test asserts the URL shape only and its comment says the
 `404` behaviour is documented rather than captured, per the fixture
 convention in `docs/notes/enrichment.md`.
+
+**Correction, found while implementing.** Network access was available and
+the behaviour was verified live on 2026-09-10, but no fixture was
+committed: the `404` body is the thirteen bytes `404 Not Found`, and
+nothing in this package parses a covers-host response at all — only the
+URL shape is its business, which is what the test asserts. A file no test
+reads is not a fixture. The measurement is recorded in
+`openlibrary_test.go`'s provenance comment instead, including the finding
+that the placeholder the parameter suppresses is a 43-byte 1x1 GIF for an
+unknown id rather than the grey cover image the Decision assumed.
 
 Rejected: detecting a placeholder from the bytes. Nothing in `FetchCover` or
 `cover.Store` can tell a small JPEG that says "no cover" from a small JPEG
@@ -222,6 +244,12 @@ carries is added here, with a same-host downgrade refused as well. If a
 legitimate cross-host hop is observed, the check is not added and the
 observation is recorded in `docs/notes/enrichment.md` as the reason.
 `sameHost` moves to `internal/enrich` so both clients use one comparison.
+
+**Verified while implementing (2026-09-10).** The Read API answers an ISBN
+directly — `/api/volumes/brief/isbn/{isbn}.json` was `200` with no redirect
+for every ISBN probed — and the `/isbn/{isbn}` and `/isbn/{isbn}.json`
+aliases redirect one and two hops respectively, every hop on
+`openlibrary.org`. No cross-host hop was observed, so the check is added.
 
 ## Decision 6: description paragraphs render, and only paragraphs
 

@@ -69,6 +69,23 @@ type Metadata struct {
 	// It never reaches cover_path: the column holds the path Store
 	// produced, keyed by the book's content hash, never a remote URL.
 	CoverURL string
+
+	// Partial marks an answer the provider could not finish assembling —
+	// the fields present are real, but at least one it would normally have
+	// filled is missing because a step failed. It is the one field here
+	// that describes the answer rather than the book.
+	//
+	// Only WithCache reads it, and only to decline storing the answer, so
+	// the next lookup for the same key asks again instead of being served a
+	// degraded result for the life of the process. Resolve ignores it: a
+	// partial answer is still an answer, so it counts toward Asked and not
+	// toward Failed, and IsEmpty ignores it too, since an answer with text
+	// in it is not empty.
+	//
+	// internal/googlebooks is the only provider that sets it, when the
+	// second, detail request behind a search result fails. A provider that
+	// makes one request per lookup has no partial state to report.
+	Partial bool
 }
 
 // IsEmpty reports whether a provider had nothing at all to say — the zero

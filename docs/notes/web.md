@@ -523,6 +523,16 @@ alone, so grouping the `--tertiary` rules together silently reverts it.
 Two tests guard the class names in each direction: no retired name
 survives in any template or stylesheet, and every button or spinner class
 the markup names has a rule, since a mistyped modifier renders as a bare
-`.button` with every handler test still green. Known limits:
-`docs/plans/2026091002-enrichment-hardening.md` (description paragraphs)
-and `docs/backlog/2026090702-button-base-carries-the-editors-size.md`.
+`.button` with every handler test still green. Known limit:
+`docs/backlog/2026090702-button-base-carries-the-editors-size.md`.
+
+`.detail__description` is `white-space: pre-line`, which is contract
+rather than styling and has a test of its own. A description is stored
+with its paragraph breaks — Google's flattened HTML supplies them and the
+edit textarea preserves them — and this is what makes them visible in the
+read view. `pre-wrap` is the wrong half of the pair: it would also
+reproduce a provider's leading indentation and its stray double spaces,
+which is the trade that kept the breaks collapsed until the two could be
+separated. The rule is on the class, so it reaches the read view and the
+`<textarea>` alike; the textarea preserved whitespace already and is
+unchanged by it.

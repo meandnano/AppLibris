@@ -778,6 +778,39 @@ func TestErrorsAreClassifiedRetryableOrNot(t *testing.T) {
 	}
 }
 
+// A refused redirect belongs with 400 and 403, not with a transport
+// failure: checkRedirect is a pure function of URLs that do not change
+// between attempts, so all a retry buys is the same refusal twice more.
+// Each case is a different clause of the policy, since the sentinel has to
+// be on every return rather than the one that was easiest to reach.
+func TestRefusedRedirectIsNotRetryable(t *testing.T) {
+	cases := []struct {
+		name     string
+		location func(base string) string
+	}{
+		{"off-host", func(string) string { return "https://elsewhere.example/volumes" }},
+		{"non-http scheme", func(string) string { return "file:///etc/passwd" }},
+		{"endless chain", func(base string) string { return base + "/volumes?q=again" }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var base string
+			client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, c.location(base), http.StatusFound)
+			})
+			base = client.baseURL
+
+			_, err := client.ByISBN(context.Background(), "9780262011532")
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if errors.Is(err, enrich.ErrRetryable) {
+				t.Errorf("errors.Is(err, ErrRetryable) = true, want false: %v", err)
+			}
+		})
+	}
+}
+
 // Redaction must not cost the error chain: without Unwrap, whether
 // context.Canceled were detectable on a transport failure would depend on
 // whether an API key happened to be configured.
@@ -940,8 +973,8 @@ func TestBaseLanguage(t *testing.T) {
 // rather than a fault in one: the gate refuses the cross-language
 // mismatches it can see (a transliterated title is a title mismatch), and
 // withholding language from search answers would cost four correct values
-// to avoid this one. Deliberately not fixed; the decision is recorded in
-// docs/plans/2026091002-enrichment-hardening.md.
+// to avoid this one. Deliberately accepted; the reasoning is in
+// docs/notes/enrichment.md, under the plausibility gate.
 //
 // The capture lives here because this package's lookup produced it.
 func TestSearchCanAnswerAMislabelledLanguage(t *testing.T) {
@@ -1100,7 +1133,46 @@ func TestDetailRequestFailureKeepsTheListAnswer(t *testing.T) {
 				t.Fatalf("ByISBN: want nil error — a lost cover must not fail a lookup that has its text fields; got %v", err)
 			}
 			assertListAnswerIntact(t, got)
+			// Every one of these might succeed next time, so the answer
+			// must not be cached as though it were whole.
+			if !got.Partial {
+				t.Error("Partial = false, want the answer marked so WithCache declines to store it")
+			}
 		})
+	}
+}
+
+// A body describing another volume is a failed detail request like any
+// other: the two fields it would have filled are still unfilled, and the
+// next attempt might get the right one.
+func TestDetailBodyNamingAnotherVolumeMarksTheAnswerPartial(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"someOtherVolume","volumeInfo":{"description":"<p>Not this book.</p>"}}`))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	assertListAnswerIntact(t, got)
+	if !got.Partial {
+		t.Error("Partial = false, want a mismatched volume id treated as a failed detail request")
+	}
+}
+
+// The other direction, so the mark cannot be set unconditionally: a whole
+// answer must stay cacheable, or the cache stops working entirely.
+func TestDetailRequestSuccessLeavesTheAnswerWhole(t *testing.T) {
+	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(readFixture(t, "volumes_detail.json"))
+	})
+
+	got, err := client.ByISBN(context.Background(), "9780547928227")
+	if err != nil {
+		t.Fatalf("ByISBN: %v", err)
+	}
+	if got.Partial {
+		t.Error("Partial = true on a detail request that succeeded")
 	}
 }
 

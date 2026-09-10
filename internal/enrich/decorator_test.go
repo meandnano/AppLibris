@@ -343,3 +343,61 @@ func TestWithCacheReadPromotesRecency(t *testing.T) {
 		t.Errorf("calls = %d, want 4 — b should have been the one evicted", fake.calls)
 	}
 }
+
+// There is no expiry here, so a partial answer stored once is served for
+// the life of the process: a single failed detail request would cost that
+// book its cover and fuller description until a restart. Both methods, so
+// the skip cannot be added to one and forgotten on the other.
+func TestCacheDoesNotStoreAPartialAnswer(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("ByISBN", func(t *testing.T) {
+		partial := &fakeProvider{name: "partial", byISBN: func(context.Context, string) (Metadata, error) {
+			return Metadata{Title: "Half An Answer", Partial: true}, nil
+		}}
+		p := WithCache(partial, DefaultCacheSize)
+		mustByISBN(t, p, ctx, "9780000000001")
+		mustByISBN(t, p, ctx, "9780000000001")
+		if partial.calls != 2 {
+			t.Errorf("calls = %d, want 2 — a partial answer must not be remembered", partial.calls)
+		}
+
+		whole := &fakeProvider{name: "whole", byISBN: func(context.Context, string) (Metadata, error) {
+			return Metadata{Title: "A Whole Answer"}, nil
+		}}
+		q := WithCache(whole, DefaultCacheSize)
+		mustByISBN(t, q, ctx, "9780000000001")
+		mustByISBN(t, q, ctx, "9780000000001")
+		if whole.calls != 1 {
+			t.Errorf("calls = %d, want 1 — a complete answer is still cached", whole.calls)
+		}
+	})
+
+	t.Run("Search", func(t *testing.T) {
+		partial := &fakeProvider{name: "partial", search: func(context.Context, string, []string) (Metadata, error) {
+			return Metadata{Title: "Half An Answer", Partial: true}, nil
+		}}
+		p := WithCache(partial, DefaultCacheSize)
+		for range 2 {
+			if _, err := p.Search(ctx, "Piranesi", []string{"Susanna Clarke"}); err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+		}
+		if partial.calls != 2 {
+			t.Errorf("calls = %d, want 2 — a partial answer must not be remembered", partial.calls)
+		}
+
+		whole := &fakeProvider{name: "whole", search: func(context.Context, string, []string) (Metadata, error) {
+			return Metadata{Title: "A Whole Answer"}, nil
+		}}
+		q := WithCache(whole, DefaultCacheSize)
+		for range 2 {
+			if _, err := q.Search(ctx, "Piranesi", []string{"Susanna Clarke"}); err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+		}
+		if whole.calls != 1 {
+			t.Errorf("calls = %d, want 1 — a complete answer is still cached", whole.calls)
+		}
+	})
+}

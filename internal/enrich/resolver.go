@@ -113,6 +113,8 @@ const (
 func sanitizeValue(field storage.MetadataField, value string) string {
 	if field != storage.FieldDescription {
 		value = strings.Join(strings.Fields(value), " ")
+	} else {
+		value = capBlankLines(value)
 	}
 	value = strings.TrimSpace(value)
 
@@ -129,6 +131,29 @@ func sanitizeValue(field storage.MetadataField, value string) string {
 	}
 	if len(value) > limit {
 		value = strings.ToValidUTF8(value[:limit], "")
+	}
+	return value
+}
+
+// capBlankLines collapses a run of three or more newlines to two, leaving a
+// single newline alone: at most one blank line between paragraphs.
+//
+// A description is the one field that keeps its line breaks, and
+// .detail__description renders them, so what a provider sends is now what a
+// reader sees — including the four blank lines a scraped blurb arrives
+// with. internal/googlebooks already normalises its own HTML on the way
+// out; doing it here as well makes it a property of every provider's value
+// rather than of one client, which is where the next provider will need it.
+// Open Library's edition descriptions are plain and mostly single-block, so
+// this costs nothing there today.
+//
+// It normalises \r\n first, so a CRLF description is not left with a lone
+// carriage return in the middle of a paragraph.
+func capBlankLines(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	for strings.Contains(value, "\n\n\n") {
+		value = strings.ReplaceAll(value, "\n\n\n", "\n\n")
 	}
 	return value
 }

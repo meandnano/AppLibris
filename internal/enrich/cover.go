@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"syscall"
+	"time"
 )
 
 // MaxCoverBytes bounds a fetched cover image's response body, checked
@@ -39,6 +43,75 @@ const coverUserAgent = "library/1.0 (+https://github.com/meandnano/AppLibris)"
 // coverSchemeAllowed reports whether a URL is one a cover fetch may follow.
 func coverSchemeAllowed(scheme string) bool {
 	return scheme == "http" || scheme == "https"
+}
+
+// RefusePrivateAddress reports an error for any address a cover fetch must
+// not connect to: loopback, an RFC 1918 or IPv6 unique-local address,
+// link-local unicast (which is where a cloud metadata endpoint lives),
+// multicast, and the unspecified address. Everything else is allowed.
+//
+// A cover URL is chosen by whichever host answered a provider lookup, and
+// each redirect hop by whichever host answered the one before it. Without
+// this the fetch is a blind GET at any address the deployment can reach —
+// another container on the same Docker network, a router's admin page, the
+// link-local metadata service. Only image bytes are ever kept, so the
+// exposure is small, but "small" is not the same as bounded.
+//
+// It is a deny list of the ranges that are unreachable from the internet
+// rather than an allow list of public ones: an allow list has to be revised
+// every time IANA assigns a block, and a cover host is an ordinary public
+// server.
+func RefusePrivateAddress(ip net.IP) error {
+	switch {
+	case ip == nil:
+		return fmt.Errorf("cover address is not an IP")
+	case ip.IsLoopback():
+		return fmt.Errorf("cover address %s is loopback", ip)
+	case ip.IsPrivate():
+		return fmt.Errorf("cover address %s is private", ip)
+	case ip.IsLinkLocalUnicast():
+		return fmt.Errorf("cover address %s is link-local", ip)
+	case ip.IsLinkLocalMulticast(), ip.IsInterfaceLocalMulticast(), ip.IsMulticast():
+		return fmt.Errorf("cover address %s is multicast", ip)
+	case ip.IsUnspecified():
+		return fmt.Errorf("cover address %s is unspecified", ip)
+	}
+	return nil
+}
+
+// coverDialContext builds the DialContext a cover client uses, applying
+// guard to the address every connection attempt actually resolves to.
+//
+// The check belongs here rather than on the URL's host for two reasons a
+// URL check cannot cover. A hostname that resolves to a public address when
+// the URL is inspected and a private one when the connection is made — DNS
+// rebinding, or simply a short TTL — is caught, because this runs at the
+// moment of connection with the address the dialer settled on. And every
+// redirect hop goes through the same dialer, so a Location naming a bare
+// private IP is refused without CheckCoverRedirect having to parse it.
+//
+// net.Dialer.Control is the hook rather than a resolve-then-dial of our
+// own: Go calls it once per candidate address after resolution and before
+// the connect, so there is no window between the address being checked and
+// the address being used. Resolving by hand and then dialing the hostname
+// would reopen exactly that window.
+func coverDialContext(guard func(net.IP) error) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout:   coverFetchTimeout,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return fmt.Errorf("cover dial address %q: %w", address, err)
+			}
+			if err := guard(net.ParseIP(host)); err != nil {
+				slog.Debug("refused a cover fetch", "address", address, "error", err)
+				return err
+			}
+			return nil
+		},
+	}
+	return dialer.DialContext
 }
 
 // CheckCoverRedirect is the CheckRedirect a client passed to FetchCover

@@ -3,7 +3,9 @@ package enrich
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"library/internal/cover"
@@ -69,6 +71,20 @@ const allProvidersFailedReason = "no metadata provider could answer — try agai
 // button is still there for the cases that are transient.
 const coverLostReason = "found a cover but could not save it"
 
+// crashedReason is recorded when process panics. It is a sentence for the
+// status box rather than the panic's own text: a panic value carries a Go
+// type name, sometimes a URL or a fragment of a key, and never anything a
+// person can act on, while the log line beside it carries the value and the
+// full stack.
+//
+// Writing the row terminal at all is the point. A panic that leaves the job
+// running is requeued by storage.RequeueInterruptedEnrichment at the next
+// start, and Run drains immediately, so the same input panics again — under
+// a container restart policy, a loop with no exit but editing the row by
+// hand. failed breaks that and puts Retry on the page, which is the right
+// place for the decision once the log has said why.
+const crashedReason = "enrichment crashed — see the server log"
+
 // coverFetchTimeout bounds one cover download. The worker owns this client
 // rather than borrowing a provider's, because the download is the worker's
 // step (see Metadata.CoverURL) and the URL may name a host — Open Library's
@@ -86,6 +102,15 @@ type Worker struct {
 	coversDir   string
 	coverClient *http.Client
 	notify      chan struct{}
+
+	// dialGuard decides which addresses the cover fetch may connect to,
+	// applied per connection attempt by coverClient's transport. A field
+	// rather than a constant because every cover test in this package runs
+	// an httptest.Server on 127.0.0.1, which the real guard refuses by
+	// design; tests replace it through allowAnyCoverAddress. Production
+	// therefore has no "allow loopback" switch, and the opt-out is stated
+	// in one place that only test files can reach.
+	dialGuard func(net.IP) error
 }
 
 // New returns a Worker that reads jobs from db and asks providers, in
@@ -97,13 +122,30 @@ type Worker struct {
 // book's content hash — the same directory the scanner and internal/web
 // already share.
 func New(db *storage.DB, providers []Provider, coversDir string) *Worker {
-	return &Worker{
-		db:          db,
-		providers:   providers,
-		coversDir:   coversDir,
-		coverClient: &http.Client{Timeout: coverFetchTimeout, CheckRedirect: CheckCoverRedirect},
-		notify:      make(chan struct{}, 1),
+	w := &Worker{
+		db:        db,
+		providers: providers,
+		coversDir: coversDir,
+		notify:    make(chan struct{}, 1),
+		dialGuard: RefusePrivateAddress,
 	}
+
+	// Cloned from the default rather than built from nothing, so proxy
+	// support and the TLS and idle-connection defaults survive; only the
+	// dial is this package's business.
+	//
+	// The guard is read off the Worker at dial time rather than captured
+	// here, so replacing the field in a test reaches a client already
+	// built. Transport dials through this for https too — it connects and
+	// then wraps — so both schemes are covered.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = coverDialContext(func(ip net.IP) error { return w.dialGuard(ip) })
+	w.coverClient = &http.Client{
+		Timeout:       coverFetchTimeout,
+		CheckRedirect: CheckCoverRedirect,
+		Transport:     transport,
+	}
+	return w
 }
 
 // Notify pokes the worker to check the queue immediately, instead of
@@ -172,6 +214,21 @@ func (w *Worker) drain(ctx context.Context) {
 // here. A failure with ctx still live is a real one and always ends in a
 // terminal Mark call, so drain moves on to the next job.
 func (w *Worker) process(ctx context.Context, job *storage.EnrichmentJob) {
+	// A panic anywhere below is the one failure the ctx.Err() discipline
+	// above cannot classify, and the only one that takes the process with
+	// it. Recovered here rather than in Run's loop: this is where the job
+	// id is still in hand, and leaving the row running is exactly the state
+	// the startup requeue turns into a crash loop.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		slog.Error("enrichment job panicked", "job_id", job.ID, "book_id", job.BookID,
+			"panic", r, "stack", string(debug.Stack()))
+		w.fail(ctx, job.ID, crashedReason)
+	}()
+
 	book, err := w.db.FindBookByID(ctx, job.BookID)
 	if err != nil {
 		if ctx.Err() != nil {

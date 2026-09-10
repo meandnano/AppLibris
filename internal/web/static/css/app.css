@@ -944,6 +944,13 @@ a.masthead__link:hover {
   color: var(--err);
 }
 
+/* pre-line, not pre-wrap: a stored description carries paragraph breaks
+   worth rendering, and nothing else about its whitespace is. pre-wrap would
+   also reproduce a provider's leading indentation and its stray double
+   spaces, which is why leaving the breaks collapsed was the better trade
+   until this distinction was drawn. The rule is on the class, so it reaches
+   the read view and the edit textarea alike; the textarea already preserved
+   whitespace and is unchanged by it. */
 .detail__description {
   margin: 0;
   font-family: var(--serif);
@@ -951,6 +958,7 @@ a.masthead__link:hover {
   line-height: 1.55;
   color: var(--fg);
   max-width: 62ch;
+  white-space: pre-line;
   text-wrap: pretty;
   overflow-wrap: anywhere;
 }

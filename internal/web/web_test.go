@@ -1178,6 +1178,30 @@ func TestButtonClassesInMarkupHaveRules(t *testing.T) {
 	}
 }
 
+// A description is stored with its paragraph breaks and is the one field
+// rendered as flowing prose, so the property that makes those breaks
+// visible is contract rather than styling. pre-line and not pre-wrap: the
+// second would also reproduce a provider's leading indentation and its
+// stray double spaces, which is the trade that kept this collapsed before.
+func TestDescriptionRendersParagraphBreaks(t *testing.T) {
+	css, err := fs.ReadFile(staticFS, "static/css/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	rule := regexp.MustCompile(`(?s)\.detail__description\s*\{[^}]*\}`)
+	block := rule.Find(css)
+	if block == nil {
+		t.Fatal("app.css has no .detail__description rule")
+	}
+	if !strings.Contains(string(block), "white-space: pre-line") {
+		t.Errorf(".detail__description does not set white-space: pre-line, so stored paragraph breaks collapse:\n%s", block)
+	}
+	if strings.Contains(string(block), "pre-wrap") {
+		t.Errorf(".detail__description uses pre-wrap, which also preserves a provider's stray whitespace:\n%s", block)
+	}
+}
+
 // The two fetch-metadata wrappers are what turn the deployment requirement
 // (an HTTPS gateway in front, the plain listener unreachable otherwise)
 // into something the log can report as violated. Both are tested against a

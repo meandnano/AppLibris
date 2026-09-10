@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"library/internal/resend"
@@ -77,6 +78,18 @@ const fileUnreadableReason = "could not read the file — try again"
 // carries the doubt the state cannot: a person who checks the device first
 // avoids the duplicate a raw "context deadline exceeded" invited.
 const timedOutReason = "timed out before Resend answered — check the Kindle before sending again"
+
+// crashedReason is recorded when process panics, the same shape and the
+// same wording discipline as internal/enrich's: a sentence for the status
+// box, with the panic value and its stack in the log beside it, since
+// neither is anything a person can act on.
+//
+// The blast radius here is smaller than enrichment's — FailInterruptedSends
+// would fail the row at the next start rather than requeue it, so a
+// panicking send costs one restart instead of a loop — but one restart of
+// the whole server is still the server down, and the recovery is the same
+// few lines.
+const crashedReason = "sending crashed — see the server log"
 
 // minUplinkBytesPerSecond is the slowest uplink a send deadline is sized
 // for: 1 Mbit/s, a slow domestic line or a NAS behind one. The deadline
@@ -203,6 +216,21 @@ func (w *Worker) drain(ctx context.Context) {
 // a transport error — must never wedge the queue: it always ends in a
 // terminal MarkSend* call so drain moves on to the next job.
 func (w *Worker) process(ctx context.Context, send *storage.Send) {
+	// The one failure that would otherwise take the process with it, and
+	// leave the row sending for FailInterruptedSends to rewrite at the next
+	// start. Recovered here rather than in Run's loop, where the send id is
+	// no longer in hand — see internal/enrich's, which is the same guard
+	// against a worse version of the same shape.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		slog.Error("send job panicked", "send_id", send.ID,
+			"panic", r, "stack", string(debug.Stack()))
+		w.fail(ctx, send.ID, crashedReason)
+	}()
+
 	relPath, filename, err := w.resolveFile(ctx, send)
 	if err != nil {
 		// Only errFileGone is a sentence written for a reader; anything

@@ -861,3 +861,67 @@ func TestSendRootLevelMissingFileRecordsGone(t *testing.T) {
 		t.Errorf("FailureReason = %q, want %q", got.FailureReason, fileGoneReason)
 	}
 }
+
+// A panic in a send must not take the process with it, and must not wedge
+// the queue behind it — the same guarantee TestWorkerTransportErrorFailsAndContinuesQueue
+// makes for an ordinary transport error, for the failure that would
+// otherwise skip every terminal write in process.
+func TestWorkerRecoversAPanickingTransportAndFailsTheSend(t *testing.T) {
+	libraryDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	crashID := setupBookWithFile(t, db, libraryDir, "crash.epub", []byte("x"))
+	nextID := setupBookWithFile(t, db, libraryDir, "next.epub", []byte("y"))
+	crashSend, _, err := db.EnqueueSend(ctx, crashID, "Crasher", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+	nextSend, _, err := db.EnqueueSend(ctx, nextID, "Next", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	stub := &stubTransport{sendFunc: func(_ context.Context, _ string, a resend.Attachment) (string, error) {
+		if a.Filename == "crash.epub" {
+			panic("transport exploded")
+		}
+		return "msg-1", nil
+	}}
+	New(db, stub, libraryDir).drain(ctx)
+
+	crashed, err := db.GetSend(ctx, crashSend)
+	if err != nil || crashed == nil {
+		t.Fatalf("GetSend: %+v, %v", crashed, err)
+	}
+	if crashed.Status != storage.SendFailed {
+		t.Errorf("Status = %q, want failed — sending would otherwise be rewritten at the next start", crashed.Status)
+	}
+	if crashed.FailureReason != crashedReason {
+		t.Errorf("FailureReason = %q, want %q", crashed.FailureReason, crashedReason)
+	}
+	if strings.Contains(crashed.FailureReason, "transport exploded") {
+		t.Errorf("FailureReason = %q, want the panic value kept out of the status box", crashed.FailureReason)
+	}
+
+	delivered, err := db.GetSend(ctx, nextSend)
+	if err != nil || delivered == nil {
+		t.Fatalf("GetSend: %+v, %v", delivered, err)
+	}
+	if delivered.Status != storage.SendDelivered {
+		t.Errorf("following send = %q, want delivered — the queue wedged behind the panic", delivered.Status)
+	}
+
+	log := logged.String()
+	if !strings.Contains(log, "send job panicked") || !strings.Contains(log, "transport exploded") {
+		t.Errorf("log does not carry the panic and its value:\n%s", log)
+	}
+	if !strings.Contains(log, "stack") {
+		t.Errorf("log does not carry a stack:\n%s", log)
+	}
+}

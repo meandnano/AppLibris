@@ -3,6 +3,7 @@ package enrich
 import (
 	"bytes"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -199,5 +200,59 @@ func TestFetchCoverSendsAUserAgent(t *testing.T) {
 	}
 	if got != coverUserAgent {
 		t.Errorf("User-Agent = %q, want %q", got, coverUserAgent)
+	}
+}
+
+// The whole point of the guard is which addresses it names, so the table is
+// the test. A cover host is an ordinary public server; everything a cover
+// fetch could reach that is not one is refused.
+func TestRefusePrivateAddress(t *testing.T) {
+	refused := []string{
+		"127.0.0.1",       // loopback
+		"127.1.2.3",       // the rest of 127/8, not just .1
+		"::1",             // loopback, v6
+		"10.0.0.1",        // RFC 1918
+		"172.16.0.1",      // RFC 1918
+		"192.168.1.1",     // RFC 1918
+		"fc00::1",         // IPv6 unique-local
+		"fd12:3456::1",    // IPv6 unique-local
+		"169.254.169.254", // the cloud metadata endpoint
+		"fe80::1",         // link-local, v6
+		"224.0.0.1",       // multicast
+		"ff02::1",         // multicast, v6
+		"0.0.0.0",         // unspecified
+		"::",              // unspecified, v6
+	}
+	for _, addr := range refused {
+		t.Run("refused/"+addr, func(t *testing.T) {
+			if err := RefusePrivateAddress(net.ParseIP(addr)); err == nil {
+				t.Errorf("RefusePrivateAddress(%s) = nil, want a refusal", addr)
+			}
+		})
+	}
+
+	allowed := []string{
+		"93.184.216.34",
+		"2606:2800:220:1:248:1893:25c8:1946",
+		"8.8.8.8",
+		// Adjacent to a refused range on either side, so a bounds slip in
+		// net.IP.IsPrivate shows up as a refused real cover host.
+		"9.255.255.255",
+		"11.0.0.1",
+		"172.15.255.255",
+		"172.32.0.1",
+	}
+	for _, addr := range allowed {
+		t.Run("allowed/"+addr, func(t *testing.T) {
+			if err := RefusePrivateAddress(net.ParseIP(addr)); err != nil {
+				t.Errorf("RefusePrivateAddress(%s) = %v, want nil", addr, err)
+			}
+		})
+	}
+
+	// An unparseable address is not evidence of anything, and a dial that
+	// cannot say where it is going is one to refuse.
+	if err := RefusePrivateAddress(nil); err == nil {
+		t.Error("RefusePrivateAddress(nil) = nil, want a refusal")
 	}
 }

@@ -943,3 +943,62 @@ func TestResolveCountsNoProviderWhenItCallsNone(t *testing.T) {
 		t.Errorf("asked = %d, failed = %d, want 0 and 0", res.Asked, res.Failed)
 	}
 }
+
+// Partial describes the answer, not the book, and only WithCache reads it.
+// The resolver must treat a partial answer as an answer: the provider was
+// asked and it spoke, so it counts toward Asked and not toward Failed, or
+// the worker's Asked > 0 && Failed == Asked rule would call a run that
+// merged real fields a total failure.
+func TestResolveCountsAPartialAnswerAsAnswered(t *testing.T) {
+	p := &fakeProvider{name: "partial", byISBN: func(context.Context, string) (Metadata, error) {
+		return Metadata{Publisher: "Ace Books", Partial: true}, nil
+	}}
+
+	book := storage.Book{ID: 1, Title: "Book", ISBN: "9780000000001"}
+	res, err := Resolve(context.Background(), book, nil, map[storage.MetadataField]string{}, []Provider{p})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if res.Asked != 1 || res.Failed != 0 {
+		t.Errorf("asked = %d, failed = %d, want 1 and 0", res.Asked, res.Failed)
+	}
+	if got := res.Values[storage.FieldPublisher]; got != "Ace Books" {
+		t.Errorf("publisher = %q, want the partial answer's field merged", got)
+	}
+}
+
+// A description keeps its line breaks, and now the page renders them, so
+// what a provider sends is what a reader sees. One blank line between
+// paragraphs is structure; four is a scraped blurb's noise.
+func TestSanitizeDescriptionCapsBlankLines(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"a single newline survives", "one\ntwo", "one\ntwo"},
+		{"one blank line survives", "one\n\ntwo", "one\n\ntwo"},
+		{"three newlines become two", "one\n\n\ntwo", "one\n\ntwo"},
+		{"many newlines become two", "one\n\n\n\n\n\ntwo", "one\n\ntwo"},
+		{"two runs are both capped", "one\n\n\ntwo\n\n\n\nthree", "one\n\ntwo\n\nthree"},
+		{"CRLF is normalised first", "one\r\n\r\n\r\ntwo", "one\n\ntwo"},
+		{"a lone CR is a newline too", "one\r\r\rtwo", "one\n\ntwo"},
+		// The outer TrimSpace already handled these; pinned so the cap
+		// cannot be rewritten in a way that leaves them behind.
+		{"leading blank lines are trimmed", "\n\n\none", "one"},
+		{"trailing blank lines are trimmed", "one\n\n\n", "one"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeValue(storage.FieldDescription, tc.value); got != tc.want {
+				t.Errorf("sanitizeValue(description, %q) = %q, want %q", tc.value, got, tc.want)
+			}
+		})
+	}
+
+	// Every other field still loses its line breaks entirely — the cap is
+	// a description rule, not a new general one.
+	if got := sanitizeValue(storage.FieldTitle, "one\n\n\ntwo"); got != "one two" {
+		t.Errorf("sanitizeValue(title) = %q, want the newlines collapsed to a space", got)
+	}
+}
