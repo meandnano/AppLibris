@@ -36,10 +36,10 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	dbPath := envOrDefault("DB_PATH", "./data/library.db")
+	dbPath := envOrDefault("DB_PATH", "/data/library.db")
 	addr := envOrDefault("ADDR", ":8080")
-	libraryDir := envOrDefault("LIBRARY_DIR", "./library")
-	coversDir := envOrDefault("COVERS_DIR", "./data/covers")
+	libraryDir := envOrDefault("LIBRARY_DIR", "/library")
+	coversDir := envOrDefault("COVERS_DIR", "/data/covers")
 
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(envOrDefault("LOG_LEVEL", "INFO"))); err != nil {
@@ -47,7 +47,7 @@ func run(ctx context.Context) error {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
-	scanInterval, err := time.ParseDuration(envOrDefault("SCAN_INTERVAL", "15m"))
+	scanInterval, err := time.ParseDuration(envOrDefault("SCAN_INTERVAL", "1h"))
 	if err != nil {
 		return fmt.Errorf("parse SCAN_INTERVAL: %w", err)
 	}

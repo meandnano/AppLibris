@@ -17,7 +17,8 @@ RUN CGO_ENABLED=0 go build -o /server ./cmd/server
 # account up, so any uid works with nothing to create in the image. That
 # user needs write access to DB_PATH and COVERS_DIR, and only read access to
 # LIBRARY_DIR, on whatever volumes are mounted over them.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
+
 # The nonroot image sets WORKDIR /home/nonroot; cmd/server's defaults
 # (./library, ./data/library.db, ./data/covers) are relative paths that
 # must resolve from / to match CLAUDE.md's documented dev-vs-container
