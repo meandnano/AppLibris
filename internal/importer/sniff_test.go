@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -29,12 +30,18 @@ func TestDetectSuffixReadsTheContentAndNotTheName(t *testing.T) {
 		t.Fatalf("close zip writer: %v", err)
 	}
 
+	// A real FB2 can carry a DOCTYPE, a comment and a long declaration
+	// ahead of its root, so the root is searched for across the sniff
+	// window rather than expected at a fixed offset.
+	buried := append([]byte(`<?xml version="1.0" encoding="utf-8"?>`+"\n<!-- "+strings.Repeat("licence ", 200)+" -->\n"), fb2Bytes("Dune", "Frank")...)
+
 	cases := []struct {
 		name    string
 		content []byte
 		want    string
 		wantErr bool
 	}{
+		{name: "fb2 behind a long comment", content: buried, want: ".fb2"},
 		{name: "epub", content: epubBytes(t, "Dune", "Herbert", 0), want: ".epub"},
 		{name: "fb2 in a zip", content: fb2ZipBytes(t, "Dune", "Herbert"), want: ".fb2.zip"},
 		{name: "plain fb2", content: fb2Bytes("Dune", "Herbert"), want: ".fb2"},
@@ -44,6 +51,12 @@ func TestDetectSuffixReadsTheContentAndNotTheName(t *testing.T) {
 		{name: "an archive of two books", content: twoFB2.Bytes(), wantErr: true},
 		{name: "a pdf", content: []byte("%PDF-1.7\n1 0 obj\n"), wantErr: true},
 		{name: "empty", content: nil, wantErr: true},
+		// An XML declaration says the file is XML, not that it is a book.
+		// Without the root-element check each of these would be written
+		// into the library as a .fb2 and indexed under its filename.
+		{name: "an svg", content: []byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`), wantErr: true},
+		{name: "a bare opf", content: []byte(`<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf"><metadata/></package>`), wantErr: true},
+		{name: "an xml declaration and nothing else", content: []byte(`<?xml version="1.0"?>`), wantErr: true},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

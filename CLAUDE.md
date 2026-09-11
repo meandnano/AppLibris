@@ -117,6 +117,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
   *cleared*, not *exists*. Their `DELETE` is scoped to `(book_id, field)`.
 - `ApplyEnrichedFields` re-checks `fieldIsStillMissingTx` per field inside
   its own transaction and records only what it actually wrote.
+- `FieldLimit` is the one lookup from a metadata field to its byte limit,
+  and `CapField` the one truncating derivation over it — shared by
+  `internal/scanner`, `internal/enrich` and `internal/importer`.
+  `internal/service` shares `FieldLimit` only: a person's edit is refused,
+  never rewritten, and a line break they typed is an error rather than
+  something to collapse behind them.
 - `SearchBooks` and `ListBooks` order by `(sort_title, id)`; the cursor
   comparison stays in row-value form with **no** explicit `COLLATE NOCASE`,
   or the index seek becomes a scan.
@@ -267,13 +273,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Both workers `recover` inside `process` and write the row terminal with
   `crashedReason`. A panicking enrichment job left `running` is requeued
   into a crash loop; the panic value goes to the log, never the status box.
-- All three writers of the metadata columns — `internal/service`,
-  `sanitizeValue` here and `internal/scanner`'s `capMetadata` — cap through
-  `storage.Max*`; never restate a number, or a value one writes becomes
-  uneditable. A description that arrives on its own is also capped at two
-  consecutive newlines, through `storage.CapBlankLines`: `sanitizeValue`
-  here, `internal/epub` through `PlainDescription`, `internal/fb2` at the
-  end of `annotationText`. A person's edit is deliberately not capped —
+- Every writer of the metadata columns caps through `storage.CapField` or,
+  where it refuses rather than truncates, `storage.FieldLimit`; never
+  restate a number, or a value one writes becomes uneditable. A description
+  is capped at two consecutive newlines by `CapField` itself, and again on
+  the way in: `internal/epub` through `PlainDescription`, `internal/fb2` at
+  the end of `annotationText`. A person's edit is deliberately not capped —
   `normalizeField` trims and bounds a description and shapes it no further,
   since the blank lines someone typed are their own.
 - `sanitizeValue` does not flatten markup. Google's description is HTML and
@@ -313,12 +318,26 @@ tidy-up would break. The note named in the heading carries the reasoning.
 ### Import (`docs/notes/import.md`)
 
 - Format is decided by content in `detectSuffix`; the client's filename and
-  `Content-Type` never choose the parser or the suffix written.
+  `Content-Type` never choose the parser or the suffix written. An XML
+  opening alone is not enough: `<FictionBook` must appear in the sniff
+  window, or any XML document is written into the library as a `.fb2`.
+- The preview is capped through `storage.CapField` before it is built, so it
+  shows what would be stored — and so the title-match verdict compares a
+  capped title against the capped `sort_title` the scanner derived.
+- Staging is bounded in total bytes, not in stages. The reservation is taken
+  at the cap before the copy and corrected after, and given back by every
+  path that drops a staged file.
 - Confirm never trusts the preview's verdict. `IndexFile`'s answer is the
   truth, and an already-indexed outcome at confirm is a second location,
   not an error.
 - A failed `IndexFile` leaves the library file in place. Never delete a
   file the library already holds over an index error.
+- The index write runs on `context.WithoutCancel`, because the library owns
+  the bytes before it starts — the same rule `internal/sender` applies once
+  Resend has accepted a message. A cancelled write would report a failure
+  that did not happen to every later confirm.
+- A swept staged file reads as `ErrExpired`, never as a raw `fs.ErrNotExist`:
+  expiry is checked under the lock and the file opened after it is dropped.
 - The library is written only as `<name>.part` then published with
   `os.Link`; nothing creates a supported suffix in the library directly.
   The link is what refuses to replace an existing name, which `os.Rename`
@@ -358,6 +377,9 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `HX-History-Restore-Request` is absent. `Vary` names both.
 - **A rejected edit fragment answers 200; the rejected full page answers
   422.** htmx 2.0.10 does not swap a 4xx. Do not opt 422 in from the client.
+- Every import route that can answer a fragment names both htmx headers in
+  `Vary`, `GET /import` included. Every refused upload drains what is left of
+  the body first.
 - `maxMetadataFormBody` is `3 × service.MaxMetadataValueBytes + 1024`,
   sized off the author list, not the description.
 - `libraryPage.SearchMaxLength` must carry `storage.MaxSearchBytes`; the

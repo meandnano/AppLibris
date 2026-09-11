@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,7 +96,10 @@ func importEPUBWithCover(t *testing.T, title, author string, padding int, coverB
 		w.Write(coverBytes)
 	}
 	if padding > 0 {
-		w, err := zw.Create("OEBPS/pad.bin")
+		// Stored rather than deflated, so padding bytes reach the archive
+		// one for one: a run of 'x' compresses to nothing, and a test that
+		// needs a fixture of a given size would silently get a tiny one.
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: "OEBPS/pad.bin", Method: zip.Store})
 		if err != nil {
 			t.Fatalf("create pad.bin in zip: %v", err)
 		}
@@ -559,5 +563,93 @@ func TestImportFailureLineNamesTheCap(t *testing.T) {
 	}
 	if importFailureLine(io.EOF, 0) != "" {
 		t.Errorf("importFailureLine explained an error it cannot describe")
+	}
+}
+
+// A refusal is decided while the body is still arriving, so the property
+// worth pinning is that it survives a real socket: httptest.NewRecorder has
+// none and cannot show it either way. It passes with the drain in
+// renderImportRejection removed as well, and that is expected rather than a
+// weak test — see that function for why the remainder a drain can consume
+// is too small to have cost anything.
+func TestAnOverCapUploadStillReadsItsRefusalBack(t *testing.T) {
+	const cap = 32 << 10
+
+	handler, _, _ := newImportHandler(t, cap)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	// Over the importer's cap and under MaxBytesReader's, which is the
+	// case the sentence exists for and the one a drain can fix.
+	book := importEPUB(t, "Dune", "Frank Herbert", cap)
+	if len(book) <= cap || int64(len(book)) > cap+multipartOverhead {
+		t.Fatalf("the fixture is %d bytes; the test needs one between %d and %d", len(book), cap, cap+multipartOverhead)
+	}
+
+	req := uploadRequest(t, "Dune.epub", book, true)
+	req.URL, _ = url.Parse(server.URL + "/import/file")
+	req.RequestURI = ""
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("the refusal never arrived: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("the refusal was cut short: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "larger than") {
+		t.Errorf("the response does not name the cap:\n%s", body)
+	}
+}
+
+// The read-only refusal answers a request whose body is still arriving too,
+// which is why the body is bounded above that check rather than below it.
+func TestADisabledImportStillReadsItsRefusalBack(t *testing.T) {
+	handler, _, _ := newImportHandlerWritable(t, 32<<10, false)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	req := uploadRequest(t, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 16<<10), true)
+	req.URL, _ = url.Parse(server.URL + "/import/file")
+	req.RequestURI = ""
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("the refusal never arrived: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("the refusal was cut short: %v", err)
+	}
+	if !strings.Contains(string(body), "read-only") {
+		t.Errorf("the response does not explain why import is off:\n%s", body)
+	}
+}
+
+func TestGetImportNamesBothHTMXHeadersInVary(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
+
+	got := rec.Header().Get("Vary")
+	if !strings.Contains(got, "HX-Request") || !strings.Contains(got, "HX-History-Restore-Request") {
+		t.Errorf("Vary = %q, want both htmx headers named", got)
+	}
+}
+
+func TestImportFailureLineNamesAFullStagingArea(t *testing.T) {
+	if got := importFailureLine(importer.ErrStagingFull, 64<<20); !strings.Contains(got, "discard") {
+		t.Errorf("importFailureLine = %q, want it to say what to do about it", got)
 	}
 }

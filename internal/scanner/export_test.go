@@ -20,8 +20,8 @@ import (
 // TestMissingGrace is the grace period the in-package tests sweep with.
 const TestMissingGrace = testMissingGrace
 
-func CapValue(path string, field storage.MetadataField, value string, limit int) string {
-	return capValue(path, field, value, limit)
+func CapValue(path string, field storage.MetadataField, value string) string {
+	return capValue(path, field, value)
 }
 
 func OpenTestDB(t *testing.T) *storage.DB { return openTestDB(t) }

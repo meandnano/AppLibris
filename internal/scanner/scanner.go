@@ -575,12 +575,18 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 // keys on the same content hash and converges on one book with one
 // location.
 //
-// The Result a sweep accumulates has no reader here, so one is made and
-// discarded: what a caller indexing a single file wants is the book id,
-// and the counts belong to a sweep's summary line.
-func IndexFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string) (int64, error) {
+// created reports whether the path produced a new book rather than joining
+// one the index already had — a move, an extra location for byte-identical
+// content, or a path a sweep had already seen. The caller is importing, and
+// landing on an existing book is a correct outcome that is worth saying out
+// loud; a sweep says the same thing through Result's own counters.
+//
+// The rest of the Result a sweep accumulates has no reader here, so it is
+// made and discarded: the counts belong to a sweep's summary line.
+func IndexFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string) (bookID int64, created bool, err error) {
 	var result Result
-	return scanFile(ctx, db, libraryDir, path, coversDir, &result)
+	bookID, err = scanFile(ctx, db, libraryDir, path, coversDir, &result)
+	return bookID, result.New > 0, err
 }
 
 // coverFileDefinitelyGone reports whether the stored thumbnail is known to
@@ -888,15 +894,15 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 // at 64 KiB. A cut field is still `embedded` in field_sources too:
 // provenance says where a value came from, not whether it arrived whole
 func capMetadata(path string, m bookMeta) bookMeta {
-	m.Title = capValue(path, storage.FieldTitle, m.Title, storage.MaxTitleBytes)
-	m.Language = capValue(path, storage.FieldLanguage, m.Language, storage.MaxScalarBytes)
-	m.ISBN = capValue(path, storage.FieldISBN, m.ISBN, storage.MaxScalarBytes)
-	m.Publisher = capValue(path, storage.FieldPublisher, m.Publisher, storage.MaxScalarBytes)
-	m.PublishedDate = capValue(path, storage.FieldPublishedDate, m.PublishedDate, storage.MaxScalarBytes)
-	m.Description = capValue(path, storage.FieldDescription, m.Description, storage.MaxDescriptionBytes)
+	m.Title = capValue(path, storage.FieldTitle, m.Title)
+	m.Language = capValue(path, storage.FieldLanguage, m.Language)
+	m.ISBN = capValue(path, storage.FieldISBN, m.ISBN)
+	m.Publisher = capValue(path, storage.FieldPublisher, m.Publisher)
+	m.PublishedDate = capValue(path, storage.FieldPublishedDate, m.PublishedDate)
+	m.Description = capValue(path, storage.FieldDescription, m.Description)
 
 	for i, name := range m.Authors {
-		m.Authors[i] = capValue(path, storage.FieldAuthors, name, storage.MaxAuthorNameBytes)
+		m.Authors[i] = capValue(path, storage.FieldAuthors, name)
 	}
 	if len(m.Authors) > storage.MaxAuthors {
 		slog.Info("embedded metadata truncated", "path", path, "field", storage.FieldAuthors,
@@ -906,44 +912,34 @@ func capMetadata(path string, m bookMeta) bookMeta {
 	return m
 }
 
-// capValue bounds one embedded value to what internal/service's
-// normalizeField hands back unchanged, exactly as internal/enrich's
-// sanitizeValue bounds a provider's answer: every field but description is
-// collapsed onto one line, then truncated to limit bytes on a rune boundary
-// with what the cut exposed trimmed off.
+// capValue is storage.CapField with this package's log line on it.
 //
-// Length is not the only thing normalizeField refuses. It rejects a line
-// break in every field but description, and neither parser prevents one: a
-// metadata element whose text is wrapped across two lines in the source XML
-// keeps the break, since TrimSpace only removes what sits at either end. A
-// stored break never reaches that validation error — it reaches the editor,
-// where an <input type="text"> drops it on submit and rewrites the field
-// behind the person's back, and where a wrapped author name in the
-// <textarea> is split into two authors by normalizeAuthors.
+// The bound itself is shared, because a value one writer stores and another
+// would refuse is a field the app can no longer edit. What is local is what
+// a sweep says about it: Info rather than Warn, because a verbose file is
+// worth knowing about and is not an error, and naming the path because a
+// sweep's reader has no other way to tell which of several thousand files
+// this was.
 //
-// The collapse runs before the length cut, since it can only shorten the
-// value and cutting first would let a truncation boundary decide whether a
-// break survives. Description takes the trim alone, which is the rest of what
-// normalizeField would hand back: its line breaks are the point, and each
-// parser has already capped its blank lines through storage.CapBlankLines —
-// internal/epub inside PlainDescription, internal/fb2 at the end of
-// annotationText. Doing it again here would cap a run neither of them can
-// produce.
+// A collapsed line break is not worth a line at all. Length is not the only
+// thing internal/service's normalizeField refuses — it rejects a break in
+// every field but description, and neither parser prevents one, since a
+// metadata element wrapped across two lines in the source XML keeps the
+// break that TrimSpace leaves in the middle. A stored break never reaches
+// that validation error: it reaches the editor, where an <input
+// type="text"> drops it on submit and rewrites the field behind the
+// person's back, and where a wrapped author name is split into two authors
+// by normalizeAuthors.
 //
-// Info rather than Warn on truncation: a verbose file is worth knowing about
-// and is not an error. A collapsed break is not worth a line at all
-func capValue(path string, field storage.MetadataField, value string, limit int) string {
-	if field != storage.FieldDescription {
-		value = strings.Join(strings.Fields(value), " ")
-	} else {
-		value = strings.TrimSpace(value)
+// A cut field is still `embedded` in field_sources: provenance says where a
+// value came from, not whether it arrived whole
+func capValue(path string, field storage.MetadataField, value string) string {
+	capped, truncated := storage.CapField(field, value)
+	if truncated {
+		slog.Info("embedded metadata truncated", "path", path, "field", field,
+			"bytes", len(value), "limit", storage.FieldLimit(field))
 	}
-	if len(value) <= limit {
-		return value
-	}
-	slog.Info("embedded metadata truncated", "path", path, "field", field,
-		"bytes", len(value), "limit", limit)
-	return strings.TrimSpace(strings.ToValidUTF8(value[:limit], ""))
+	return capped
 }
 
 type bookMeta struct {

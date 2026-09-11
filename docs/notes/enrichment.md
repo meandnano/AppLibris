@@ -173,22 +173,26 @@ same columns `internal/service`'s `normalizeField` guards for a person's
 edit, and it never passes through that function, so this is the only thing
 bounding what a remote source can store.
 
-The limits are `internal/storage`'s `Max*` constants — one definition,
-below all three writers of those columns: a person's edit in
-`internal/service`, a provider's answer here, and what a file had embedded
-in it in `internal/scanner`. None of them restates a number, because a value one
-writer stores but another's validation would reject is a field the app can
-no longer edit: opening the editor and pressing Save unchanged then fails
-on a value nobody typed. Author names are sanitised one at a time and
-re-joined, since the join character is itself a newline.
+`sanitizeValue` is `storage.CapField` under this package's name. The
+derivation lives below every writer of those columns rather than in each of
+them: a person's edit in `internal/service`, a provider's answer here, what
+a file had embedded in it in `internal/scanner`, and what
+`internal/importer` shows of a file before any of that. None of them
+restates a number, because a value one writer stores but another's
+validation would reject is a field the app can no longer edit: opening the
+editor and pressing Save unchanged then fails on a value nobody typed.
+`internal/service` shares the limit and not the derivation, since it refuses
+an over-long edit where the others truncate. Author names are sanitised one
+at a time and re-joined, since the join character is itself a newline.
 
 A description keeps its line breaks — it is the one field that does — and
 is additionally capped at two consecutive newlines: at most one blank line
 between paragraphs. `.detail__description` renders those breaks, so what a
 provider sends is what a reader sees, including the four blank lines a
-scraped blurb arrives with. The cap is `storage.CapBlankLines`, the call
-`PlainDescription` also ends on, so the property belongs to the column
-rather than to one client — which is where the next provider will need it.
+scraped blurb arrives with. The cap is `storage.CapBlankLines`, which `CapField` applies to every
+description and `PlainDescription` also ends on, so the property belongs to
+the column rather than to one client — which is where the next provider will
+need it.
 CRLF is folded to LF first, so a Windows-authored description is not left
 with a stray carriage return mid-paragraph.
 

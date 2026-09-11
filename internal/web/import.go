@@ -88,9 +88,13 @@ type importPreviewView struct {
 	DiscardURL string
 }
 
-// importHandler serves GET /import: the page holding the file input.
+// importHandler serves GET /import: the page holding the file input, or the
+// panel alone for an htmx caller — so it names both headers in Vary, like
+// every other route whose body depends on them.
 func importHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
+
 		page, err := newImportPage(r, svc)
 		if err != nil {
 			slog.Error("build import page failed", "error", err)
@@ -121,15 +125,19 @@ func importUploadHandler(svc *service.Service) http.HandlerFunc {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		// Bounded before anything can refuse, not after: the read-only
+		// refusal below answers a request whose body is still arriving, and
+		// draining it is what lets the answer be read — which needs the
+		// drain to have a limit.
+		limit := svc.MaxImportBytes() + multipartOverhead
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		extendReadDeadline(w, limit)
+
 		if !page.Enabled {
 			page.Failure = importFailureLine(service.ErrImportDisabled, svc.MaxImportBytes())
 			renderImportRejection(w, r, page)
 			return
 		}
-
-		limit := svc.MaxImportBytes() + multipartOverhead
-		r.Body = http.MaxBytesReader(w, r.Body, limit)
-		extendReadDeadline(w, limit)
 
 		name, body, err := uploadedFile(r)
 		if err != nil {
@@ -331,7 +339,25 @@ func renderImport(w http.ResponseWriter, r *http.Request, status int, page impor
 // renderImportRejection answers a refused upload or confirm: 200 with the
 // panel for htmx, which does not swap a 4xx, and 422 with the whole page
 // for everyone else.
+//
+// It drains first, so the connection is never left with a request body
+// nobody consumed — the condition under which Go's server stops reading and
+// closes, which can cost the client the response it was about to be given.
+// The drain needs no bound of its own: the upload route has already wrapped
+// the body in http.MaxBytesReader.
+//
+// It is hygiene rather than a cure, and the shape of the limit is why.
+// copyIn stops at the cap plus one byte of the *file part* and reads no
+// further, so an over-cap upload never trips MaxBytesReader at all — which
+// leaves this with at most multipartOverhead to consume, too little to have
+// blocked the client and well inside the window Go's lingering close
+// already covers. The case that could actually lose the refusal is a body
+// far past the limit, where megabytes are still in flight; MaxBytesReader
+// refuses to hand them over, so nothing here can drain them and nothing
+// here can improve on the lingering close.
 func renderImportRejection(w http.ResponseWriter, r *http.Request, page importPage) {
+	io.Copy(io.Discard, r.Body)
+
 	if isHTMXFragment(r) {
 		renderImport(w, r, http.StatusOK, page)
 		return
@@ -418,6 +444,8 @@ func importFailureLine(err error, maxBytes int64) string {
 		return "That is not an EPUB or FB2 file."
 	case errors.Is(err, importer.ErrExpired):
 		return "This import has expired — choose the file again."
+	case errors.Is(err, importer.ErrStagingFull):
+		return "Another import is still waiting. Finish or discard it, then try again."
 	case errors.Is(err, errNoFileChosen):
 		return "Choose a file first."
 	case errors.Is(err, service.ErrImportDisabled), errors.Is(err, importer.ErrLibraryNotWritable):

@@ -31,6 +31,16 @@ const opfTemplate = `<?xml version="1.0"?>
   <manifest>%s</manifest>
 </package>`
 
+const opfDescriptionTemplate = `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>%s</dc:title>
+    <dc:creator>%s</dc:creator>
+    <dc:description>%s</dc:description>
+  </metadata>
+  <manifest></manifest>
+</package>`
+
 const coverManifestItem = `<item id="cover-image" href="cover.png" media-type="image/png" properties="cover-image"/>`
 
 // solidPNG builds a small valid PNG, mirroring internal/cover's helper of
@@ -108,7 +118,10 @@ func epubBytesWithCover(t *testing.T, title, author string, padding int, coverBy
 		}
 	}
 	if padding > 0 {
-		w, err := zw.Create("OEBPS/pad.bin")
+		// Stored rather than deflated, so padding bytes reach the archive
+		// one for one: a run of 'x' compresses to nothing, and a test that
+		// needs a fixture of a given size would silently get a tiny one.
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: "OEBPS/pad.bin", Method: zip.Store})
 		if err != nil {
 			t.Fatalf("create pad.bin in zip: %v", err)
 		}
@@ -235,4 +248,31 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+// epubBytesWithDescription builds an EPUB whose metadata is as large as the
+// caller wants, for the caps the preview has to apply before rendering any
+// of it.
+func epubBytesWithDescription(t *testing.T, title, author, description string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range map[string]string{
+		"mimetype":               "application/epub+zip",
+		"META-INF/container.xml": containerXML,
+		"OEBPS/content.opf":      fmt.Sprintf(opfDescriptionTemplate, title, author, description),
+	} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create %s in zip: %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("write %s in zip: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+	return buf.Bytes()
 }

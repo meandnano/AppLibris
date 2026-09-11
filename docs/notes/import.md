@@ -251,11 +251,22 @@ server that does not support the control is left alone: the global timeout
 then applies, which is what this replaces.
 
 The body is wrapped in `http.MaxBytesReader` at the cap plus multipart
-overhead, and the importer's own count of the part's bytes is the cap a
-refusal actually names — the multipart part is what is being measured, and
-only the importer sees it. The body streams through `r.MultipartReader`
-rather than `ParseMultipartForm`, which would spool the whole file to a
-second temporary copy before the handler saw a byte of it.
+overhead — before the read-only check, not after, since that refusal answers
+a request whose body is still arriving too. The importer's own count of the
+part's bytes is the cap a refusal actually names: the multipart part is what
+is being measured, and only the importer sees it. The body streams through
+`r.MultipartReader` rather than `ParseMultipartForm`, which would spool the
+whole file to a second temporary copy before the handler saw a byte of it.
+
+Every refusal drains what is left of the body before rendering, so the
+connection is never left with a request body nobody consumed. It is hygiene
+rather than a cure. The copy stops at the cap plus one byte of the file part
+and reads no further, so an over-cap upload never trips `MaxBytesReader` at
+all — which leaves at most the multipart overhead to drain, too little to
+have blocked anyone. The case that could genuinely lose a refusal is a body
+far past the limit, with megabytes still in flight; `MaxBytesReader` will not
+hand those over, so nothing can drain them and nothing beats Go's lingering
+close.
 
 `MAX_IMPORT_SIZE` defaults to 64 MiB. Zero and negative are refused rather
 than read as "no limit": the cap is what bounds an upload into temporary

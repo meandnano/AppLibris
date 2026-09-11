@@ -3623,12 +3623,15 @@ func TestIndexFileIndexesOnePathAndNamesItsBook(t *testing.T) {
 	path := filepath.Join(libraryDir, "Dune.epub")
 	writeTestEPUB(t, path, "Dune", "Frank Herbert", nil)
 
-	bookID, err := IndexFile(ctx, db, libraryDir, path, coversDir)
+	bookID, created, err := IndexFile(ctx, db, libraryDir, path, coversDir)
 	if err != nil {
 		t.Fatalf("IndexFile: %v", err)
 	}
 	if bookID == 0 {
 		t.Fatal("IndexFile named no book")
+	}
+	if !created {
+		t.Error("created is false for a path that produced a new book")
 	}
 
 	book, err := db.FindBookByID(ctx, bookID)
@@ -3651,12 +3654,17 @@ func TestIndexFileIndexesOnePathAndNamesItsBook(t *testing.T) {
 
 	// And re-indexing the same path answers the same book rather than a
 	// second one, which is what a repeated confirm relies on.
-	again, err := IndexFile(ctx, db, libraryDir, path, coversDir)
+	again, createdAgain, err := IndexFile(ctx, db, libraryDir, path, coversDir)
 	if err != nil {
 		t.Fatalf("IndexFile again: %v", err)
 	}
 	if again != bookID {
 		t.Errorf("IndexFile named book %d the second time, want %d", again, bookID)
+	}
+	// The importer logs on this, since landing on a book that already
+	// existed is a correct outcome the person has to be told about.
+	if createdAgain {
+		t.Error("created is true for a path the index already had")
 	}
 }
 

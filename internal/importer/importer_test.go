@@ -7,10 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"library/internal/scanner"
+	"library/internal/storage"
 )
 
 func TestStageReadsTheFileAndOffersIt(t *testing.T) {
@@ -547,5 +552,257 @@ func TestStageDropsACoverThatIsNotAnImage(t *testing.T) {
 	}
 	if data, contentType, ok := stager.Cover(staged.ID); ok {
 		t.Errorf("Cover served %d bytes as %q, want nothing", len(data), contentType)
+	}
+}
+
+// The preview is rendered into a page, and what the parsers hand back is
+// bounded only by their own document caps — megabytes of description for an
+// EPUB, and more for an FB2. It is also what the title-match verdict
+// compares, so an uncapped title could never equal a sort_title the scanner
+// derived from a capped one.
+func TestStageCapsWhatThePreviewShows(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, _ := testStager(t, db, 8<<20)
+
+	longTitle := strings.Repeat("Dune ", storage.MaxTitleBytes)
+	longDescription := strings.Repeat("sand. ", storage.MaxDescriptionBytes)
+
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(
+		epubBytesWithDescription(t, longTitle, "Frank Herbert", longDescription)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+
+	if len(staged.Title) > storage.MaxTitleBytes {
+		t.Errorf("the preview title is %d bytes, want at most %d", len(staged.Title), storage.MaxTitleBytes)
+	}
+	if len(staged.Description) > storage.MaxDescriptionBytes {
+		t.Errorf("the preview description is %d bytes, want at most %d", len(staged.Description), storage.MaxDescriptionBytes)
+	}
+	if !utf8.ValidString(staged.Title) || !utf8.ValidString(staged.Description) {
+		t.Error("a capped value is not valid UTF-8")
+	}
+}
+
+// The verdict compares sort_title, which the scanner derives from a capped
+// title — so the importer has to cap before it compares, or a book whose
+// title runs past the limit can never be recognised as one the library
+// already has.
+func TestATitleOverTheCapStillMatches(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, _ := testStager(t, db, 8<<20)
+
+	longTitle := strings.Repeat("Dune ", storage.MaxTitleBytes)
+
+	first, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, longTitle, "Frank Herbert", 0)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if _, err := stager.Confirm(ctx, first.ID); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+
+	second, err := stager.Stage(ctx, "Dune-2.epub", bytes.NewReader(epubBytes(t, longTitle, "F. Herbert", 64)))
+	if err != nil {
+		t.Fatalf("Stage a second edition: %v", err)
+	}
+	if second.Verdict != VerdictTitleMatch {
+		t.Errorf("Verdict = %q, want %q: the long title did not match the capped one stored", second.Verdict, VerdictTitleMatch)
+	}
+}
+
+// Each stage holds up to the import cap in os.TempDir(), which is tmpfs in
+// a container — so what forgotten tabs hold for half an hour is RAM.
+func TestStagingIsBounded(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	// A cap small enough that the budget is a handful of fixtures.
+	const size = 4 << 10
+	stager, _ := testStager(t, db, size)
+
+	var ids []string
+	for i := 0; ; i++ {
+		staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune "+strconv.Itoa(i), "Frank Herbert", size/2)))
+		if errors.Is(err, ErrStagingFull) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Stage %d: %v", i, err)
+		}
+		ids = append(ids, staged.ID)
+		if i > stagingBudgetFactor*4 {
+			t.Fatalf("staged %d files without ever reaching the budget", i)
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("the budget refused the very first upload")
+	}
+
+	// Discarding one makes room again, which is what the refusal tells the
+	// person to do.
+	stager.Discard(ids[0])
+	if _, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "After a discard", "Frank Herbert", size/2))); err != nil {
+		t.Errorf("Stage after a discard = %v, want room to have been freed", err)
+	}
+}
+
+// A confirmed stage is holding no bytes, so it must not hold budget either
+// — the record outlives the confirm only to answer a double click.
+func TestConfirmingGivesTheBudgetBack(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	const size = 4 << 10
+	stager, _ := testStager(t, db, size)
+
+	for i := range stagingBudgetFactor * 3 {
+		staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune "+strconv.Itoa(i), "Frank Herbert", size/2)))
+		if err != nil {
+			t.Fatalf("Stage %d: %v", i, err)
+		}
+		if _, err := stager.Confirm(ctx, staged.ID); err != nil {
+			t.Fatalf("Confirm %d: %v", i, err)
+		}
+	}
+
+	stager.mu.Lock()
+	held := stager.staged
+	stager.mu.Unlock()
+	if held != 0 {
+		t.Errorf("confirmed stages still hold %d bytes of the budget", held)
+	}
+}
+
+// A duplicate's file is deleted the moment the verdict is decided, so it
+// holds no budget from that moment either.
+func TestADuplicateGivesTheBudgetBack(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, _ := testStager(t, db, 1<<20)
+
+	book := epubBytes(t, "Dune", "Frank Herbert", 0)
+	first, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(book))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if _, err := stager.Confirm(ctx, first.ID); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	if _, err := stager.Stage(ctx, "Dune-copy.epub", bytes.NewReader(book)); err != nil {
+		t.Fatalf("Stage a duplicate: %v", err)
+	}
+
+	stager.mu.Lock()
+	held := stager.staged
+	stager.mu.Unlock()
+	if held != 0 {
+		t.Errorf("a duplicate still holds %d bytes of the budget, though its file is gone", held)
+	}
+}
+
+// Expiry is checked under the lock and the file is opened after it is
+// dropped, so a sweep crossing the time to live in that window takes the
+// file away. That is the expiry the caller has a sentence for, not a
+// filesystem error nobody can name.
+func TestAFileSweptMidConfirmReadsAsExpired(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, _ := testStager(t, db, 1<<20)
+
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+
+	// Exactly what the janitor does to the file, with the record left in
+	// place so Confirm gets past its own expiry check.
+	stager.mu.Lock()
+	if err := os.Remove(stager.stages[staged.ID].path); err != nil {
+		t.Fatalf("remove the staged file: %v", err)
+	}
+	stager.mu.Unlock()
+
+	if _, err := stager.Confirm(ctx, staged.ID); !errors.Is(err, ErrExpired) {
+		t.Errorf("Confirm after a sweep took the file = %v, want ErrExpired", err)
+	}
+}
+
+// The library owns the bytes before the index write starts, so a browser
+// that closed its tab must not cancel it: a cancelled write would mark the
+// stage done with no book and make every later confirm report a failure
+// that did not happen.
+func TestConfirmIndexesEvenIfTheRequestIsCancelled(t *testing.T) {
+	db := openTestDB(t)
+	stager, libraryDir := testStager(t, db, 1<<20)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	cancel()
+
+	bookID, err := stager.Confirm(ctx, staged.ID)
+	if err != nil {
+		t.Fatalf("Confirm on a cancelled request: %v", err)
+	}
+	if bookID == 0 {
+		t.Fatal("Confirm named no book")
+	}
+	if names := libraryNames(t, libraryDir); !slices.Equal(names, []string{"Dune.epub"}) {
+		t.Errorf("the library holds %v, want the imported file", names)
+	}
+	book, err := db.FindBookByID(context.Background(), bookID)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID = %+v, %v; want the indexed book", book, err)
+	}
+}
+
+// The preview's verdict is a snapshot, and a sweep can index the same bytes
+// between it and the confirm. The copy just written is then a second
+// location of a book that already existed — the correct outcome, which the
+// detail page shows as "2 paths" — and the confirm answers that book rather
+// than a new one.
+func TestConfirmJoinsABookIndexedSinceThePreview(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, libraryDir := testStager(t, db, 1<<20)
+
+	book := epubBytes(t, "Dune", "Frank Herbert", 0)
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(book))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if staged.Verdict != VerdictNew {
+		t.Fatalf("Verdict = %q, want %q at preview time", staged.Verdict, VerdictNew)
+	}
+
+	// A sweep gets there first, with the same bytes under another name.
+	swept := writeFile(t, filepath.Join(libraryDir, "Dune-from-a-sweep.epub"), book)
+	sweptID, created, err := scanner.IndexFile(ctx, db, libraryDir, swept, t.TempDir())
+	if err != nil || !created {
+		t.Fatalf("IndexFile = %d, %v, %v; want a new book", sweptID, created, err)
+	}
+
+	bookID, err := stager.Confirm(ctx, staged.ID)
+	if err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	if bookID != sweptID {
+		t.Errorf("Confirm answered book %d, want the %d the sweep indexed", bookID, sweptID)
+	}
+
+	files, err := db.ListBookFiles(ctx, bookID)
+	if err != nil {
+		t.Fatalf("ListBookFiles: %v", err)
+	}
+	if len(files) != 2 {
+		t.Errorf("the book has %d locations, want the sweep's and the import's", len(files))
+	}
+	if count, err := db.CountBooks(ctx); err != nil || count != 1 {
+		t.Errorf("CountBooks = %d, %v; want the one book both paths belong to", count, err)
 	}
 }

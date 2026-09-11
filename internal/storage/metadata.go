@@ -116,10 +116,11 @@ func SortTitle(title string) string {
 // bound what reaches these columns, and bytes are the unit the database and
 // an HTTP request body are both measured in.
 //
-// They live here, below every writer, because three writers cap the same
-// columns and all three have to agree: internal/service for a person's
-// edit, internal/enrich for a provider's answer, and internal/scanner for
-// what a file had embedded in it. A value one writer stores but another's
+// They live here, below every writer, because every writer caps the same
+// columns and all of them have to agree: internal/service for a person's
+// edit, internal/enrich for a provider's answer, internal/scanner for what
+// a file had embedded in it, and internal/importer for what it shows of a
+// file before any of that. A value one writer stores but another's
 // validation would reject is a field the app can no longer edit — opening
 // the editor and pressing Save unchanged fails on a value nobody typed
 const (
@@ -129,6 +130,61 @@ const (
 	MaxDescriptionBytes = 64 * 1024
 	MaxAuthors          = 100
 )
+
+// FieldLimit is how many bytes of field a writer may store. One lookup
+// rather than a switch per caller: the limits above are only worth living
+// in one place if the mapping from a field to its own limit does too, and
+// a caller that reaches for the wrong constant is the failure the comment
+// above describes.
+func FieldLimit(field MetadataField) int {
+	switch field {
+	case FieldTitle:
+		return MaxTitleBytes
+	case FieldAuthors:
+		return MaxAuthorNameBytes
+	case FieldDescription:
+		return MaxDescriptionBytes
+	default:
+		return MaxScalarBytes
+	}
+}
+
+// CapField bounds one value to what may be stored in field, and reports
+// whether it had to cut anything.
+//
+// This is the shape every writer that *truncates* needs — internal/scanner
+// for a file's embedded metadata, internal/enrich for a provider's answer,
+// internal/importer for the preview it shows before either runs. They
+// differ only in what they say about a cut, so the saying stays at the call
+// site and the deriving lives here: three private copies of one rule is
+// three chances for a preview to promise a value the store would then
+// shorten.
+//
+// internal/service is deliberately not a caller. A person's edit is
+// rejected rather than rewritten, and a line break they typed is an error
+// rather than something to collapse behind their back; it shares
+// FieldLimit and nothing else.
+//
+// Every field but description is collapsed onto one line, because none of
+// them is prose and a break in one reaches an <input type="text"> that
+// would silently drop it. Description keeps its breaks and has its blank
+// runs capped instead. The cut comes last and lands on a rune boundary,
+// with whatever it exposed trimmed off.
+func CapField(field MetadataField, value string) (string, bool) {
+	if field == FieldDescription {
+		value = strings.TrimSpace(CapBlankLines(value))
+	} else {
+		value = strings.Join(strings.Fields(value), " ")
+	}
+
+	limit := FieldLimit(field)
+	if len(value) <= limit {
+		return value, false
+	}
+	// ToValidUTF8 drops the partial rune the cut exposed; the trim drops
+	// the space it may have ended on.
+	return strings.TrimSpace(strings.ToValidUTF8(value[:limit], "")), true
+}
 
 // NormalizeISBN returns the first ISBN-shaped run in raw as bare digits
 // with an upper-cased check digit, or "" when raw holds none.

@@ -123,7 +123,7 @@ func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 	// over-long name sits past the list cut, so it has to be checked on
 	// its own rather than through the stored list
 	longName := scanner.CapValue("verbose.epub", storage.FieldAuthors,
-		straddling(storage.MaxAuthorNameBytes+500), storage.MaxAuthorNameBytes)
+		straddling(storage.MaxAuthorNameBytes+500))
 	if len(longName) != storage.MaxAuthorNameBytes-2 {
 		t.Errorf("a capped author name is %d bytes, want %d", len(longName), storage.MaxAuthorNameBytes-2)
 	}
@@ -344,11 +344,7 @@ func TestCapValueShapesEveryFieldTheEditorAccepts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limit := storage.MaxScalarBytes
-			if tt.field == storage.FieldDescription {
-				limit = storage.MaxDescriptionBytes
-			}
-			if got := scanner.CapValue("t.epub", tt.field, tt.value, limit); got != tt.want {
+			if got := scanner.CapValue("t.epub", tt.field, tt.value); got != tt.want {
 				t.Errorf("scanner.CapValue(%s, %q) = %q, want %q", tt.field, tt.value, got, tt.want)
 			}
 		})

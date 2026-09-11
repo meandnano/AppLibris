@@ -16,16 +16,19 @@ import (
 // with errors.Is.
 var ErrUnsupportedFormat = errors.New("importer: not an EPUB or FB2 file")
 
-// sniffBytes is how much of a plain file's head is read to look for an XML
-// declaration. A byte-order mark, whatever whitespace an editor left, and
-// the longest prefix looked for below fit several times over; a file that
-// needs more than this before it says what it is has not said it.
-const sniffBytes = 512
+// sniffBytes is how much of a plain file's head is read to decide what it
+// is. Wide enough that a byte-order mark, an XML declaration, a DOCTYPE and
+// a licence comment can all sit in front of the root element and it is
+// still found; a file that has not named its root by then has not named it.
+const sniffBytes = 4 << 10
 
 // fb2Prefixes are the two openings an FB2 document legitimately has: the
 // XML declaration nearly all of them carry, and a bare root element for the
 // ones written without it.
 var fb2Prefixes = []string{"<?xml", "<FictionBook"}
+
+// fb2Root is the element that makes an XML document an FB2 one.
+var fb2Root = []byte("<FictionBook")
 
 // zipMagic is a local file header, which is what a zip whose first entry is
 // stored normally begins with. An empty archive or one written
@@ -63,7 +66,14 @@ func detectSuffix(path string) (string, error) {
 	if bytes.HasPrefix(head, zipMagic) {
 		return zipSuffix(path)
 	}
-	if hasXMLOpening(head) {
+	// Both halves. The opening is what says the file is XML at all, and the
+	// root element is what says which XML it is: an SVG, a bare OPF or any
+	// other document beginning `<?xml` would otherwise be written into the
+	// library as a .fb2 and indexed as a book with a filename for a title.
+	// Searching the window rather than testing a prefix, because a real FB2
+	// carries its declaration — and sometimes a DOCTYPE and a comment —
+	// ahead of the root.
+	if hasXMLOpening(head) && bytes.Contains(head, fb2Root) {
 		return ".fb2", nil
 	}
 	return "", ErrUnsupportedFormat
@@ -72,10 +82,10 @@ func detectSuffix(path string) (string, error) {
 // hasXMLOpening reports whether head begins, after an optional UTF-8
 // byte-order mark and any leading whitespace, with one of fb2Prefixes.
 //
-// Only the UTF-8 mark is skipped. A UTF-16 document would not match any
-// prefix as bytes anyway, and internal/fb2 decodes a declared charset from
-// a document it can already read the declaration of — so a file this
-// refuses is one that package could not have parsed either.
+// Only the UTF-8 mark is skipped. A UTF-16 document matches neither this
+// nor the root-element search as bytes, and internal/fb2 decodes a declared
+// charset from a document it can already read the declaration of — so a
+// file this refuses is one that package could not have parsed either.
 func hasXMLOpening(head []byte) bool {
 	trimmed := strings.TrimLeft(string(bytes.TrimPrefix(head, []byte("\xef\xbb\xbf"))), " \t\r\n")
 	for _, prefix := range fb2Prefixes {

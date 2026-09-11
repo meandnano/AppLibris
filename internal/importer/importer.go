@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -35,6 +36,23 @@ import (
 // takes to press a button.
 const StageTTL = 30 * time.Minute
 
+// stagingBudgetFactor sizes the staging budget from the import cap: this
+// many uploads of the largest allowed size may sit unconfirmed at once.
+//
+// Staging is os.TempDir(), which is tmpfs in a container — so what a
+// forgotten tab holds for half an hour is RAM on a machine whose whole job
+// is to serve a library. Four is enough that nobody doing this by hand
+// meets the limit and small enough that the worst case is a number a reader
+// of MAX_IMPORT_SIZE can work out.
+const stagingBudgetFactor = 4
+
+// indexTimeout bounds the index write that follows a copy into the library.
+// It runs on a context detached from the request's, so it needs a deadline
+// of its own — and a long one, because indexing hashes the whole file and
+// may extract and resize a cover, where internal/sender's markTimeout
+// covers one small SQLite write.
+const indexTimeout = 2 * time.Minute
+
 // janitorInterval is how often expired stages are swept. Expiry is also
 // rechecked on confirm, so this only bounds how long a dead file sits on
 // disk, never whether a stale click is caught.
@@ -51,6 +69,9 @@ var (
 	// ErrLibraryNotWritable is import refused for the run, because the
 	// startup probe could not write to the library directory.
 	ErrLibraryNotWritable = errors.New("importer: the library directory is not writable")
+	// ErrStagingFull is an upload refused because what is already staged
+	// fills the staging budget.
+	ErrStagingFull = errors.New("importer: too much is already staged")
 	// ErrNotIndexed means the library file was written and the index write
 	// then failed. The bytes are in the library and the next sweep picks
 	// them up, so it is not the same failure as one that imported nothing.
@@ -121,6 +142,10 @@ type stage struct {
 	cover     []byte
 	coverType string
 	created   time.Time
+	// reserved is what this stage is charged against the budget. It is the
+	// cap until the copy lands and the file's own size after, and it goes
+	// back to the budget wherever the staged file does.
+	reserved int64
 	// done marks a stage whose bytes the library has taken over, so a
 	// repeated confirm answers rather than copying the file in twice.
 	// bookID is the book it landed under, 0 when the copy succeeded and
@@ -159,11 +184,17 @@ type Stager struct {
 	coversDir  string
 	tempDir    string
 	maxSize    int64
+	maxStaged  int64
 	writable   bool
 	now        func() time.Time
 
-	mu     sync.Mutex
+	mu sync.Mutex
+	// stages is every live stage, and staged the bytes they are holding —
+	// reserved pessimistically at the cap before a copy starts and
+	// corrected to the real size once it lands, so two uploads racing the
+	// check cannot both pass it and overshoot the budget together.
 	stages map[string]*stage
+	staged int64
 }
 
 // New builds a Stager and empties its temp directory.
@@ -189,6 +220,7 @@ func New(db *storage.DB, opts Options) (*Stager, error) {
 		coversDir:  opts.CoversDir,
 		tempDir:    opts.TempDir,
 		maxSize:    opts.MaxSize,
+		maxStaged:  opts.MaxSize * stagingBudgetFactor,
 		writable:   opts.Writable,
 		now:        opts.Now,
 		stages:     make(map[string]*stage),
@@ -211,6 +243,21 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 	if !s.writable {
 		return Staged{}, ErrLibraryNotWritable
 	}
+
+	// Reserved at the cap rather than at the body's own size, which is not
+	// known until it has been written: a reservation made after the copy
+	// would be a budget that admits everything and reports afterwards.
+	if !s.reserve(s.maxSize) {
+		return Staged{}, ErrStagingFull
+	}
+	reserved := s.maxSize
+	defer func() {
+		// Released unless the stage below takes ownership of it, which it
+		// signals by zeroing this.
+		if reserved > 0 {
+			s.release(reserved)
+		}
+	}()
 
 	id, err := newStageID()
 	if err != nil {
@@ -240,7 +287,7 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 		return Staged{}, err
 	}
 
-	meta := readMetadata(staged, suffix, name)
+	meta := capMetadata(readMetadata(staged, suffix, name))
 
 	// Decided here rather than where the bytes are served, so HasCover
 	// means "a cover this app would keep" and the preview stops promising
@@ -277,6 +324,7 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 		cover:     meta.Cover,
 		coverType: coverType,
 		created:   s.now(),
+		reserved:  size,
 	}
 
 	if err := s.decideVerdict(ctx, record); err != nil {
@@ -285,10 +333,33 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 	}
 
 	s.mu.Lock()
+	// The record now owns what it holds, charged at the file's real size
+	// rather than at the cap it was admitted under.
+	s.staged -= s.maxSize - record.reserved
 	s.stages[id] = record
 	s.mu.Unlock()
+	reserved = 0
 
 	return record.staged, nil
+}
+
+// reserve charges n against the staging budget, reporting false when it
+// will not fit.
+func (s *Stager) reserve(n int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.staged+n > s.maxStaged {
+		return false
+	}
+	s.staged += n
+	return true
+}
+
+// release gives n back.
+func (s *Stager) release(n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.staged -= n
 }
 
 // copyIn writes r to path under the size cap, hashing as it goes, and
@@ -337,6 +408,10 @@ func (s *Stager) decideVerdict(ctx context.Context, record *stage) error {
 		record.staged.ExistingTitle = existing.Title
 		os.Remove(record.path)
 		record.path = ""
+		// Nothing left on disk, so it holds none of the budget either —
+		// the record survives only so the page can render and be
+		// discarded.
+		record.reserved = 0
 		record.done = true
 		record.bookID = existing.ID
 		return nil
@@ -446,13 +521,30 @@ func (s *Stager) Confirm(ctx context.Context, id string) (int64, error) {
 	// double click get the first call's answer.
 	s.taken(record)
 
-	bookID, err := scanner.IndexFile(ctx, s.db, s.libraryDir, filepath.Join(s.libraryDir, name), s.coversDir)
+	// Deliberately not ctx: the library owns the bytes from the line above,
+	// and a browser that closed its tab in this gap would otherwise cancel
+	// the index write, mark the stage done with no book, and make every
+	// later confirm report a failure that did not happen — about a file
+	// sitting in the library that the next sweep will index anyway. The
+	// same rule internal/sender applies once Resend has accepted a message.
+	indexCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), indexTimeout)
+	defer cancel()
+
+	bookID, created, err := scanner.IndexFile(indexCtx, s.db, s.libraryDir, filepath.Join(s.libraryDir, name), s.coversDir)
 	if err != nil {
 		// The file stays in the library. Deleting it would discard the
 		// bytes over a database error, where the next sweep is the
 		// recovery the scanner already promises.
 		slog.Warn("imported file could not be indexed; the next scan will pick it up", "name", name, "error", err)
 		return 0, fmt.Errorf("%w: %w", ErrNotIndexed, err)
+	}
+	if !created {
+		// The preview's verdict was a snapshot and a sweep can index the
+		// same bytes between it and this call, so landing on a book that
+		// already existed is a correct outcome and not an error — but it
+		// is a surprising one, since the person is about to be sent to a
+		// book they did not think they were importing.
+		slog.Info("imported file joined a book the library already had", "name", name, "book_id", bookID)
 	}
 
 	s.landed(record, bookID)
@@ -471,6 +563,14 @@ func (s *Stager) Confirm(ctx context.Context, id string) (int64, error) {
 // either no file or the whole one.
 func (s *Stager) copyIntoLibrary(record *stage) (string, error) {
 	src, err := os.Open(record.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Expiry is checked under s.mu and the file is opened after the
+		// lock is dropped, so a janitor sweep crossing the time to live in
+		// that window takes the file out from under this call. It is the
+		// expiry the caller already has a sentence for, not a filesystem
+		// error nobody can name.
+		return "", ErrExpired
+	}
 	if err != nil {
 		return "", err
 	}
@@ -547,11 +647,14 @@ func (s *Stager) expired(record *stage) bool {
 	return s.now().Sub(record.created) >= StageTTL
 }
 
-// remove drops a stage and deletes its file. Callers hold s.mu.
+// remove drops a stage, deletes its file and gives its share of the budget
+// back. Callers hold s.mu.
 func (s *Stager) remove(id string, record *stage) {
 	if record.path != "" {
 		os.Remove(record.path)
 	}
+	s.staged -= record.reserved
+	record.reserved = 0
 	delete(s.stages, id)
 }
 
@@ -564,6 +667,10 @@ func (s *Stager) taken(record *stage) {
 		os.Remove(record.path)
 		record.path = ""
 	}
+	// The record outlives the confirm so a double click gets its answer,
+	// but it is holding no bytes any more and must not hold budget either.
+	s.staged -= record.reserved
+	record.reserved = 0
 	record.done = true
 }
 
@@ -648,6 +755,39 @@ func readMetadata(path, suffix, original string) meta {
 			Cover:         m.Cover,
 		}
 	}
+}
+
+// capMetadata bounds a preview to what the import would actually store.
+//
+// Two reasons, and the second is the one that bites. A preview is rendered
+// into a page, and what the parsers hand back is bounded only by the
+// document caps in internal/epub and internal/fb2 — four megabytes of
+// description for an EPUB, and for a .fb2.zip a single text node may run to
+// maxZipDocumentBytes, which html/template then escapes on its way to a
+// browser. And the title is what the title-match verdict compares, through
+// storage.SortTitle, against a sort_title the scanner derived from a
+// *capped* title: uncapped here, a long title could never match the row it
+// is a duplicate of.
+//
+// storage.CapField and not a copy of it, so the preview and internal/scanner
+// cannot disagree about what will be kept. No logging: a sweep's Info line
+// names a file in a directory, where this is one upload a person is looking
+// at, and the preview showing the capped value is the report
+func capMetadata(m meta) meta {
+	m.Title, _ = storage.CapField(storage.FieldTitle, m.Title)
+	m.Language, _ = storage.CapField(storage.FieldLanguage, m.Language)
+	m.ISBN, _ = storage.CapField(storage.FieldISBN, m.ISBN)
+	m.Publisher, _ = storage.CapField(storage.FieldPublisher, m.Publisher)
+	m.PublishedDate, _ = storage.CapField(storage.FieldPublishedDate, m.PublishedDate)
+	m.Description, _ = storage.CapField(storage.FieldDescription, m.Description)
+
+	for i, name := range m.Authors {
+		m.Authors[i], _ = storage.CapField(storage.FieldAuthors, name)
+	}
+	if len(m.Authors) > storage.MaxAuthors {
+		m.Authors = m.Authors[:storage.MaxAuthors]
+	}
+	return m
 }
 
 func orFallback(value, fallback string) string {
