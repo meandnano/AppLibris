@@ -37,9 +37,12 @@ generator that pretty-prints produces — reaches the parsers with the break
 intact, since `TrimSpace` removes only what sits at either end. So every
 field but description is collapsed onto one line first, the same
 `strings.Fields` join `internal/enrich`'s `sanitizeValue` applies to a
-provider's answer. The collapse runs before the length cut: it can only
-shorten the value, and cutting first would let a truncation boundary decide
-whether a break survives.
+provider's answer, and description takes the edge trim alone, which is the
+rest of what `normalizeField` would hand back. Both run before the length
+cut: each can only shorten the value, and cutting first would let a
+truncation boundary decide whether a break survives. A description's blank
+lines are capped by whichever parser produced it, through
+`storage.CapBlankLines`, rather than a third time here.
 
 The point of both is that a value the editor refuses is never stored. A
 10 MB `<dc:description>` in the column is a description that can no longer

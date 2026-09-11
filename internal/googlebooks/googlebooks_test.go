@@ -1005,8 +1005,8 @@ func TestMatchedVolumePrefersTheDetailEndpointsLargerCover(t *testing.T) {
 	}
 }
 
-// The detail endpoint's description is the documented HTML one, so
-// plainText renders it and the paragraph breaks the list endpoint flattens
+// The detail endpoint's description is the documented HTML one, so the
+// flattening renders it and the paragraph breaks the list endpoint flattens
 // to spaces come back.
 func TestMatchedVolumePrefersTheDetailEndpointsDescription(t *testing.T) {
 	client, _ := listThenDetail(t, func(w http.ResponseWriter, r *http.Request) {

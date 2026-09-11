@@ -26,6 +26,15 @@ func TestPlainDescription(t *testing.T) {
 		{"an unterminated tag is not stripped", "ends with <p", "ends with <p"},
 		{"attributes are dropped with their tag", `<a href="http://x/">link</a>`, "link"},
 		{"surrounding whitespace is trimmed", "<p>  Trimmed.  </p>", "Trimmed."},
+		{"blank lines are capped in plain text too", "a\n\n\n\n\nb", "a\n\nb"},
+		{"a padded blank line does not defeat the cap", "a\n  \n  \n\nb", "a\n\nb"},
+		{"CRLF is folded", "a\r\n\r\n\r\n\r\nb", "a\n\nb"},
+		{"a decoded carriage return is folded, not counted apart", "a&#13;\r\nb", "a\n\nb"},
+		{"a reference with no terminator is prose", "Rock &copy roll", "Rock &copy roll"},
+		{"an ampersand between words is prose", "AT&T and R&D", "AT&T and R&D"},
+		{"a numeric reference is decoded", "curly &#8217; quote", "curly \u2019 quote"},
+		{"a hex reference is decoded", "&#x2014; dash", "\u2014 dash"},
+		{"a terminated reference naming nothing is HTML's to read", "&notanentity;", "\u00acanentity;"},
 	}
 
 	for _, tt := range tests {
@@ -63,5 +72,32 @@ func TestTrimBlankIsASupersetOfTrimSpace(t *testing.T) {
 		if got := trimBlank(s + " x " + s); got != s+" x "+s {
 			t.Errorf("trimBlank(%q) = %q", s+" x "+s, got)
 		}
+	}
+}
+
+// CapBlankLines is exported for two callers that cannot be allowed to shape a
+// description differently: internal/enrich's sanitizeValue for a provider's
+// answer, and PlainDescription for what it flattens.
+func TestCapBlankLines(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"a single newline is left alone", "one\ntwo", "one\ntwo"},
+		{"one blank line is left alone", "one\n\ntwo", "one\n\ntwo"},
+		{"a longer run is capped at two", "one\n\n\n\n\ntwo", "one\n\ntwo"},
+		{"CRLF is folded first", "one\r\n\r\n\r\ntwo", "one\n\ntwo"},
+		{"a lone carriage return becomes a newline", "one\rtwo", "one\ntwo"},
+		{"trailing whitespace does not hide a blank line", "one\n \n\t\n\ntwo", "one\n\ntwo"},
+		{"text with no breaks is untouched", "one two", "one two"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CapBlankLines(tt.value); got != tt.want {
+				t.Errorf("CapBlankLines(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
 	}
 }

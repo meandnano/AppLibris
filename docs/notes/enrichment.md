@@ -186,11 +186,11 @@ A description keeps its line breaks — it is the one field that does — and
 is additionally capped at two consecutive newlines: at most one blank line
 between paragraphs. `.detail__description` renders those breaks, so what a
 provider sends is what a reader sees, including the four blank lines a
-scraped blurb arrives with. `internal/googlebooks` normalises its own HTML
-on the way out already; doing it here as well makes the property one of
-every provider's value rather than of one client, which is where the next
-provider will need it. CRLF is folded to LF first, so a Windows-authored
-description is not left with a stray carriage return mid-paragraph.
+scraped blurb arrives with. The cap is `storage.CapBlankLines`, the call
+`PlainDescription` also ends on, so the property belongs to the column
+rather than to one client — which is where the next provider will need it.
+CRLF is folded to LF first, so a Windows-authored description is not left
+with a stray carriage return mid-paragraph.
 
 ## Covers
 

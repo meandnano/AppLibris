@@ -27,8 +27,8 @@ here. See Documentation below for what these files may and may not say.
   `enrichment_jobs`. Search sanitisation (`SanitizeFTSQuery`,
   `NormalizeSearchQuery`), the keyset cursor (`BookPage`), and the
   derivations and limits every writer of a metadata column shares
-  (`SortTitle`, `NormalizeISBN`, `PlainDescription`, the `Max*`
-  constants) live here.
+  (`SortTitle`, `NormalizeISBN`, `PlainDescription`, `CapBlankLines`, the
+  `Max*` constants) live here.
   Note: `docs/notes/storage.md`.
 - `internal/epub`, `internal/fb2` — embedded metadata and cover bytes from
   each format, same `Metadata` shape so the scanner treats them alike.
@@ -246,7 +246,9 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - All three writers of the metadata columns — `internal/service`,
   `sanitizeValue` here and `internal/scanner`'s `capMetadata` — cap through
   `storage.Max*`; never restate a number, or a value one writes becomes
-  uneditable. A description also caps consecutive newlines at two.
+  uneditable. A description also goes through `storage.CapBlankLines` —
+  the same call `PlainDescription` ends on, so a description is shaped the
+  same whichever door it came through.
 - `sanitizeValue` does not flatten markup. Google's description is HTML and
   `internal/googlebooks` flattens it through `storage.PlainDescription`
   before it leaves that package; Open Library's is plain, and a blanket

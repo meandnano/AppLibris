@@ -322,3 +322,34 @@ func TestCreateBookWrappedValuesAreEditable(t *testing.T) {
 			after.Title, after.Publisher, after.Description)
 	}
 }
+
+// capValue is what makes CLAUDE.md's claim about capMetadata true, so it is
+// tested directly rather than only through a scan: the property is a
+// property of the function, not of the two parsers that happen to trim
+// before calling it.
+func TestCapValueShapesEveryFieldTheEditorAccepts(t *testing.T) {
+	tests := []struct {
+		name  string
+		field storage.MetadataField
+		value string
+		want  string
+	}{
+		{"a wrapped title is one line", storage.FieldTitle, "Violence\n  and Its Discontents", "Violence and Its Discontents"},
+		{"a scalar is edge-trimmed", storage.FieldPublisher, "  Penguin  ", "Penguin"},
+		{"an author name is one line", storage.FieldAuthors, "Jean\n  Baptiste Roe", "Jean Baptiste Roe"},
+		{"a description keeps its breaks", storage.FieldDescription, "One.\n\nTwo.", "One.\n\nTwo."},
+		{"a description is edge-trimmed", storage.FieldDescription, "\n  One.\n\nTwo.  \n", "One.\n\nTwo."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limit := storage.MaxScalarBytes
+			if tt.field == storage.FieldDescription {
+				limit = storage.MaxDescriptionBytes
+			}
+			if got := capValue("t.epub", tt.field, tt.value, limit); got != tt.want {
+				t.Errorf("capValue(%s, %q) = %q, want %q", tt.field, tt.value, got, tt.want)
+			}
+		})
+	}
+}

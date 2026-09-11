@@ -897,13 +897,19 @@ func capMetadata(path string, m bookMeta) bookMeta {
 //
 // The collapse runs before the length cut, since it can only shorten the
 // value and cutting first would let a truncation boundary decide whether a
-// break survives.
+// break survives. Description takes the trim alone, which is the rest of what
+// normalizeField would hand back: its line breaks are the point, and its
+// blank lines are capped by whichever parser produced it, through
+// storage.CapBlankLines. Doing it here too would be a third copy of that
+// rule.
 //
 // Info rather than Warn on truncation: a verbose file is worth knowing about
 // and is not an error. A collapsed break is not worth a line at all
 func capValue(path string, field storage.MetadataField, value string, limit int) string {
 	if field != storage.FieldDescription {
 		value = strings.Join(strings.Fields(value), " ")
+	} else {
+		value = strings.TrimSpace(value)
 	}
 	if len(value) <= limit {
 		return value

@@ -70,6 +70,10 @@ markup to hand-fix in the edit textarea. The same function is
 `internal/googlebooks`' flattening, which is why it sits in
 `internal/storage` below both — `storage.md` carries the argument.
 
+The flattening also decodes character references, which is why it decodes
+only terminated ones: after the XML decoder has run, what is left is as
+often ordinary prose as it is markup, and a bare `&` in prose must survive.
+
 That is what makes the shared `Metadata` shape carry plain text from either
 format. FB2 needs no such pass: its annotation is flattened structurally, by
 a decoder that drops inline markup and joins paragraphs, rather than by
