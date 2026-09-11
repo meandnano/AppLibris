@@ -75,9 +75,16 @@ only terminated ones: after the XML decoder has run, what is left is as
 often ordinary prose as it is markup, and a bare `&` in prose must survive.
 
 That is what makes the shared `Metadata` shape carry plain text from either
-format. FB2 needs no such pass: its annotation is flattened structurally, by
-a decoder that drops inline markup and joins paragraphs, rather than by
-rewriting a string.
+format. FB2 needs no flattening pass of its own: its annotation is flattened
+structurally, by a decoder that drops inline markup and joins paragraphs,
+rather than by rewriting a string.
+
+It does need the other half. A `<p>` is chardata, so a paragraph wrapped
+across source lines keeps every break it was written with, which the join
+between paragraphs cannot see — `annotationText` therefore ends on
+`storage.CapBlankLines`, the call `PlainDescription` also ends on. Blank
+lines in a description are the parser's business in both formats, which is
+what lets `internal/scanner` cap lengths and leave shape alone.
 
 **Cover.** EPUB 3's `properties="cover-image"` manifest item, falling back
 to EPUB 2's `<meta name="cover">`. The href is percent-decoded and any

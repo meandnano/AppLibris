@@ -41,8 +41,10 @@ provider's answer, and description takes the edge trim alone, which is the
 rest of what `normalizeField` would hand back. Both run before the length
 cut: each can only shorten the value, and cutting first would let a
 truncation boundary decide whether a break survives. A description's blank
-lines are capped by whichever parser produced it, through
-`storage.CapBlankLines`, rather than a third time here.
+lines are already capped by the parser that produced it, through
+`storage.CapBlankLines` — `internal/epub` inside `PlainDescription`,
+`internal/fb2` at the end of `annotationText` — so capping them again here
+would bound a run neither can hand over.
 
 The point of both is that a value the editor refuses is never stored. A
 10 MB `<dc:description>` in the column is a description that can no longer

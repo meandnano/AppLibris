@@ -898,10 +898,11 @@ func capMetadata(path string, m bookMeta) bookMeta {
 // The collapse runs before the length cut, since it can only shorten the
 // value and cutting first would let a truncation boundary decide whether a
 // break survives. Description takes the trim alone, which is the rest of what
-// normalizeField would hand back: its line breaks are the point, and its
-// blank lines are capped by whichever parser produced it, through
-// storage.CapBlankLines. Doing it here too would be a third copy of that
-// rule.
+// normalizeField would hand back: its line breaks are the point, and each
+// parser has already capped its blank lines through storage.CapBlankLines —
+// internal/epub inside PlainDescription, internal/fb2 at the end of
+// annotationText. Doing it again here would cap a run neither of them can
+// produce.
 //
 // Info rather than Warn on truncation: a verbose file is worth knowing about
 // and is not an error. A collapsed break is not worth a line at all

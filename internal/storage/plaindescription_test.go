@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"math/rand"
+	"strings"
 	"testing"
 	"unicode"
 )
@@ -99,5 +101,43 @@ func TestCapBlankLines(t *testing.T) {
 				t.Errorf("CapBlankLines(%q) = %q, want %q", tt.value, got, tt.want)
 			}
 		})
+	}
+}
+
+// capBlankLinesTheObviousWay is CapBlankLines written the way it reads:
+// fold the carriage returns, trim each line, then collapse until nothing
+// is left to collapse. It exists only as the oracle below.
+func capBlankLinesTheObviousWay(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	value = strings.Join(lines, "\n")
+	for strings.Contains(value, "\n\n\n") {
+		value = strings.ReplaceAll(value, "\n\n\n", "\n\n")
+	}
+	return value
+}
+
+// CapBlankLines is one hand-rolled pass, for the allocation profile: the
+// obvious spelling above costs ~40 allocations and 81 MB against 1 and
+// 5.6 MB on four megabytes of newlines, which is the width internal/epub's
+// package-document bound allows before internal/scanner cuts a description
+// to 64 KiB. The two must agree on every input, so the obvious spelling
+// stays here as the oracle rather than as a comment claiming they match.
+func TestCapBlankLinesMatchesTheObviousSpelling(t *testing.T) {
+	alphabet := []string{"\n", "\r", "\r\n", " ", "\t", "a", "本", "\n\n", "  ", "\n \n", "z", "\r\r"}
+	r := rand.New(rand.NewSource(1))
+	for i := 0; i < 400000; i++ {
+		var sb strings.Builder
+		for n := r.Intn(14); n > 0; n-- {
+			sb.WriteString(alphabet[r.Intn(len(alphabet))])
+		}
+		in := sb.String()
+		if got, want := CapBlankLines(in), capBlankLinesTheObviousWay(in); got != want {
+			t.Fatalf("CapBlankLines(%q) = %q, the obvious spelling = %q", in, got, want)
+		}
 	}
 }

@@ -516,6 +516,14 @@ func authorNames(authors []fb2Author) []string {
 
 // annotationText joins annotation paragraphs with a blank line, dropping
 // any that are empty after trimming.
+//
+// The join is not the whole shape. A single <p> is chardata, so a paragraph
+// whose text is wrapped across source lines keeps every one of its interior
+// breaks, and a description reaches books.description with a run this
+// package never chose. storage.CapBlankLines is where that run is capped —
+// the same call internal/epub reaches through storage.PlainDescription, so
+// the blank lines in a description are the parser's business in both
+// formats rather than something the scanner has to know a format by.
 func annotationText(paragraphs []paragraph) string {
 	var trimmed []string
 	for _, p := range paragraphs {
@@ -523,7 +531,7 @@ func annotationText(paragraphs []paragraph) string {
 			trimmed = append(trimmed, t)
 		}
 	}
-	return strings.Join(trimmed, "\n\n")
+	return storage.CapBlankLines(strings.Join(trimmed, "\n\n"))
 }
 
 // findPublishedDate prefers publish-info/year — what books.published_date

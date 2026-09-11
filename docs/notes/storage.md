@@ -110,10 +110,19 @@ from a file and another from a provider.
 Library's description is plain to begin with, and a strip applied to every
 provider answers for a source that never sends markup.
 
-`CapBlankLines` is the tail of that shape and is here for the same reason:
-`sanitizeValue` caps a provider's answer and `PlainDescription` caps what it
-flattens, and two copies of the rule are two descriptions shaped differently
-by which door they came through. It folds CRLF and a lone CR first, so a
+`CapBlankLines` is the tail of that shape and is here for the same reason,
+with one more caller than its neighbour: `sanitizeValue` caps a provider's
+answer, `PlainDescription` caps what it flattens, and `internal/fb2`'s
+`annotationText` caps what a wrapped `<p>` carried across source lines. A
+person's edit is the one description nothing caps, deliberately — the blank
+lines someone typed are their own. Copies of the rule would be descriptions
+shaped differently by which door they came through.
+
+It is one hand-rolled pass rather than the obvious fold-trim-collapse
+spelling, because it runs on a value that is not yet capped: `internal/epub`
+bounds a package document at 4 MiB and `internal/scanner` cuts a description
+to 64 KiB only afterwards. A test keeps the obvious spelling as its oracle,
+so the two cannot drift. It folds CRLF and a lone CR first, so a
 carriage return is a break the count can see rather than one it cannot, and
 strips each line's trailing whitespace before counting, since `pre-line`
 collapses a line of two spaces while keeping both newlines around it.

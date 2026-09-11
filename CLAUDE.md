@@ -246,9 +246,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - All three writers of the metadata columns — `internal/service`,
   `sanitizeValue` here and `internal/scanner`'s `capMetadata` — cap through
   `storage.Max*`; never restate a number, or a value one writes becomes
-  uneditable. A description also goes through `storage.CapBlankLines` —
-  the same call `PlainDescription` ends on, so a description is shaped the
-  same whichever door it came through.
+  uneditable. A description that arrives on its own is also capped at two
+  consecutive newlines, through `storage.CapBlankLines`: `sanitizeValue`
+  here, `internal/epub` through `PlainDescription`, `internal/fb2` at the
+  end of `annotationText`. A person's edit is deliberately not capped —
+  `normalizeField` trims and bounds a description and shapes it no further,
+  since the blank lines someone typed are their own.
 - `sanitizeValue` does not flatten markup. Google's description is HTML and
   `internal/googlebooks` flattens it through `storage.PlainDescription`
   before it leaves that package; Open Library's is plain, and a blanket

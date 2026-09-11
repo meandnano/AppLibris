@@ -293,9 +293,17 @@ func PlainDescription(raw string) string {
 	return trimBlank(CapBlankLines(text))
 }
 
-// maxReferenceName bounds the lookahead for a reference's terminating ';'.
-// 32 is the longest name HTML defines (CounterClockwiseContourIntegral)
-const maxReferenceName = 32
+// maxReferenceName bounds the run referenceAt will scan before giving up on
+// finding a terminating ';'. 31 is the longest name HTML defines,
+// CounterClockwiseContourIntegral — the entity table's keys carry the
+// semicolon and so measure 32, which this does not span.
+//
+// It bounds a numeric reference's digits by the same figure, where HTML has
+// no limit at all: "&#" and thirty-two leading zeros is a legal spelling of
+// a character this leaves as text. That is the safe direction for a bound
+// whose only job is to stop an unterminated '&' scanning to the end of a
+// description, and no writer of one spells a character that way
+const maxReferenceName = 31
 
 // unescapeReferences decodes the character references in s, and only those:
 // an '&' that starts no terminated reference comes back out as itself.
@@ -446,20 +454,49 @@ func isTagNameByte(c byte) bool {
 // collapses the spaces while keeping both newlines around them, so without
 // the strip a blurb padded with spaces renders exactly the run of blank lines
 // this exists to prevent
+// One pass, because the obvious spelling — two ReplaceAll, a Split/TrimRight/
+// Join round trip and a loop that ReplaceAll's "\n\n\n" until it stops
+// finding one — allocates in proportion to the line count on a value that is
+// not yet capped. internal/epub bounds a package document at 4 MiB and
+// internal/scanner cuts a description to 64 KiB only afterwards, so the
+// widest input this sees is four megabytes of newlines read out of a file
+// nobody here wrote
 func CapBlankLines(value string) string {
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = strings.ReplaceAll(value, "\r", "\n")
+	var b strings.Builder
+	b.Grow(len(value))
 
-	lines := strings.Split(value, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, " \t")
-	}
-	value = strings.Join(lines, "\n")
+	newlines := 0
+	// Start of the run of spaces and tabs not yet written, or -1. Held back
+	// rather than written, since a run that turns out to end a line is that
+	// line's trailing whitespace and goes with it
+	wsStart := -1
 
-	for strings.Contains(value, "\n\n\n") {
-		value = strings.ReplaceAll(value, "\n\n\n", "\n\n")
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; {
+		case c == '\r' || c == '\n':
+			if c == '\r' && i+1 < len(value) && value[i+1] == '\n' {
+				i++
+			}
+			wsStart = -1
+			newlines++
+			if newlines <= 2 {
+				b.WriteByte('\n')
+			}
+		case c == ' ' || c == '\t':
+			if wsStart < 0 {
+				wsStart = i
+			}
+		default:
+			if wsStart >= 0 {
+				b.WriteString(value[wsStart:i])
+				wsStart = -1
+			}
+			newlines = 0
+			b.WriteByte(c)
+		}
 	}
-	return value
+	// Whatever is still held back is the last line's trailing whitespace
+	return b.String()
 }
 
 func setFieldSourceTx(ctx context.Context, tx *sql.Tx, bookID int64, field MetadataField, source string) error {
