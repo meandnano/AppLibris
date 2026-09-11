@@ -321,7 +321,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `linux/amd64` and `linux/arm64` on a runner each, pushes both to
   `ghcr.io/meandnano/applibris` by digest, joins them into one manifest list
   tagged with the version, and creates the GitHub release from the commits
-  since the previous tag.
+  since the previous tag. A version is `vMAJOR.MINOR` with an optional
+  `-suffix` for a prerelease, and the image tag is that with the `v`
+  dropped — `v0.1` publishes `applibris:0.1`. The tag is matched by regex
+  (`type=match`) and not parsed as semver, which emits no tags at all for
+  a version this short; the first job refuses a tag of any other shape so
+  a typo cannot reach the registry.
 
 ## Documentation
 

@@ -20,6 +20,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # the version is the tag with its v dropped, and any v* tag reaches
+      # this workflow, so a misspelt one would otherwise publish an image
+      # tag nobody meant. Refusing here costs seconds; the alternative is
+      # finding out from the registry
+      - name: Check the tag names a version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          if ! printf '%s' "${TAG#v}" | grep -Eq "$version"; then
+            echo "::error::tag $TAG does not name a version; the image tag is taken from it, so it must read vMAJOR.MINOR, as in v0.1, with an optional -suffix for a prerelease"
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
@@ -113,7 +127,9 @@ jobs:
         id: meta
         with:
           images: ${{ env.IMAGE }}
-          tags: type=semver,pattern={{version}}
+          # the tag itself, less the v: the versions are vMAJOR.MINOR and
+          # type=semver emits nothing at all for a tag it cannot parse
+          tags: type=match,pattern=v(.*),group=1
           flavor: latest=false
 
       - uses: docker/setup-buildx-action@v4
