@@ -247,8 +247,8 @@ the body. Sixty-four megabytes over Wi-Fi to a NAS routinely takes longer.
 The upload handler extends its own read deadline through
 `http.NewResponseController`, sized from the cap at a floor of 1 MiB/s, so
 every other route keeps the tight timeout and a stalled upload still ends. A
-server that does not support the control is left alone: the global timeout
-then applies, which is what this replaces.
+server that does not support the control is left alone, and the global
+timeout applies.
 
 The body is wrapped in `http.MaxBytesReader` at the cap plus multipart
 overhead — before the read-only check, not after, since that refusal answers
@@ -277,10 +277,9 @@ access to the library, which is the thing the app actually checks.
 
 - **Importing from a URL, and drag and drop.** Both reuse this machinery
   unchanged and are their own steps.
-- **A programmatic API.** Still deferred, and `docs/notes/design.md` now
-  records the specific obstacle: every state-changing route refuses a
-  request carrying no `Sec-Fetch-Site`, which a non-browser client never
-  sends.
+- **A programmatic API.** Deferred; the obstacle is in
+  `docs/notes/design.md`. Every state-changing route refuses a request
+  carrying no `Sec-Fetch-Site`, which a non-browser client never sends.
 - **Deleting a book from the UI.** Discard removes a staged file only. A
   confirmed import is a library file like any other and goes the way any
   other does.

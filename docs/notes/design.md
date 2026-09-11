@@ -60,10 +60,10 @@ page.
 
 ## Storage engine
 
-SQLite through `modernc.org/sqlite`, a pure-Go port. It was chosen over a
-key-value store because FTS5 gives full-text search out of the box, which
-is most of what a library server needs; a KV store would mean hand-rolling
-every index. The pure-Go driver is slower than the C one under heavy
+SQLite through `modernc.org/sqlite`, a pure-Go port, rather than a
+key-value store: FTS5 gives full-text search out of the box, which is most
+of what a library server needs, where a KV store means hand-rolling every
+index. The pure-Go driver is slower than the C one under heavy
 concurrent writes, which does not matter here: writes arrive in scan
 bursts and reads dominate, and it is what keeps `CGO_ENABLED=0` true.
 
@@ -100,8 +100,8 @@ closes the one hole "internal network only" leaves open.
 
 ## Deferred by decision
 
-These were consciously ruled out of scope. None is backlog, and none has
-been started.
+These are out of scope by decision. None of them is backlog, and none is
+started.
 
 - **Series.** A real relation rather than a flag, so the one that hurts
   most to retrofit. Acceptable given a mostly standalone library.
@@ -116,9 +116,8 @@ been started.
   annoying to undo.
 - **Programmatic API.** Expected later, not OPDS. The service layer
   beneath the HTTP handlers exists so it can be a second thin transport.
-  It is not free, and the obstacle is worth recording before the plan that
-  builds it rediscovers it: every state-changing route is refused unless it
-  carries `Sec-Fetch-Site`, which a non-browser client never sends. So an
+  It is not free: every state-changing route is refused unless it carries
+  `Sec-Fetch-Site`, which a non-browser client never sends. So an
   API needs a credential of its own — a bearer token from an `API_TOKEN`
   variable — and its routes must bypass `sameSiteOnly` on the strength of
   it. The service surface itself is ready: import, for instance, takes a

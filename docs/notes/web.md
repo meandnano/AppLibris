@@ -464,6 +464,33 @@ The HTTPS requirement also closes DNS rebinding against the unchecked
 HTTPS origin, and the plain listener is not reachable from a browser at
 all. That is why there is no `Host` allowlist.
 
+## Upload bodies
+
+One route takes a body worth bounding, and it bounds it three ways.
+
+`cmd/server`'s `ReadTimeout` covers the request body and is sized for a
+page request; a book of tens of megabytes over Wi-Fi to a NAS routinely
+takes longer. The upload handler therefore extends its own read deadline
+through `http.NewResponseController`, sized from the import cap at a floor
+of 1 MiB/s. Per request rather than globally, so every other route keeps
+the tight timeout, and extended rather than removed, so a stalled upload
+still ends. A server that does not support the control is left alone and
+the global timeout applies.
+
+`http.MaxBytesReader` bounds the body itself, at the cap plus multipart
+overhead, and it is installed before the handler can refuse anything —
+including the read-only refusal, which answers a request whose body is
+still arriving. The number a refusal actually names is not this one but the
+importer's own count of the file part's bytes, since the part is what is
+being measured and only the importer sees it.
+
+The body streams through `r.MultipartReader` rather than
+`ParseMultipartForm`, which would spool the whole file to a second
+temporary copy before the handler saw a byte. Every refusal drains what is
+left before rendering, so no response is written over a request body
+nobody consumed. See `docs/notes/import.md` for how far that drain
+actually helps.
+
 ## History page
 
 `GET /history` lists every send over `service.SendHistory`'s window,

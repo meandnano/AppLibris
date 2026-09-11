@@ -141,20 +141,25 @@ func run(ctx context.Context) error {
 	// The probe runs after the library directory is resolved and before
 	// anything is served, so the answer is settled for the run: import is
 	// either on or it is off, and no request has to rediscover it.
+	// A Stager exists exactly when importing is available: there is no
+	// disabled Stager, and internal/service answers a nil one with its own
+	// explanation. A read-only library is the documented deployment, so the
+	// probe failing is a Warn and not a startup failure.
 	importDir := filepath.Join(os.TempDir(), "applibris-imports")
-	libraryWritable := probeWritable(libraryDir)
-	stager, err := importer.New(db, importer.Options{
-		LibraryDir: libraryDir,
-		CoversDir:  coversDir,
-		TempDir:    importDir,
-		MaxSize:    maxImportSize,
-		Writable:   libraryWritable,
-	})
-	if err != nil {
-		// The one early return past storage.Open, so it is also the one
-		// that has to close the database itself.
-		db.Close()
-		return err
+	var stager *importer.Stager
+	if probeWritable(libraryDir) {
+		stager, err = importer.New(db, importer.Options{
+			LibraryDir: libraryDir,
+			CoversDir:  coversDir,
+			TempDir:    importDir,
+			MaxSize:    maxImportSize,
+		})
+		if err != nil {
+			// The one early return past storage.Open, so it is also the
+			// one that has to close the database itself.
+			db.Close()
+			return err
+		}
 	}
 
 	svc := service.New(db, service.WithImporter(stager))
@@ -211,7 +216,7 @@ func run(ctx context.Context) error {
 	if !requireFetchMetadata {
 		slog.Warn("REQUIRE_FETCH_METADATA=false: state-changing requests without fetch metadata are admitted, so cross-site protection depends on the listener being unreachable from any browser except through an HTTPS gateway")
 	}
-	mux.Handle("/", fetchMetadataGuard(requireFetchMetadata, web.Routes(svc, coversDir, sendEnabled, enrichEnabled, importEnabled)))
+	mux.Handle("/", fetchMetadataGuard(requireFetchMetadata, web.Routes(svc, coversDir, sendEnabled, enrichEnabled)))
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -328,12 +333,16 @@ func run(ctx context.Context) error {
 
 	// On scanCtx like every other background loop, so a staged file is
 	// never deleted out from under a confirm that is running while the
-	// process shuts down.
-	janitorDone := make(chan struct{})
-	go func() {
-		defer close(janitorDone)
-		stager.RunJanitor(scanCtx)
-	}()
+	// process shuts down. Absent with the importer, which is absent when
+	// the library cannot be written.
+	var janitorDone chan struct{}
+	if stager != nil {
+		janitorDone = make(chan struct{})
+		go func() {
+			defer close(janitorDone)
+			stager.RunJanitor(scanCtx)
+		}()
+	}
 
 	select {
 	case err := <-serveErr:
@@ -351,7 +360,9 @@ func run(ctx context.Context) error {
 			waitForBackground(cancelScan, workerDone, deadline.Done(), "sender")
 		}
 		waitForBackground(cancelScan, enrichDone, deadline.Done(), "enrichment")
-		waitForBackground(cancelScan, janitorDone, deadline.Done(), "import janitor")
+		if janitorDone != nil {
+			waitForBackground(cancelScan, janitorDone, deadline.Done(), "import janitor")
+		}
 		cancelDeadline()
 		if closeErr := db.Close(); closeErr != nil {
 			slog.Error("close database", "error", closeErr)
@@ -385,7 +396,9 @@ func run(ctx context.Context) error {
 		waitForBackground(cancelScan, workerDone, shutdownCtx.Done(), "sender")
 	}
 	waitForBackground(cancelScan, enrichDone, shutdownCtx.Done(), "enrichment")
-	waitForBackground(cancelScan, janitorDone, shutdownCtx.Done(), "import janitor")
+	if janitorDone != nil {
+		waitForBackground(cancelScan, janitorDone, shutdownCtx.Done(), "import janitor")
+	}
 
 	return db.Close()
 }

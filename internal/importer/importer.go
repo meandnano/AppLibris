@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"library/internal/cover"
-	"library/internal/epub"
-	"library/internal/fb2"
 	"library/internal/scanner"
 	"library/internal/storage"
 )
@@ -66,9 +64,6 @@ var (
 	// they are one thing to the person holding the stale page, and the
 	// remedy is the same: stage it again.
 	ErrExpired = errors.New("importer: this import has expired")
-	// ErrLibraryNotWritable is import refused for the run, because the
-	// startup probe could not write to the library directory.
-	ErrLibraryNotWritable = errors.New("importer: the library directory is not writable")
 	// ErrStagingFull is an upload refused because what is already staged
 	// fills the staging budget.
 	ErrStagingFull = errors.New("importer: too much is already staged")
@@ -136,6 +131,10 @@ type stage struct {
 	staged Staged
 	path   string
 	hash   string
+	// stem and suffix are what the library name is built from, computed by
+	// Stage so the preview and the copy cannot derive them differently.
+	stem   string
+	suffix string
 	// cover is the embedded cover, and coverType the media type
 	// cover.ContentType decided for it. Both are empty for a book with no
 	// cover and for one whose cover is not an image this app would store.
@@ -169,10 +168,6 @@ type Options struct {
 	TempDir string
 	// MaxSize is the largest body Stage accepts, in bytes.
 	MaxSize int64
-	// Writable is the startup probe's answer. False disables import for
-	// the run: Stage and Confirm both refuse with ErrLibraryNotWritable,
-	// so a stale tab gets an explanation rather than a filesystem error.
-	Writable bool
 	// Now is the clock, overridden in tests.
 	Now func() time.Time
 }
@@ -185,7 +180,6 @@ type Stager struct {
 	tempDir    string
 	maxSize    int64
 	maxStaged  int64
-	writable   bool
 	now        func() time.Time
 
 	mu sync.Mutex
@@ -198,6 +192,12 @@ type Stager struct {
 }
 
 // New builds a Stager and empties its temp directory.
+//
+// cmd/server builds one only when the library directory is writable, so a
+// Stager existing is what "import is available" means — there is no second
+// disabled state inside it. internal/service holds a nil one otherwise and
+// answers every import method with ErrImportDisabled, the convention
+// Notify already follows.
 //
 // The wipe is the whole recovery story for a restart: a stage nobody
 // confirmed is a file nobody asked for, and since no stage is written to
@@ -221,14 +221,10 @@ func New(db *storage.DB, opts Options) (*Stager, error) {
 		tempDir:    opts.TempDir,
 		maxSize:    opts.MaxSize,
 		maxStaged:  opts.MaxSize * stagingBudgetFactor,
-		writable:   opts.Writable,
 		now:        opts.Now,
 		stages:     make(map[string]*stage),
 	}, nil
 }
-
-// Enabled reports whether import can do anything at all this run.
-func (s *Stager) Enabled() bool { return s.writable }
 
 // MaxSize is the configured cap, for the sentence a refusal shows.
 func (s *Stager) MaxSize() int64 { return s.maxSize }
@@ -240,10 +236,6 @@ func (s *Stager) MaxSize() int64 { return s.maxSize }
 // nor the stored extension, both of which come out of the content
 // (detectSuffix); it only seeds what the library file is called.
 func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, error) {
-	if !s.writable {
-		return Staged{}, ErrLibraryNotWritable
-	}
-
 	// Reserved at the cap rather than at the body's own size, which is not
 	// known until it has been written: a reservation made after the copy
 	// would be a budget that admits everything and reports afterwards.
@@ -287,7 +279,15 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 		return Staged{}, err
 	}
 
-	meta := capMetadata(readMetadata(staged, suffix, name))
+	// The scanner's own extraction, so a preview reads a file exactly the
+	// way indexing will. The fallback title is the name the person offered,
+	// not the staged path: that path is an opaque id and would preview as
+	// one.
+	embedded, err := scanner.ExtractMetadata(staged, suffix, stripSuffix(name, suffix))
+	if err != nil {
+		slog.Info("read staged metadata failed", "name", name, "error", err)
+	}
+	meta := capMetadata(embedded)
 
 	// Decided here rather than where the bytes are served, so HasCover
 	// means "a cover this app would keep" and the preview stops promising
@@ -303,12 +303,18 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 		}
 	}
 
+	// Derived once here rather than again at confirm: the name a preview
+	// promises and the name the copy claims have to be the same one.
+	stem := libraryStem(name, meta.Title, id, suffix)
+
 	record := &stage{
+		stem:   stem,
+		suffix: suffix,
 		staged: Staged{
 			ID:            id,
 			OriginalName:  name,
-			LibraryName:   libraryName(libraryStem(name, meta.Title, id, suffix), suffix, 1),
-			Format:        bookFormat(suffix),
+			LibraryName:   libraryName(stem, suffix, 1),
+			Format:        scanner.BookFormat(suffix),
 			Size:          size,
 			Title:         meta.Title,
 			Authors:       meta.Authors,
@@ -484,10 +490,6 @@ func (s *Stager) Cover(id string) (data []byte, contentType string, ok bool) {
 // same reason: the bytes are in the library and indexed, which is what the
 // caller was asking for.
 func (s *Stager) Confirm(ctx context.Context, id string) (int64, error) {
-	if !s.writable {
-		return 0, ErrLibraryNotWritable
-	}
-
 	s.mu.Lock()
 	record, ok := s.stages[id]
 	if ok && s.expired(record) {
@@ -576,10 +578,7 @@ func (s *Stager) copyIntoLibrary(record *stage) (string, error) {
 	}
 	defer src.Close()
 
-	suffix := suffixOf(record.path)
-	stem := libraryStem(record.staged.OriginalName, record.staged.Title, record.staged.ID, suffix)
-
-	dst, part, err := claimPart(s.libraryDir, stem, suffix)
+	dst, part, err := claimPart(s.libraryDir, record.stem, record.suffix)
 	if err != nil {
 		return "", err
 	}
@@ -599,7 +598,7 @@ func (s *Stager) copyIntoLibrary(record *stage) (string, error) {
 		return "", err
 	}
 
-	name, err := publish(s.libraryDir, part, stem, suffix)
+	name, err := publish(s.libraryDir, part, record.stem, record.suffix)
 	if err != nil {
 		os.Remove(part)
 		return "", err
@@ -696,67 +695,6 @@ func newStageID() (string, error) {
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw[:])), nil
 }
 
-// meta is the subset of a format package's Metadata the preview shows.
-// epub.Metadata and fb2.Metadata are structurally identical but distinct
-// types, the same reason internal/scanner keeps its own bookMeta.
-type meta struct {
-	Title         string
-	Authors       []string
-	Language      string
-	ISBN          string
-	Publisher     string
-	PublishedDate string
-	Description   string
-	Cover         []byte
-}
-
-// readMetadata parses the staged file for the preview alone. What is
-// actually stored comes from the scanner's own extraction during
-// IndexFile — including its caps — so a parse failure here costs a
-// populated preview and nothing else.
-//
-// The filename fallback is the client's name rather than the staged path,
-// which is an opaque id: a file with no embedded title previews under the
-// name the person recognises.
-func readMetadata(path, suffix, original string) meta {
-	fallback := stripSuffix(original, suffix)
-
-	switch suffix {
-	case ".epub":
-		m, err := epub.ReadMetadata(path)
-		if err != nil {
-			slog.Info("read staged metadata failed", "name", original, "error", err)
-			return meta{Title: fallback}
-		}
-		return meta{
-			Title:         orFallback(m.Title, fallback),
-			Authors:       m.Authors,
-			Language:      m.Language,
-			ISBN:          m.ISBN,
-			Publisher:     m.Publisher,
-			PublishedDate: m.PublishedDate,
-			Description:   m.Description,
-			Cover:         m.Cover,
-		}
-	default:
-		m, err := fb2.ReadMetadata(path)
-		if err != nil {
-			slog.Info("read staged metadata failed", "name", original, "error", err)
-			return meta{Title: fallback}
-		}
-		return meta{
-			Title:         orFallback(m.Title, fallback),
-			Authors:       m.Authors,
-			Language:      m.Language,
-			ISBN:          m.ISBN,
-			Publisher:     m.Publisher,
-			PublishedDate: m.PublishedDate,
-			Description:   m.Description,
-			Cover:         m.Cover,
-		}
-	}
-}
-
 // capMetadata bounds a preview to what the import would actually store.
 //
 // Two reasons, and the second is the one that bites. A preview is rendered
@@ -773,7 +711,7 @@ func readMetadata(path, suffix, original string) meta {
 // cannot disagree about what will be kept. No logging: a sweep's Info line
 // names a file in a directory, where this is one upload a person is looking
 // at, and the preview showing the capped value is the report
-func capMetadata(m meta) meta {
+func capMetadata(m scanner.EmbeddedMetadata) scanner.EmbeddedMetadata {
 	m.Title, _ = storage.CapField(storage.FieldTitle, m.Title)
 	m.Language, _ = storage.CapField(storage.FieldLanguage, m.Language)
 	m.ISBN, _ = storage.CapField(storage.FieldISBN, m.ISBN)
@@ -788,33 +726,4 @@ func capMetadata(m meta) meta {
 		m.Authors = m.Authors[:storage.MaxAuthors]
 	}
 	return m
-}
-
-func orFallback(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
-
-// bookFormat maps a sniffed suffix to the badge the preview shows, the same
-// collapse internal/scanner makes: how a book is packaged on disk is not
-// something the format badge should surface.
-func bookFormat(suffix string) string {
-	if suffix == ".epub" {
-		return "epub"
-	}
-	return "fb2"
-}
-
-// suffixOf recovers the sniffed suffix from a staged path, which is the id
-// with the suffix on it.
-func suffixOf(path string) string {
-	base := filepath.Base(path)
-	for _, s := range []string{".fb2.zip", ".epub", ".fb2"} {
-		if strings.HasSuffix(base, s) {
-			return s
-		}
-	}
-	return ""
 }

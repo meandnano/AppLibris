@@ -421,8 +421,8 @@ func uploadWindow(bytes int64) time.Duration {
 // sixty-four megabytes over Wi-Fi to a NAS routinely takes longer. Extended
 // per request rather than globally so every other route keeps the tight
 // timeout, and extended rather than removed so a stalled upload still ends.
-// A server that does not support the control is left alone: the global
-// timeout then applies, which is the behaviour this replaces.
+// A server that does not support the control is left alone, and the global
+// timeout applies.
 func extendReadDeadline(w http.ResponseWriter, bytes int64) {
 	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadWindow(bytes))); err != nil {
 		slog.Debug("could not extend the upload read deadline", "error", err)
@@ -448,7 +448,7 @@ func importFailureLine(err error, maxBytes int64) string {
 		return "Another import is still waiting. Finish or discard it, then try again."
 	case errors.Is(err, errNoFileChosen):
 		return "Choose a file first."
-	case errors.Is(err, service.ErrImportDisabled), errors.Is(err, importer.ErrLibraryNotWritable):
+	case errors.Is(err, service.ErrImportDisabled):
 		return "The library directory is read-only, so importing is disabled."
 	default:
 		return ""
@@ -467,7 +467,7 @@ func importPreviewViewOf(preview *service.ImportPreview) *importPreviewView {
 		Format:       preview.Format,
 		SizeHuman:    humanSize(preview.Size),
 		Description:  preview.Description,
-		Importable:   preview.Verdict != string(importer.VerdictExists),
+		Importable:   preview.Verdict != importer.VerdictExists,
 		ConfirmURL:   "/import/" + preview.ID + "/confirm",
 		DiscardURL:   "/import/" + preview.ID + "/discard",
 	}
@@ -478,7 +478,7 @@ func importPreviewViewOf(preview *service.ImportPreview) *importPreviewView {
 		view.ExistingURL = "/books/" + strconv.FormatInt(preview.ExistingID, 10)
 		view.ExistingTitle = preview.ExistingTitle
 	}
-	if preview.Verdict == string(importer.VerdictTitleMatch) {
+	if preview.Verdict == importer.VerdictTitleMatch {
 		view.Warning = "The library already holds a book called " + preview.ExistingTitle + ". Import anyway if this is a different edition."
 	}
 	if preview.LibraryName != preview.OriginalName {

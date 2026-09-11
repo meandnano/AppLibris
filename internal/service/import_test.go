@@ -81,7 +81,6 @@ func newImportTestService(t *testing.T) (*Service, *storage.DB, string) {
 		CoversDir:  coversDir,
 		TempDir:    filepath.Join(root, "staging"),
 		MaxSize:    1 << 20,
-		Writable:   true,
 	})
 	if err != nil {
 		t.Fatalf("importer.New: %v", err)
@@ -109,7 +108,7 @@ func TestStageImportShapesThePreview(t *testing.T) {
 	if preview.LibraryName != "Dune.epub" {
 		t.Errorf("LibraryName = %q, want %q", preview.LibraryName, "Dune.epub")
 	}
-	if preview.Verdict != string(importer.VerdictNew) {
+	if preview.Verdict != importer.VerdictNew {
 		t.Errorf("Verdict = %q, want %q", preview.Verdict, importer.VerdictNew)
 	}
 	if preview.ID == "" {
@@ -264,10 +263,9 @@ func TestEveryImportMethodRefusesWithoutAnImporter(t *testing.T) {
 	}
 }
 
-// A library the process cannot write disables importing without unsetting
-// the importer, so ImportEnabled has to ask the Stager rather than test the
-// field for nil.
-func TestImportEnabledFollowsTheStagersOwnAnswer(t *testing.T) {
+// A Stager exists exactly when importing is available: cmd/server builds
+// one only for a writable library, so there is no disabled Stager to ask.
+func TestImportEnabledFollowsWhetherAStagerWasGiven(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
 	if err != nil {
 		t.Fatalf("storage.Open: %v", err)
@@ -280,15 +278,14 @@ func TestImportEnabledFollowsTheStagersOwnAnswer(t *testing.T) {
 		CoversDir:  root,
 		TempDir:    filepath.Join(root, "staging"),
 		MaxSize:    64 << 20,
-		Writable:   false,
 	})
 	if err != nil {
 		t.Fatalf("importer.New: %v", err)
 	}
 
 	svc := New(db, WithImporter(stager))
-	if svc.ImportEnabled() {
-		t.Error("ImportEnabled is true for an unwritable library")
+	if !svc.ImportEnabled() {
+		t.Error("ImportEnabled is false though a Stager was given")
 	}
 	if got := svc.MaxImportBytes(); got != 64<<20 {
 		t.Errorf("MaxImportBytes = %d, want the configured cap", got)

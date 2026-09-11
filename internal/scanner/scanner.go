@@ -49,9 +49,11 @@ type Result struct {
 // would only ever see the last one (".zip").
 var supportedSuffixes = []string{".epub", ".fb2.zip", ".fb2"}
 
-// matchedSuffix returns whichever of supportedSuffixes name ends with,
-// case-insensitively, or "" if none matches.
-func matchedSuffix(name string) string {
+// MatchedSuffix returns whichever of supportedSuffixes name ends with,
+// case-insensitively, or "" if none matches. Exported because it is the
+// one place that decides whether a name is a book this app indexes, and
+// internal/importer has to agree with it about a file it is staging.
+func MatchedSuffix(name string) string {
 	lower := strings.ToLower(name)
 	for _, s := range supportedSuffixes {
 		if strings.HasSuffix(lower, s) {
@@ -61,11 +63,12 @@ func matchedSuffix(name string) string {
 	return ""
 }
 
-// bookFormat maps a matched suffix to the value stored in books.format.
+// BookFormat maps a matched suffix to the value stored in books.format.
 // How a book is packaged on disk (.fb2 vs. a .fb2.zip archive) isn't
 // something the format badge in the UI should surface, so both map to
-// "fb2".
-func bookFormat(suffix string) string {
+// "fb2". Exported for internal/importer's preview, which shows the badge
+// before the book is stored and must name it the same way.
+func BookFormat(suffix string) string {
 	switch suffix {
 	case ".fb2", ".fb2.zip":
 		return "fb2"
@@ -184,7 +187,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 			}
 			// resolving to nothing or to a file takes the ordinary route
 		}
-		if d.IsDir() || matchedSuffix(d.Name()) == "" {
+		if d.IsDir() || MatchedSuffix(d.Name()) == "" {
 			return nil
 		}
 
@@ -430,7 +433,7 @@ func TopLevelDirHasBooks(libraryDir, relPath string) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && matchedSuffix(d.Name()) != "" {
+		if !d.IsDir() && MatchedSuffix(d.Name()) != "" {
 			found = true
 			// The answer is "at least one", so the first match ends the
 			// walk: on a populated directory this costs a handful of stats
@@ -717,7 +720,7 @@ func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Boo
 		}
 	}
 
-	coverBytes, err := readEmbeddedCover(sourcePath, matchedSuffix(sourcePath))
+	coverBytes, err := readEmbeddedCover(sourcePath, MatchedSuffix(sourcePath))
 	if err != nil || len(coverBytes) == 0 {
 		// Re-extraction produced nothing usable, by one of two routes the
 		// callee separates: the file holds no cover (len == 0), or the
@@ -796,11 +799,11 @@ func recordUnusableCover(ctx context.Context, db *storage.DB, book *storage.Book
 }
 
 // readEmbeddedCover returns just the embedded cover bytes for path,
-// dispatching by suffix the same way extractMetadata does. This used to be
-// an unconditional epub.ReadMetadata call regardless of format, which meant
-// an FB2 book's cover could never actually be regenerated once its stored
-// file went missing or empty — it would try to parse the FB2 document as
-// an EPUB zip and fail every time.
+// dispatching by suffix the same way ExtractMetadata does. The dispatch is
+// what makes an FB2 book's cover regenerable at all: parsing an FB2
+// document as an EPUB zip fails every time, so a single-format call would
+// leave those books without a cover for good once the stored file went
+// missing or empty.
 func readEmbeddedCover(path, suffix string) ([]byte, error) {
 	switch suffix {
 	case ".epub":
@@ -842,8 +845,12 @@ func logOrphan(path string, orphanedID int64, orphanedTitle string, inherited []
 // createBook reads metadata from the file at the absolute path and stores
 // the book under rel, its path relative to the library root.
 func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir string, size int64, mtime time.Time) (bookID int64, orphanedID int64, orphanedTitle string, inherited []storage.MetadataField, err error) {
-	suffix := matchedSuffix(path)
-	meta := capMetadata(path, extractMetadata(path, suffix))
+	suffix := MatchedSuffix(path)
+	meta, err := ExtractMetadata(path, suffix, filenameTitle(path, suffix))
+	if err != nil {
+		slog.Warn("read embedded metadata failed", "path", path, "error", err)
+	}
+	meta = capMetadata(path, meta)
 
 	var coverPath string
 	var coverRetry bool
@@ -877,7 +884,7 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 		Description:   meta.Description,
 		CoverPath:     coverPath,
 		CoverRetry:    coverRetry,
-		Format:        bookFormat(suffix),
+		Format:        BookFormat(suffix),
 	}
 	bookID, orphanedID, orphanedTitle, inherited, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
 	return bookID, orphanedID, orphanedTitle, inherited, err
@@ -893,7 +900,7 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 // a book, and a filename title beside a dropped one is worse than prose cut
 // at 64 KiB. A cut field is still `embedded` in field_sources too:
 // provenance says where a value came from, not whether it arrived whole
-func capMetadata(path string, m bookMeta) bookMeta {
+func capMetadata(path string, m EmbeddedMetadata) EmbeddedMetadata {
 	m.Title = capValue(path, storage.FieldTitle, m.Title)
 	m.Language = capValue(path, storage.FieldLanguage, m.Language)
 	m.ISBN = capValue(path, storage.FieldISBN, m.ISBN)
@@ -942,7 +949,12 @@ func capValue(path string, field storage.MetadataField, value string) string {
 	return capped
 }
 
-type bookMeta struct {
+// EmbeddedMetadata is what a format package had in a file, in the one
+// shape this app reads it. epub.Metadata and fb2.Metadata are structurally
+// identical but deliberately distinct types (no shared interface): there
+// are exactly two implementations, neither is chosen at runtime, and an
+// interface would buy nothing a switch does not already give.
+type EmbeddedMetadata struct {
 	Title         string
 	Authors       []string
 	Language      string
@@ -953,63 +965,58 @@ type bookMeta struct {
 	Cover         []byte
 }
 
-// extractMetadata pulls embedded metadata for supported formats and falls
-// back to a filename-derived title whenever embedded metadata is
-// unavailable, unparseable, or missing a title. epub.Metadata and
-// fb2.Metadata are structurally identical but deliberately distinct types
-// (no shared interface): there are exactly two implementations, neither is
-// chosen at runtime, and an interface here would buy nothing a switch
-// doesn't already give.
-func extractMetadata(path, suffix string) bookMeta {
-	fallbackTitle := filenameTitle(path, suffix)
+// ExtractMetadata reads what a file has embedded in it, falling back to
+// fallbackTitle whenever the file is unparseable or carries no title.
+//
+// The fallback is the caller's because the two callers disagree about it
+// for a reason: a sweep has the file's own name to fall back on, and
+// internal/importer has only an opaque staging id and falls back to the
+// name the person's browser offered instead.
+//
+// A parse failure comes back rather than being logged here, for the same
+// reason: a sweep names the path it was walking, and a preview names the
+// upload. The metadata returned in that case is the fallback one, so a
+// caller that only wants something to show can ignore the error.
+func ExtractMetadata(path, suffix, fallbackTitle string) (EmbeddedMetadata, error) {
+	fallback := EmbeddedMetadata{Title: fallbackTitle}
 
 	switch suffix {
 	case ".epub":
 		m, err := epub.ReadMetadata(path)
 		if err != nil {
-			slog.Warn("read embedded metadata failed", "path", path, "error", err)
-			return bookMeta{Title: fallbackTitle}
+			return fallback, err
 		}
-		title := m.Title
-		if title == "" {
-			title = fallbackTitle
-		}
-		return bookMeta{
-			Title:         title,
-			Authors:       m.Authors,
-			Language:      m.Language,
-			ISBN:          m.ISBN,
-			Description:   m.Description,
-			Publisher:     m.Publisher,
-			PublishedDate: m.PublishedDate,
-			Cover:         m.Cover,
-		}
+		return embeddedFrom(m.Title, fallbackTitle, m.Authors, m.Language, m.ISBN, m.Description, m.Publisher, m.PublishedDate, m.Cover), nil
 	case ".fb2", ".fb2.zip":
 		m, err := fb2.ReadMetadata(path)
 		if err != nil {
-			slog.Warn("read embedded metadata failed", "path", path, "error", err)
-			return bookMeta{Title: fallbackTitle}
+			return fallback, err
 		}
-		title := m.Title
-		if title == "" {
-			title = fallbackTitle
-		}
-		return bookMeta{
-			Title:         title,
-			Authors:       m.Authors,
-			Language:      m.Language,
-			ISBN:          m.ISBN,
-			Description:   m.Description,
-			Publisher:     m.Publisher,
-			PublishedDate: m.PublishedDate,
-			Cover:         m.Cover,
-		}
+		return embeddedFrom(m.Title, fallbackTitle, m.Authors, m.Language, m.ISBN, m.Description, m.Publisher, m.PublishedDate, m.Cover), nil
 	default:
-		return bookMeta{Title: fallbackTitle}
+		return fallback, nil
 	}
 }
 
-// filenameTitle strips suffix (the matched suffix from matchedSuffix, e.g.
+// embeddedFrom shapes one format package's answer, substituting the
+// fallback for a file that parsed but named no title.
+func embeddedFrom(title, fallbackTitle string, authors []string, language, isbn, description, publisher, publishedDate string, cover []byte) EmbeddedMetadata {
+	if title == "" {
+		title = fallbackTitle
+	}
+	return EmbeddedMetadata{
+		Title:         title,
+		Authors:       authors,
+		Language:      language,
+		ISBN:          isbn,
+		Description:   description,
+		Publisher:     publisher,
+		PublishedDate: publishedDate,
+		Cover:         cover,
+	}
+}
+
+// filenameTitle strips suffix (the matched suffix from MatchedSuffix, e.g.
 // ".fb2.zip") from path's base name, case-insensitively — filepath.Ext
 // would only strip ".zip" from "book.fb2.zip", leaving the fallback title
 // "book.fb2", extension and all. Case-insensitive because suffix is always

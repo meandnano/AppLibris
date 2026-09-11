@@ -1053,7 +1053,7 @@ func TestFilenameTitleStripsWholeMatchedSuffix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			suffix := matchedSuffix(tt.path)
+			suffix := MatchedSuffix(tt.path)
 			if got := filenameTitle(tt.path, suffix); got != tt.want {
 				t.Errorf("filenameTitle(%q, %q) = %q, want %q", tt.path, suffix, got, tt.want)
 			}

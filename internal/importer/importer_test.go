@@ -405,33 +405,6 @@ func TestConfirmLeavesTheLibraryFileWhenIndexingFails(t *testing.T) {
 	}
 }
 
-func TestAReadOnlyLibraryRefusesEverything(t *testing.T) {
-	ctx := context.Background()
-	db := openTestDB(t)
-
-	root := t.TempDir()
-	stager, err := New(db, Options{
-		LibraryDir: root,
-		CoversDir:  root,
-		TempDir:    filepath.Join(root, "staging"),
-		MaxSize:    1 << 20,
-		Writable:   false,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	if stager.Enabled() {
-		t.Error("Enabled reported true for an unwritable library")
-	}
-	if _, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(nil)); !errors.Is(err, ErrLibraryNotWritable) {
-		t.Errorf("Stage = %v, want ErrLibraryNotWritable", err)
-	}
-	if _, err := stager.Confirm(ctx, "whatever"); !errors.Is(err, ErrLibraryNotWritable) {
-		t.Errorf("Confirm = %v, want ErrLibraryNotWritable", err)
-	}
-}
-
 // Nothing about a stage is in the database, so a restart has nothing to
 // recover and the wipe is the whole story.
 func TestNewEmptiesTheStagingDirectory(t *testing.T) {
@@ -443,7 +416,7 @@ func TestNewEmptiesTheStagingDirectory(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(tempDir, "leftover.epub"), []byte("from a previous run"))
 
-	stager, err := New(db, Options{LibraryDir: root, CoversDir: root, TempDir: tempDir, MaxSize: 1 << 20, Writable: true})
+	stager, err := New(db, Options{LibraryDir: root, CoversDir: root, TempDir: tempDir, MaxSize: 1 << 20})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

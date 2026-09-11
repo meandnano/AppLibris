@@ -138,19 +138,23 @@ func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.
 		t.Fatalf("mkdir covers: %v", err)
 	}
 
-	stager, err := importer.New(db, importer.Options{
-		LibraryDir: libraryDir,
-		CoversDir:  coversDir,
-		TempDir:    filepath.Join(root, "staging"),
-		MaxSize:    maxSize,
-		Writable:   writable,
-	})
-	if err != nil {
-		t.Fatalf("importer.New: %v", err)
+	// No Stager is what a library the process cannot write looks like:
+	// cmd/server builds one only when its probe succeeds.
+	var stager *importer.Stager
+	if writable {
+		stager, err = importer.New(db, importer.Options{
+			LibraryDir: libraryDir,
+			CoversDir:  coversDir,
+			TempDir:    filepath.Join(root, "staging"),
+			MaxSize:    maxSize,
+		})
+		if err != nil {
+			t.Fatalf("importer.New: %v", err)
+		}
 	}
 
 	svc := service.New(db, service.WithImporter(stager))
-	return Routes(svc, coversDir, false, false, svc.ImportEnabled()), db, libraryDir
+	return Routes(svc, coversDir, false, false), db, libraryDir
 }
 
 func uploadRequest(t *testing.T, filename string, content []byte, hx bool) *http.Request {

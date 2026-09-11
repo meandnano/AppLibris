@@ -203,7 +203,6 @@ func testStagerAt(t *testing.T, db *storage.DB, maxSize int64, now func() time.T
 		CoversDir:  coversDir,
 		TempDir:    filepath.Join(root, "staging"),
 		MaxSize:    maxSize,
-		Writable:   true,
 		Now:        now,
 	})
 	if err != nil {

@@ -8,45 +8,29 @@ import (
 	"library/internal/importer"
 )
 
-// ErrImportDisabled is what every import method answers when cmd/server
-// found the library directory unwritable, or built no Stager at all. The
-// routes stay registered so a stale tab gets this explanation rather than a
-// 404.
+// ErrImportDisabled is what every import method answers when there is no
+// Stager — which is what cmd/server builds when the library directory
+// cannot be written. One disabled state and one convention, the same
+// Notify follows. The routes stay registered so a stale tab gets this
+// explanation rather than a 404.
 var ErrImportDisabled = errors.New("service: import is not available")
 
-// ImportPreview is one staged import as the import page needs it: the
-// header fields BookDetail carries, plus what the file is, what it would be
-// called, and what the index already knows about it.
+// ImportPreview is one staged import as the import page needs it.
 //
-// HasCover rather than a cover URL, the same split BookDetail makes with
-// CoverPath: where a cover is served from is the transport's question.
-type ImportPreview struct {
-	ID            string
-	OriginalName  string
-	LibraryName   string
-	Title         string
-	Authors       []string
-	Publisher     string
-	PublishedDate string
-	Language      string
-	ISBN          string
-	Description   string
-	Format        string
-	Size          int64
-	HasCover      bool
-
-	// Verdict is "new", "exists" or "title-match" — see importer.Verdict.
-	// Importing is offered for the first and the third; the second only
-	// links to the book the library already holds.
-	Verdict       string
-	ExistingID    int64
-	ExistingTitle string
-}
+// An alias rather than a copy. Every field of importer.Staged is one the
+// page renders, and the one thing a separate type would restate — the
+// verdict, as a string — the transport casts straight back to compare. A
+// per-page copy of sixteen identical fields is a rename of nothing, which
+// is the same call BookDetail makes in carrying service.FileLocation as it
+// comes. internal/web depends on internal/importer for the error sentinels
+// a refusal is matched against anyway, so a copy buys no independence
+// either.
+type ImportPreview = importer.Staged
 
 // ImportEnabled reports whether this run can import at all, which is what
 // decides whether the nav offers the page.
 func (s *Service) ImportEnabled() bool {
-	return s.importer != nil && s.importer.Enabled()
+	return s.importer != nil
 }
 
 // MaxImportBytes is the configured size cap, for the sentence a refusal
@@ -69,8 +53,7 @@ func (s *Service) StageImport(ctx context.Context, name string, r io.Reader) (*I
 	if err != nil {
 		return nil, err
 	}
-	preview := importPreviewFrom(staged)
-	return &preview, nil
+	return &staged, nil
 }
 
 // StagedImport returns one staged import, or nil, nil when it has expired
@@ -84,8 +67,7 @@ func (s *Service) StagedImport(ctx context.Context, id string) (*ImportPreview, 
 	if !ok {
 		return nil, nil
 	}
-	preview := importPreviewFrom(staged)
-	return &preview, nil
+	return &staged, nil
 }
 
 // StagedCover returns the cover a staged file had embedded, with its media
@@ -134,25 +116,4 @@ func (s *Service) DiscardImport(ctx context.Context, id string) error {
 	}
 	s.importer.Discard(id)
 	return nil
-}
-
-func importPreviewFrom(staged importer.Staged) ImportPreview {
-	return ImportPreview{
-		ID:            staged.ID,
-		OriginalName:  staged.OriginalName,
-		LibraryName:   staged.LibraryName,
-		Title:         staged.Title,
-		Authors:       staged.Authors,
-		Publisher:     staged.Publisher,
-		PublishedDate: staged.PublishedDate,
-		Language:      staged.Language,
-		ISBN:          staged.ISBN,
-		Description:   staged.Description,
-		Format:        staged.Format,
-		Size:          staged.Size,
-		HasCover:      staged.HasCover,
-		Verdict:       string(staged.Verdict),
-		ExistingID:    staged.ExistingID,
-		ExistingTitle: staged.ExistingTitle,
-	}
 }

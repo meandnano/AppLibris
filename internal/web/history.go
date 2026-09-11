@@ -38,7 +38,7 @@ type historyPage struct {
 // this page renders even when sending is unconfigured: it is a log, not an
 // action, and a library that used to send but no longer has a key set
 // still has history worth reading.
-func historyHandler(svc *service.Service, importEnabled bool) http.HandlerFunc {
+func historyHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		records, truncated, err := svc.SendHistory(r.Context())
 		if err != nil {
@@ -68,7 +68,7 @@ func historyHandler(svc *service.Service, importEnabled bool) http.HandlerFunc {
 
 		page := historyPage{
 			Title:      "History",
-			Nav:        navFor("history", importEnabled),
+			Nav:        navFor("history", svc.ImportEnabled()),
 			HeaderNote: historyScopeLine(truncated),
 			Rows:       rows,
 			Empty:      len(rows) == 0,

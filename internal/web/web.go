@@ -29,13 +29,13 @@ import (
 // pattern below matches an exact path or a specific prefix, so a request
 // that matches none of them falls through to ServeMux's own 404 rather than
 // being narrowed on the outer mount.
-func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled, importEnabled bool) http.Handler {
+func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled bool) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", libraryHandler(svc, importEnabled))
-	mux.HandleFunc("GET /history", historyHandler(svc, importEnabled))
-	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled, enrichEnabled, importEnabled))
-	mux.HandleFunc("GET /books/{id}/metadata/{field}", metadataHandler(svc, sendEnabled, enrichEnabled, importEnabled))
-	mux.HandleFunc("POST /books/{id}/metadata/{field}", sameSiteOnly(metadataHandler(svc, sendEnabled, enrichEnabled, importEnabled)))
+	mux.HandleFunc("GET /{$}", libraryHandler(svc))
+	mux.HandleFunc("GET /history", historyHandler(svc))
+	mux.HandleFunc("GET /books/{id}", bookDetailHandler(svc, sendEnabled, enrichEnabled))
+	mux.HandleFunc("GET /books/{id}/metadata/{field}", metadataHandler(svc, sendEnabled, enrichEnabled))
+	mux.HandleFunc("POST /books/{id}/metadata/{field}", sameSiteOnly(metadataHandler(svc, sendEnabled, enrichEnabled)))
 	mux.HandleFunc("POST /books/{id}/locations/forget", sameSiteOnly(forgetLocationHandler(svc)))
 	mux.HandleFunc("POST /books/{id}/send", sameSiteOnly(sendHandler(svc, sendEnabled)))
 	mux.HandleFunc("GET /books/{id}/sends/{sendID}", sendStatusHandler(svc, sendEnabled))
@@ -213,10 +213,13 @@ type navItem struct {
 // Library there matches what the single hardcoded nav item did for every
 // page before History existed.
 //
-// Import is offered only when the library directory is writable. The route
-// stays registered either way — someone on a page from before a restart
-// still gets an explanation — but a link to a page that can only say no is
-// not worth the space in a masthead.
+// Whether Import is offered comes from the service rather than from a flag
+// the caller threads down, unlike sendEnabled and enrichEnabled beside it.
+// The difference is real: those two are configuration cmd/server read and
+// the service never sees, where the importer is the service's own and it
+// can simply be asked. The route stays registered either way — someone on a
+// page from before a restart still gets an explanation — but a link to a
+// page that can only say no is not worth the space in a masthead.
 func navFor(current string, importEnabled bool) []navItem {
 	nav := []navItem{
 		{Label: "Library", URL: "/", Current: current == "library"},
@@ -324,7 +327,7 @@ const appendParam = "append"
 // Both headers are named in Vary because both change the body at this one
 // URL: without it a shared cache or the browser's back-forward cache could
 // serve a bare fragment where a full page was expected, or the reverse.
-func libraryHandler(svc *service.Service, importEnabled bool) http.HandlerFunc {
+func libraryHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
 
@@ -393,7 +396,7 @@ func libraryHandler(svc *service.Service, importEnabled bool) http.HandlerFunc {
 		view := libraryPage{
 			Title:      "Library",
 			AtCursor:   (page.AfterTitle != "" || page.AfterID != 0) && !result.Searched,
-			Nav:        navFor("library", importEnabled),
+			Nav:        navFor("library", svc.ImportEnabled()),
 			HeaderNote: headerBookCount(total),
 			Books:      cards,
 			Query:      query,

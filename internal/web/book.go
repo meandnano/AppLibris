@@ -97,7 +97,7 @@ type bookDetailPage struct {
 // bookDetailHandler serves GET /books/{id}. A non-numeric id and an
 // unknown id both 404 identically (http.NotFound) — deliberately
 // indistinguishable, since neither is a client error worth its own page.
-func bookDetailHandler(svc *service.Service, sendEnabled, enrichEnabled, importEnabled bool) http.HandlerFunc {
+func bookDetailHandler(svc *service.Service, sendEnabled, enrichEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 		if err != nil {
@@ -126,7 +126,7 @@ func bookDetailHandler(svc *service.Service, sendEnabled, enrichEnabled, importE
 			return
 		}
 
-		page, err := makeBookDetailPage(r, svc, detail, sendEnabled, enrichEnabled, importEnabled, edit)
+		page, err := makeBookDetailPage(r, svc, detail, sendEnabled, enrichEnabled, edit)
 		if err != nil {
 			slog.Error("build book detail page failed", "id", id, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -146,7 +146,7 @@ func bookDetailHandler(svc *service.Service, sendEnabled, enrichEnabled, importE
 // callers have already fetched it — the handler to decide between 404 and
 // 200, the metadata error path to render the rest of the page around a
 // rejected value.
-func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.BookDetail, sendEnabled, enrichEnabled, importEnabled bool, edit string) (*bookDetailPage, error) {
+func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.BookDetail, sendEnabled, enrichEnabled bool, edit string) (*bookDetailPage, error) {
 	count, err := svc.CountBooks(r.Context())
 	if err != nil {
 		return nil, err
@@ -160,7 +160,7 @@ func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.B
 
 	page := bookDetailPage{
 		Title:             detail.Title,
-		Nav:               navFor("library", importEnabled),
+		Nav:               navFor("library", svc.ImportEnabled()),
 		HeaderNote:        headerBookCount(count),
 		CoverURL:          coverURL(detail.CoverPath),
 		Format:            detail.Format,

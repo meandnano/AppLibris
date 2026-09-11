@@ -15,12 +15,14 @@ here. See Documentation below for what these files may and may not say.
   and database directories through `resolveDir` (create, then
   `EvalSymlinks`); a dangling link in any component fails startup naming
   link and target, and a refused `MkdirAll` names both uids. Opens the
-  database, serves immediately, and runs the scan loop, the sender worker and the
-  enrichment worker on one cancellable `scanCtx`. Shutdown order: HTTP
-  server, then `waitForBackground` (10s), then the database. Probes
-  `LIBRARY_DIR` for writability once (`probeWritable`), which is what
-  decides whether importing is offered, and parses `MAX_IMPORT_SIZE`
-  through `parseByteSize`. Notes: `docs/notes/scanner.md`,
+  database, serves immediately, and runs the scan loop, the sender worker,
+  the enrichment worker and the import janitor on one cancellable
+  `scanCtx`; the janitor exists only when the importer does. Shutdown
+  order: HTTP server, then `waitForBackground` (10s) over each of them,
+  then the database. Probes `LIBRARY_DIR` for writability once
+  (`probeWritable`) and builds an `importer.Stager` only if it succeeds,
+  which is the whole of what "importing is offered" means; parses
+  `MAX_IMPORT_SIZE` through `parseByteSize`. Notes: `docs/notes/scanner.md`,
   `docs/notes/design.md`, `docs/notes/import.md`.
 - `internal/storage` — SQLite (`modernc.org/sqlite`, WAL, foreign keys,
   5s busy timeout). Bounded read pool, single-connection write pool
@@ -64,7 +66,8 @@ here. See Documentation below for what these files may and may not say.
 - `internal/service` — the layer beneath the HTTP handlers, so a future
   `/api/v1` is a second thin transport. Owns validation and normalisation
   (`UpdateBookMetadata`, `QueueSend`), page assembly (`BookSummary`,
-  `BookDetail`, `SearchResult`, `ImportPreview`), and the
+  `BookDetail`, `SearchResult`; `ImportPreview` is an alias for
+  `importer.Staged`), and the
   `Notify`/`NotifyEnrichment` function fields `cmd/server` wires to the
   workers. `New` takes functional options; `WithImporter` is the only one.
   Note: `docs/notes/web.md`.
@@ -194,8 +197,14 @@ tidy-up would break. The note named in the heading carries the reasoning.
   absent one fails startup. `COVERS_DIR` and `DB_PATH`'s directory are
   created.
 - `IndexFile` is `scanFile` with a fresh `Result`, and returns the book id
-  the path now belongs to. There is no second way into the index; every
-  guard a new book needs lives in `createBook`.
+  the path now belongs to along with whether it created one. There is no
+  second way into the index; every guard a new book needs lives in
+  `createBook`.
+- `MatchedSuffix`, `BookFormat` and `ExtractMetadata` are exported because
+  `internal/importer` must agree with a sweep about what a file is, what
+  its format is called and what it holds. `ExtractMetadata` takes the
+  fallback title and returns the parse error, since a sweep names a path
+  and a preview names an upload.
 - A `.part` file and `.applibris-write-probe` are invisible to a sweep by
   suffix. Nothing else must acquire a supported suffix before it is whole.
 - The watcher never reads, hashes or parses a file. It pokes the one scan
@@ -327,9 +336,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Staging is bounded in total bytes, not in stages. The reservation is taken
   at the cap before the copy and corrected after, and given back by every
   path that drops a staged file.
-- Confirm never trusts the preview's verdict. `IndexFile`'s answer is the
-  truth, and an already-indexed outcome at confirm is a second location,
-  not an error.
+- Confirm does not re-check a `new` or `title-match` verdict: it copies,
+  and `IndexFile`'s answer is the truth, so landing on a book the index
+  already had is a second location and not an error. `exists` is the one
+  verdict that decides anything at confirm, because reaching it deleted the
+  staged file — there is nothing left to copy and the existing book id is
+  the answer.
 - A failed `IndexFile` leaves the library file in place. Never delete a
   file the library already holds over an index error.
 - The index write runs on `context.WithoutCancel`, because the library owns
@@ -358,14 +370,22 @@ tidy-up would break. The note named in the heading carries the reasoning.
   left at that name.
 - Staged state is in memory and on `os.TempDir()`. Nothing about a stage is
   written to the database, and `importer.New` wipes the staging directory.
+- A `Stager` exists exactly when importing is available; there is no
+  disabled `Stager`. `cmd/server` builds one only when the probe succeeds,
+  and `internal/service` answers a nil one with `ErrImportDisabled`, the
+  convention `Notify` follows. Never add a second disabled state inside the
+  importer.
+- Whether the nav offers Import comes from `svc.ImportEnabled()`, not from
+  a flag threaded down beside `sendEnabled` and `enrichEnabled`: those two
+  are configuration the service never sees, where the importer is its own.
 - The write probe runs once at startup. A per-request check would answer
   differently only when confirm is about to report its own error.
 - A repeated confirm answers the first call's book id rather than copying
   the file in again, which is why the record outlives the confirm.
 - `internal/importer` imports `internal/scanner`, so `internal/scanner`'s
   in-package tests cannot import `internal/service`. `capmetadata_test.go`
-  is `package scanner_test` over `export_test.go` for that reason; do not
-  move it back.
+  is `package scanner_test` over `export_test.go` for that reason; it may
+  not live in `package scanner`.
 - `cmd/server`'s `TestMain` points `TMPDIR` at a directory of its own,
   because `run()` derives the staging directory from `os.TempDir()` and
   `importer.New` wipes it — without that, the package's tests delete a
