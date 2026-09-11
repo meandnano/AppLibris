@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"library/internal/cover"
 	"library/internal/epub"
 	"library/internal/fb2"
 	"library/internal/scanner"
@@ -111,11 +112,15 @@ type stage struct {
 	// into a second copy of the same bytes.
 	confirm sync.Mutex
 
-	staged  Staged
-	path    string
-	hash    string
-	cover   []byte
-	created time.Time
+	staged Staged
+	path   string
+	hash   string
+	// cover is the embedded cover, and coverType the media type
+	// cover.ContentType decided for it. Both are empty for a book with no
+	// cover and for one whose cover is not an image this app would store.
+	cover     []byte
+	coverType string
+	created   time.Time
 	// done marks a stage whose bytes the library has taken over, so a
 	// repeated confirm answers rather than copying the file in twice.
 	// bookID is the book it landed under, 0 when the copy succeeded and
@@ -236,11 +241,26 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 	}
 
 	meta := readMetadata(staged, suffix, name)
+
+	// Decided here rather than where the bytes are served, so HasCover
+	// means "a cover this app would keep" and the preview stops promising
+	// one the import would then drop. It is also what stops the preview
+	// route handing a browser a media type an uploaded file chose: see
+	// cover.ContentType.
+	coverType := ""
+	if len(meta.Cover) > 0 {
+		var err error
+		if coverType, err = cover.ContentType(meta.Cover); err != nil {
+			slog.Debug("staged cover is not a usable image", "name", name, "error", err)
+			meta.Cover = nil
+		}
+	}
+
 	record := &stage{
 		staged: Staged{
 			ID:            id,
 			OriginalName:  name,
-			LibraryName:   libraryName(libraryStem(name, meta.Title, id, suffix), suffix),
+			LibraryName:   libraryName(libraryStem(name, meta.Title, id, suffix), suffix, 1),
 			Format:        bookFormat(suffix),
 			Size:          size,
 			Title:         meta.Title,
@@ -252,10 +272,11 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 			Description:   meta.Description,
 			HasCover:      len(meta.Cover) > 0,
 		},
-		path:    staged,
-		hash:    hash,
-		cover:   meta.Cover,
-		created: s.now(),
+		path:      staged,
+		hash:      hash,
+		cover:     meta.Cover,
+		coverType: coverType,
+		created:   s.now(),
 	}
 
 	if err := s.decideVerdict(ctx, record); err != nil {
@@ -347,22 +368,29 @@ func (s *Stager) Get(id string) (Staged, bool) {
 	return record.staged, true
 }
 
-// Cover returns the cover bytes a staged file had embedded, for the
-// preview's own image, or nil when it had none.
+// Cover returns the cover a staged file had embedded, with the media type
+// cover.ContentType decided for it, or ok false when it had none this app
+// would keep.
+//
+// The type is returned rather than left to whoever serves the bytes,
+// because sniffing them is the mistake: they are an uploaded file's choice,
+// and a "cover" that is really an HTML document sniffs as text/html. Stage
+// has already established that these bytes decode as an image, so the type
+// comes from the decoder that read the header.
 //
 // The bytes are held in memory rather than stored: they are the same ones
 // internal/scanner holds per file while a sweep runs, each format package
 // has already capped what it read, and writing a thumbnail into COVERS_DIR
 // for a book that may never be imported would put a file there that nothing
 // owns.
-func (s *Stager) Cover(id string) ([]byte, bool) {
+func (s *Stager) Cover(id string) (data []byte, contentType string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	record, ok := s.stages[id]
-	if !ok || s.expired(record) || len(record.cover) == 0 {
-		return nil, false
+	record, found := s.stages[id]
+	if !found || s.expired(record) || len(record.cover) == 0 {
+		return nil, "", false
 	}
-	return record.cover, true
+	return record.cover, record.coverType, true
 }
 
 // Confirm copies the staged file into the library and indexes it, returning
@@ -432,13 +460,15 @@ func (s *Stager) Confirm(ctx context.Context, id string) (int64, error) {
 }
 
 // copyIntoLibrary writes the staged bytes to a claimed <name>.part and
-// renames it onto <name>, which is the only way anything in this package
-// creates a supported suffix in the library directory.
+// publishes it under a name nothing else holds, which is the only way
+// anything in this package creates a supported suffix in the library
+// directory. A sweep or the watcher meeting the copy sees only the .part,
+// which matchedSuffix answers "" for.
 //
-// A copy and not a rename from the staging directory: those are different
-// filesystems in every deployment that matters, and os.Rename across them
-// fails. Sync before the rename, so a machine that loses power between the
-// two has either no file or the whole one.
+// A copy and not a rename out of staging: those are different filesystems
+// in every deployment that matters, and os.Rename across them fails. Sync
+// before publishing, so a machine that loses power between the two has
+// either no file or the whole one.
 func (s *Stager) copyIntoLibrary(record *stage) (string, error) {
 	src, err := os.Open(record.path)
 	if err != nil {
@@ -449,11 +479,10 @@ func (s *Stager) copyIntoLibrary(record *stage) (string, error) {
 	suffix := suffixOf(record.path)
 	stem := libraryStem(record.staged.OriginalName, record.staged.Title, record.staged.ID, suffix)
 
-	dst, name, err := createPart(s.libraryDir, stem, suffix)
+	dst, part, err := claimPart(s.libraryDir, stem, suffix)
 	if err != nil {
 		return "", err
 	}
-	part := filepath.Join(s.libraryDir, name+partSuffix)
 
 	if _, err := io.Copy(dst, src); err != nil {
 		dst.Close()
@@ -469,7 +498,9 @@ func (s *Stager) copyIntoLibrary(record *stage) (string, error) {
 		os.Remove(part)
 		return "", err
 	}
-	if err := os.Rename(part, filepath.Join(s.libraryDir, name)); err != nil {
+
+	name, err := publish(s.libraryDir, part, stem, suffix)
+	if err != nil {
 		os.Remove(part)
 		return "", err
 	}

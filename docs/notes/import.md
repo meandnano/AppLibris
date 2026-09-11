@@ -85,6 +85,33 @@ directory. The preview runs a second, separate parse purely to have
 something to show; what is actually stored comes from the scanner during
 indexing.
 
+## A cover is not an image until something says so
+
+Neither format reader validates what it hands back as a cover.
+`internal/epub` returns whatever zip entry the manifest's `cover-image`
+href names, without reading that item's declared `media-type`;
+`internal/fb2` returns whatever a `<binary>` element decodes to, without
+reading its `content-type`. That costs nothing on the way into
+`cover.Store`, which decodes before it writes.
+
+It is not free on the way to a browser. The preview serves its cover from
+the stage, because a staged book has no entry in `COVERS_DIR` and must not
+acquire one before anybody has said to keep it — so those bytes go out over
+HTTP, and sniffing them would let an uploaded file choose the media type.
+An EPUB whose manifest points `cover-image` at an HTML document would come
+back as `text/html` from this app's own origin, which is the origin
+`sameSiteOnly` admits.
+
+So `Stage` runs the bytes through `cover.ContentType`, the same header read
+`cover.Store` makes, and keeps the type the decoder named. A cover that
+fails is dropped, which also makes the preview honest: `HasCover` means "a
+cover this app would keep", so the page stops promising one the import would
+then discard. The route serves that recorded type and never
+`http.DetectContentType`, under `X-Content-Type-Options: nosniff` — which
+every route serving bytes rather than a rendered template carries, since one
+rule about media types is easier to hold than a per-route judgment about
+which bytes are trusted.
+
 ## The three verdicts
 
 `Stage` looks the content hash up before it returns, so the preview carries
@@ -123,14 +150,29 @@ false positives are annoying to undo.
    stage id, which cannot be empty. If the name is taken, ` (2)`, ` (3)` and
    so on go before the suffix.
 2. **Copy.** The bytes go to `<name>.part`, opened `O_CREATE|O_EXCL`, then
-   `Sync`, close and `Rename` onto `<name>`. Neither the scanner nor the
-   watcher acts on a `.part` suffix, so a half-written file is never
-   indexed, and the rename is what publishes it. The claim is two-sided: an
-   `Lstat` rules out a name the library already holds, and the `O_EXCL`
-   rules out a name another confirm is copying into right now.
-3. **Index.** `scanner.IndexFile` in the confirming request, so the
+   `Sync` and close. Neither the scanner nor the watcher acts on a `.part`
+   suffix, so a half-written file is never indexed.
+3. **Publish.** `os.Link` the finished part onto the first free name, then
+   unlink the part. The link is the test-and-set, and that is the whole
+   reason it is a link: it fails `EEXIST` rather than replacing, where
+   `os.Rename` silently destroys whatever is at the name. The rule for this
+   directory is that writes only ever create new paths
+   (`docs/notes/design.md`), and the seconds a large copy takes are long
+   enough for something else to have created this one — a person dropping a
+   file into the pile they manage by hand is the ordinary case, not an
+   exotic one. A name taken since the claim costs one link attempt and
+   nothing else: the part already holds the bytes, so the next candidate is
+   linked from the same data rather than copied again.
+
+   The `.part` name and the published name are therefore chosen separately,
+   and need not match. A filesystem with no hard links at all — exFAT, some
+   SMB mounts, a few volume drivers — falls back to `Lstat` then `Rename`,
+   logged once, and there the window stays open; refusing to import would
+   break a working deployment over a race that only opens when something
+   else writes the same name mid-copy.
+4. **Index.** `scanner.IndexFile` in the confirming request, so the
    response can redirect to the book.
-4. **Clean up.** The staged file and the record go.
+5. **Clean up.** The staged file and the record go.
 
 A copy and not a rename out of staging, because `/tmp` and `/library` are
 different filesystems in every deployment that matters and `os.Rename`
@@ -141,7 +183,7 @@ discard the bytes over a database error, and the next sweep is the recovery
 the scanner already promises; the response says so, and the log carries a
 Warn.
 
-A crash between the copy and the rename leaves a `<name>.part` in the
+A crash between the copy and the publish leaves a `<name>.part` in the
 library. Startup does not remove it: it cannot know the file is this app's
 rather than a download someone is running into the same directory, and
 `.part` is the suffix downloaders use. It is the one manual tidy-up this
@@ -174,8 +216,14 @@ fixtures.
 
 ## Writability is probed once, at startup
 
-`cmd/server` creates and removes `LIBRARY_DIR/.applibris-write-probe` after
-resolving the directory. On failure importing is off for the run, at Warn,
+`cmd/server` clears, creates and removes
+`LIBRARY_DIR/.applibris-write-probe` after resolving the directory. It is
+cleared first because the create refuses a name that is already taken: a
+probe left by a crash, or by the remove failing, would otherwise answer "not
+writable" for every later start of a perfectly writable library. The create
+keeps `O_EXCL` so it cannot follow a symlink left at that name, and
+`os.Remove` unlinks such a link rather than its target, so neither call
+reaches the far end. On failure importing is off for the run, at Warn,
 naming the uid the process runs as and the uid that owns the directory — the
 same two facts `mkdirError` names, and for the same reason.
 

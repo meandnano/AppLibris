@@ -3,10 +3,12 @@ package importer
 import (
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -22,13 +24,18 @@ const maxStemBytes = 200
 // atomic.
 const partSuffix = ".part"
 
-// maxNameAttempts bounds the collision loop. Reaching it means two hundred
+// maxNameAttempts bounds the name search. Reaching it means two hundred
 // files already share one name, which is a library nobody has; the bound is
-// there so a filesystem lying about O_EXCL cannot spin.
+// there so a filesystem lying about O_EXCL or link cannot spin.
 const maxNameAttempts = 200
 
-// errNameExhausted is what the collision loop gives up with.
+// errNameExhausted is what the name search gives up with.
 var errNameExhausted = errors.New("importer: too many files already share that name")
+
+// noHardLinks is logged at most once per process. A filesystem without hard
+// links is a property of the deployment, not of the import, so a line per
+// imported book would say the same thing forever.
+var noHardLinks sync.Once
 
 // libraryStem derives the part of a library filename that comes from the
 // upload, without the suffix.
@@ -107,45 +114,108 @@ func sanitizeStem(raw string) string {
 	return strings.TrimRight(cleaned, ". ")
 }
 
-// libraryName is the name stem takes with suffix on it, and what the
-// preview shows. The collision marker createPart may add is not in it: a
-// name is only contested at the moment it is claimed, and a preview that
-// promised "Dune (2).epub" for a file imported before anything collided
-// would be wrong more often than it was right.
-func libraryName(stem, suffix string) string {
+// libraryName is the name stem takes with suffix on it at attempt n, which
+// is 1 for the plain name and counts up through the " (2)", " (3)" markers.
+//
+// One derivation, used by the claim and by both publish paths, so the name
+// a copy is written under and the names it is offered to cannot drift.
+// What the preview shows is attempt 1: a name is only contested at the
+// moment it is claimed, and promising "Dune (2).epub" for a file imported
+// before anything collided would be wrong more often than right.
+func libraryName(stem, suffix string, n int) string {
+	if n > 1 {
+		return stem + " (" + strconv.Itoa(n) + ")" + suffix
+	}
 	return stem + suffix
 }
 
-// createPart claims a name under dir and opens the .part file the copy goes
-// into, returning it along with the name it will be renamed to.
+// claimPart opens the temporary file a copy is written to, and reports its
+// path.
 //
-// Both halves of the claim are needed. The Lstat rules out a name the
-// library already holds, which has no .part beside it; the O_EXCL rules out
-// a name another confirm is copying into right now, which the Lstat cannot
-// see. Together they mean two confirms of different bytes offered under one
-// name get two files rather than one truncated one.
-func createPart(dir, stem, suffix string) (*os.File, string, error) {
+// The name only has to be free, not final: publish decides what the file
+// ends up called, so a claim that took "Dune.epub.part" may well publish as
+// "Dune (2).epub". It is named after a candidate anyway, rather than after
+// the stage id, because a person looking into the library mid-copy should
+// be able to see what is arriving.
+func claimPart(dir, stem, suffix string) (*os.File, string, error) {
 	for n := 1; n <= maxNameAttempts; n++ {
-		name := libraryName(stem, suffix)
-		if n > 1 {
-			name = libraryName(stem+" ("+strconv.Itoa(n)+")", suffix)
-		}
+		path := filepath.Join(dir, libraryName(stem, suffix, n)+partSuffix)
 
-		switch _, err := os.Lstat(filepath.Join(dir, name)); {
-		case err == nil:
-			continue
-		case !errors.Is(err, fs.ErrNotExist):
-			return nil, "", err
-		}
-
-		f, err := os.OpenFile(filepath.Join(dir, name+partSuffix), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		switch {
 		case errors.Is(err, fs.ErrExist):
 			continue
 		case err != nil:
 			return nil, "", err
 		}
-		return f, name, nil
+		return f, path, nil
 	}
 	return nil, "", errNameExhausted
+}
+
+// publish gives the completed part file its library name and reports the
+// name it got. It is the only thing in this package that creates a
+// supported suffix in the library directory.
+//
+// os.Link is the test-and-set, and that is the whole point of it: it fails
+// fs.ErrExist rather than replacing, where os.Rename silently destroys
+// whatever is at the name. docs/notes/design.md's rule for the library
+// directory is that writes only ever create new paths, and the seconds a
+// large copy takes are long enough for something else to have created this
+// one — a person dropping a file into the pile they manage by hand is the
+// ordinary case, not an exotic one.
+//
+// A name taken since the claim costs a link attempt and nothing else: the
+// part file already holds the bytes, so the next candidate is linked from
+// the same data rather than copied again.
+func publish(dir, part, stem, suffix string) (string, error) {
+	for n := 1; n <= maxNameAttempts; n++ {
+		name := libraryName(stem, suffix, n)
+
+		err := os.Link(part, filepath.Join(dir, name))
+		switch {
+		case errors.Is(err, fs.ErrExist):
+			continue
+		case err == nil:
+			// The part is now a second name for bytes the library already
+			// holds under the first, so unlinking it publishes nothing and
+			// loses nothing.
+			os.Remove(part)
+			return name, nil
+		}
+
+		// Not every filesystem has hard links: exFAT, some SMB mounts and
+		// a few volume drivers refuse. Refusing to import there would
+		// break a working deployment over a window that only opens when
+		// something else writes the same name mid-copy, so it falls back
+		// to the replacing primitive and says so once.
+		noHardLinks.Do(func() {
+			slog.Warn("the library filesystem does not support hard links, so an import is published by rename, which replaces whatever is at the name it lands on",
+				"dir", dir, "error", err)
+		})
+		return renamePublish(dir, part, stem, suffix)
+	}
+	return "", errNameExhausted
+}
+
+// renamePublish is publish without the atomic test-and-set, for a
+// filesystem that offers none. The Lstat narrows the window; nothing here
+// can close it.
+func renamePublish(dir, part, stem, suffix string) (string, error) {
+	for n := 1; n <= maxNameAttempts; n++ {
+		name := libraryName(stem, suffix, n)
+		path := filepath.Join(dir, name)
+
+		switch _, err := os.Lstat(path); {
+		case err == nil:
+			continue
+		case !errors.Is(err, fs.ErrNotExist):
+			return "", err
+		}
+		if err := os.Rename(part, path); err != nil {
+			return "", err
+		}
+		return name, nil
+	}
+	return "", errNameExhausted
 }

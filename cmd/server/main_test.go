@@ -18,6 +18,29 @@ import (
 	"library/internal/storage"
 )
 
+// TestMain points TMPDIR at one directory for the whole package.
+//
+// run() derives its import staging directory from os.TempDir(), and
+// importer.New wipes that directory — so without this, `go test
+// ./cmd/server` deletes the staged uploads of a `make run` server on the
+// same machine. It is here rather than in each of the nine tests that call
+// run() because the failure is silent, lands outside the repository, and
+// the tenth such test is exactly the one that would be written without the
+// line. t.TempDir resolves through TMPDIR too, so every test's own
+// directory lands underneath this one and goes with it.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "applibris-cmd-server-tests")
+	if err != nil {
+		panic("create the test temporary directory: " + err.Error())
+	}
+	os.Setenv("TMPDIR", dir)
+
+	code := m.Run()
+
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // A serving failure (an occupied address, here) must still cancel and wait
 // for the background scan before closing the database — not race ahead of
 // it. There's no way to directly observe "no goroutine leaked" without
@@ -790,6 +813,50 @@ func TestProbeWritableDisablesImportOnAReadOnlyLibrary(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "running as uid") || !strings.Contains(logs.String(), "owned by uid") {
 		t.Errorf("the warning names neither side of the mismatch:\n%s", logs.String())
+	}
+}
+
+// A probe left by a crash between the create and the remove must not
+// disable importing for every later start: the open refuses a name that is
+// already taken, so the probe has to clear the name before claiming it.
+func TestProbeWritableSurvivesAStaleProbeFile(t *testing.T) {
+	libDir := t.TempDir()
+	stale := filepath.Join(libDir, writeProbeName)
+	if err := os.WriteFile(stale, []byte("from a run that crashed"), 0o600); err != nil {
+		t.Fatalf("write the stale probe: %v", err)
+	}
+
+	if !probeWritable(libDir) {
+		t.Fatal("probeWritable reported a writable directory unwritable because of a stale probe")
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the stale probe is still there: %v", err)
+	}
+}
+
+// The probe never writes through a link left at its name. os.Remove unlinks
+// the link itself, and O_EXCL would refuse to follow one anyway, so the far
+// end is untouched either way.
+func TestProbeWritableNeverWritesThroughASymlink(t *testing.T) {
+	libDir := t.TempDir()
+
+	target := filepath.Join(t.TempDir(), "precious")
+	if err := os.WriteFile(target, []byte("do not touch"), 0o600); err != nil {
+		t.Fatalf("write the target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(libDir, writeProbeName)); err != nil {
+		t.Fatalf("symlink the probe name: %v", err)
+	}
+
+	if !probeWritable(libDir) {
+		t.Fatal("probeWritable reported a writable directory unwritable")
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read the target: %v", err)
+	}
+	if string(content) != "do not touch" {
+		t.Errorf("the link's target reads %q, want it untouched", content)
 	}
 }
 

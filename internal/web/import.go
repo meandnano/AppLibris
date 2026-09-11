@@ -272,17 +272,27 @@ func importDiscardHandler(svc *service.Service) http.HandlerFunc {
 // importCoverHandler serves GET /import/{id}/cover: the cover a staged file
 // had embedded, straight from the stage.
 //
+// The type is the one the service carries, decided by a decoder that read
+// the image's header, and never http.DetectContentType over these bytes:
+// they are an uploaded file's own choice of what to call a cover, and
+// neither format reader checks that the thing is an image. Sniffing a
+// "cover" that is really an HTML document would answer text/html from this
+// app's origin, which is the origin sameSiteOnly admits. nosniff is the
+// second half of the same rule — the browser must not re-decide a type the
+// server has named.
+//
 // no-store rather than a max-age: the id is single-use and the bytes are
 // gone within half an hour either way, so anything a cache kept would only
 // ever be served back to the one tab that asked.
 func importCoverHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cover := svc.StagedCover(r.PathValue("id"))
+		cover, contentType := svc.StagedCover(r.PathValue("id"))
 		if len(cover) == 0 {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", http.DetectContentType(cover))
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(cover)
 	}
@@ -364,6 +374,20 @@ var errNoFileChosen = errors.New("web: no file was chosen")
 // signature reads as what it is rather than as a mime detail.
 type multipartFile struct{ io.Reader }
 
+// uploadWindow is how long a body of the given size is given to arrive.
+//
+// A pure function so the sizing is testable: the call below runs against a
+// real server and not against httptest's recorder, which has no
+// SetReadDeadline at all — so a rule written only inside that call would be
+// asserted by nothing.
+func uploadWindow(bytes int64) time.Duration {
+	window := time.Duration(bytes/uploadRate) * time.Second
+	if window < minUploadWindow {
+		return minUploadWindow
+	}
+	return window
+}
+
 // extendReadDeadline gives this one request long enough to receive a body
 // the size of the cap.
 //
@@ -374,11 +398,7 @@ type multipartFile struct{ io.Reader }
 // A server that does not support the control is left alone: the global
 // timeout then applies, which is the behaviour this replaces.
 func extendReadDeadline(w http.ResponseWriter, bytes int64) {
-	window := time.Duration(bytes/uploadRate) * time.Second
-	if window < minUploadWindow {
-		window = minUploadWindow
-	}
-	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(window)); err != nil {
+	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadWindow(bytes))); err != nil {
 		slog.Debug("could not extend the upload read deadline", "error", err)
 	}
 }

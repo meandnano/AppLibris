@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -12,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"library/internal/importer"
 	"library/internal/service"
@@ -31,24 +35,64 @@ const importOPFTemplate = `<?xml version="1.0"?>
     <dc:title>%s</dc:title>
     <dc:creator>%s</dc:creator>
   </metadata>
-  <manifest></manifest>
+  <manifest>%s</manifest>
 </package>`
+
+const importCoverManifestItem = `<item id="cover-image" href="cover.png" media-type="image/png" properties="cover-image"/>`
+
+// importSolidPNG builds a small valid PNG, mirroring internal/cover's
+// helper of the same shape — a cover here only has to decode.
+func importSolidPNG(t *testing.T) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, 20, 30))
+	for y := range 30 {
+		for x := range 20 {
+			img.Set(x, y, color.RGBA{R: 0x66, G: 0x44, B: 0x22, A: 0xff})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
 
 func importEPUB(t *testing.T, title, author string, padding int) []byte {
 	t.Helper()
+	return importEPUBWithCover(t, title, author, padding, nil)
+}
+
+// importEPUBWithCover declares a cover in the manifest and writes coverBytes
+// at it verbatim, so a caller can put something that is not an image there —
+// the shape an upload uses to try to choose what the preview route serves.
+func importEPUBWithCover(t *testing.T, title, author string, padding int, coverBytes []byte) []byte {
+	t.Helper()
+
+	manifest := ""
+	if coverBytes != nil {
+		manifest = importCoverManifestItem
+	}
 
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for name, content := range map[string]string{
 		"mimetype":               "application/epub+zip",
 		"META-INF/container.xml": importContainerXML,
-		"OEBPS/content.opf":      fmt.Sprintf(importOPFTemplate, title, author),
+		"OEBPS/content.opf":      fmt.Sprintf(importOPFTemplate, title, author, manifest),
 	} {
 		w, err := zw.Create(name)
 		if err != nil {
 			t.Fatalf("create %s in zip: %v", name, err)
 		}
 		w.Write([]byte(content))
+	}
+	if coverBytes != nil {
+		w, err := zw.Create("OEBPS/cover.png")
+		if err != nil {
+			t.Fatalf("create cover.png in zip: %v", err)
+		}
+		w.Write(coverBytes)
 	}
 	if padding > 0 {
 		w, err := zw.Create("OEBPS/pad.bin")
@@ -420,17 +464,91 @@ func TestEveryImportPOSTRefusesACrossSiteRequest(t *testing.T) {
 	}
 }
 
-func TestImportCoverIsServedFromTheStage(t *testing.T) {
+func TestImportCoverIsServedWithTheTypeADecoderDecided(t *testing.T) {
 	handler, _, _ := newImportHandler(t, 1<<20)
 
-	// This fixture carries no cover, so the route has nothing to serve and
-	// says so rather than answering an empty body.
+	art := importSolidPNG(t)
+	id := stagedID(t, upload(t, handler, "Dune.epub", importEPUBWithCover(t, "Dune", "Frank Herbert", 0, art), true).Body.String())
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import/"+id+"/cover", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/png" {
+		t.Errorf("Content-Type = %q, want %q", got, "image/png")
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), art) {
+		t.Errorf("the route served %d bytes, want the %d embedded", rec.Body.Len(), len(art))
+	}
+}
+
+func TestImportCoverIs404ForABookWithout(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
 	id := stagedID(t, upload(t, handler, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 0), true).Body.String())
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import/"+id+"/cover", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 for a book with no cover", rec.Code)
+	}
+}
+
+// An EPUB manifest can point cover-image at anything in the archive, and
+// internal/epub hands those bytes over without deciding they are an image.
+// If the route sniffed them, an HTML document would come back as text/html
+// from this app's own origin — which is same-origin, the thing sameSiteOnly
+// admits. It must never be served at all.
+func TestImportCoverRefusesBytesThatAreNotAnImage(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	html := []byte(`<!doctype html><script>fetch("/recipients/remove",{method:"POST"})</script>`)
+	body := upload(t, handler, "Dune.epub", importEPUBWithCover(t, "Dune", "Frank Herbert", 0, html), true).Body.String()
+	id := stagedID(t, body)
+
+	if strings.Contains(body, "/cover") {
+		t.Errorf("the preview offers a cover it should have dropped:\n%s", body)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import/"+id+"/cover", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); strings.Contains(got, "text/html") {
+		t.Errorf("Content-Type = %q: the route served an HTML document from this origin", got)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("<script")) {
+		t.Error("the route served the uploaded script back")
+	}
+}
+
+// The window is sized here rather than only inside extendReadDeadline
+// because httptest's recorder has no SetReadDeadline, so that call is a
+// no-op under every handler test in this package.
+func TestUploadWindowScalesFromTheCapAboveItsFloor(t *testing.T) {
+	cases := []struct {
+		bytes int64
+		want  time.Duration
+	}{
+		{bytes: 0, want: minUploadWindow},
+		{bytes: 1 << 20, want: minUploadWindow},
+		{bytes: 29 << 20, want: minUploadWindow}, // still under the floor
+		{bytes: 64 << 20, want: 64 * time.Second},
+		{bytes: 512 << 20, want: 512 * time.Second},
+	}
+	for _, tt := range cases {
+		if got := uploadWindow(tt.bytes); got != tt.want {
+			t.Errorf("uploadWindow(%d) = %s, want %s", tt.bytes, got, tt.want)
+		}
+	}
+	if uploadWindow(64<<20) < minUploadWindow {
+		t.Error("the window may only ever lengthen what cmd/server's ReadTimeout already allows")
 	}
 }
 

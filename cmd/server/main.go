@@ -393,6 +393,11 @@ func run(ctx context.Context) error {
 // writeProbeName is the file probeWritable creates and removes. It begins
 // with a dot and carries no supported suffix, so a sweep that overlaps it
 // walks past it: the scanner indexes neither.
+//
+// One fixed name rather than a unique one per run, so a crash between the
+// create and the remove litters at most one file however many times the
+// process restarts — which is only safe because the probe clears the name
+// before claiming it.
 const writeProbeName = ".applibris-write-probe"
 
 // probeWritable reports whether the process can create a file in dir, which
@@ -410,16 +415,31 @@ const writeProbeName = ".applibris-write-probe"
 // first thing that goes wrong in a container.
 func probeWritable(dir string) bool {
 	path := filepath.Join(dir, writeProbeName)
+
+	// Cleared before it is claimed, because the open below refuses a name
+	// that is already taken: a probe left behind by a crash, or by the
+	// remove at the end failing, would otherwise answer "not writable" for
+	// every later start of a perfectly writable library. The error is
+	// dropped on purpose — a directory that may not be written fails this
+	// too, and the open is the call whose failure actually describes why.
+	os.Remove(path)
+
+	// O_EXCL and not a plain create, so the open refuses to follow a
+	// symlink someone left at this name rather than writing through it to
+	// whatever it points at. os.Remove above unlinks such a link itself
+	// rather than its target, so the pair never touches the far end.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		slog.Warn("importing disabled", "error", importProbeError(dir, err))
 		return false
 	}
 	f.Close()
-	// A probe left behind is the one piece of litter this can produce, so
-	// it is worth a line of its own: it is harmless, the scanner ignores
-	// it, and the next run reuses the name.
-	if err := os.Remove(path); err != nil {
+
+	// Worth a line of its own: the file is harmless and the scanner ignores
+	// it, but it is the one piece of litter this can leave in a directory
+	// the person manages by hand. Already gone is not a failure — a
+	// concurrent start clearing it is doing this function's own work.
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		slog.Warn("could not remove the library write probe", "path", path, "error", err)
 	}
 	return true

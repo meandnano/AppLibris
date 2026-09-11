@@ -1,6 +1,8 @@
 package importer
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,46 +56,118 @@ func TestLibraryStemSanitisesWhatTheClientOffered(t *testing.T) {
 	})
 }
 
-func TestCreatePartClaimsAFreeNameAndOnlyEverWritesAPart(t *testing.T) {
+// The copy in progress carries no supported suffix, so neither a sweep nor
+// the watcher can act on it, and only publish creates the final name.
+func TestClaimPartOnlyEverOpensAPartFile(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "Dune.epub"), []byte("first"))
 
-	f, name, err := createPart(dir, "Dune", ".epub")
+	f, part, err := claimPart(dir, "Dune", ".epub")
 	if err != nil {
-		t.Fatalf("createPart: %v", err)
+		t.Fatalf("claimPart: %v", err)
 	}
 	defer f.Close()
 
-	if name != "Dune (2).epub" {
-		t.Errorf("createPart named %q, want %q", name, "Dune (2).epub")
+	if got := filepath.Base(part); got != "Dune.epub.part" {
+		t.Errorf("claimPart opened %q, want %q", got, "Dune.epub.part")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "Dune (2).epub.part")); err != nil {
-		t.Errorf("the claim did not create the .part file: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "Dune (2).epub")); err == nil {
-		t.Error("createPart created the final name, which only the rename may")
+	if _, err := os.Stat(filepath.Join(dir, "Dune.epub")); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("claimPart created the final name, which only publish may")
 	}
 }
 
-// Two claims in flight over one name get two names: the Lstat rules out
-// what the library already holds, and the O_EXCL rules out what another
-// claim is copying into right now.
-func TestCreatePartSkipsANameAnotherClaimHolds(t *testing.T) {
+// Two claims in flight get two part files, so one copy can never write into
+// another's.
+func TestClaimPartSkipsAPartAnotherCopyHolds(t *testing.T) {
 	dir := t.TempDir()
 
-	first, firstName, err := createPart(dir, "Dune", ".epub")
+	first, firstPart, err := claimPart(dir, "Dune", ".epub")
 	if err != nil {
-		t.Fatalf("createPart: %v", err)
+		t.Fatalf("claimPart: %v", err)
 	}
 	defer first.Close()
 
-	second, secondName, err := createPart(dir, "Dune", ".epub")
+	second, secondPart, err := claimPart(dir, "Dune", ".epub")
 	if err != nil {
-		t.Fatalf("createPart: %v", err)
+		t.Fatalf("claimPart: %v", err)
 	}
 	defer second.Close()
 
-	if firstName != "Dune.epub" || secondName != "Dune (2).epub" {
-		t.Errorf("createPart named %q then %q, want %q then %q", firstName, secondName, "Dune.epub", "Dune (2).epub")
+	if filepath.Base(firstPart) != "Dune.epub.part" || filepath.Base(secondPart) != "Dune (2).epub.part" {
+		t.Errorf("claimPart opened %q then %q, want Dune.epub.part then Dune (2).epub.part",
+			filepath.Base(firstPart), filepath.Base(secondPart))
+	}
+}
+
+func TestPublishSidestepsANameTheLibraryHolds(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Dune.epub"), []byte("an earlier book"))
+	part := writeFile(t, filepath.Join(dir, "Dune.epub.part"), []byte("the new one"))
+
+	name, err := publish(dir, part, "Dune", ".epub")
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if name != "Dune (2).epub" {
+		t.Errorf("publish named %q, want %q", name, "Dune (2).epub")
+	}
+	if _, err := os.Stat(part); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("publish left the part file behind: %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "Dune.epub")); got != "an earlier book" {
+		t.Errorf("the book already there now reads %q", got)
+	}
+	if got := readFile(t, filepath.Join(dir, "Dune (2).epub")); got != "the new one" {
+		t.Errorf("the published file reads %q", got)
+	}
+}
+
+// The whole reason publish links rather than renames: a name that appears
+// between the claim and the publish must cost the import its first choice,
+// never cost the library the file that took it. os.Rename would replace it
+// without a word.
+func TestPublishNeverReplacesAFileThatAppearedDuringTheCopy(t *testing.T) {
+	dir := t.TempDir()
+
+	// The claim happens against an empty directory, exactly as a confirm's
+	// does.
+	f, part, err := claimPart(dir, "Dune", ".epub")
+	if err != nil {
+		t.Fatalf("claimPart: %v", err)
+	}
+	if _, err := f.WriteString("the import"); err != nil {
+		t.Fatalf("write the part: %v", err)
+	}
+	f.Close()
+
+	// Somebody drops a file of that name into the library while the copy
+	// is running — the pile is one a person manages by hand, so this is
+	// the ordinary case rather than an exotic one.
+	writeFile(t, filepath.Join(dir, "Dune.epub"), []byte("dropped in by hand"))
+
+	name, err := publish(dir, part, "Dune", ".epub")
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if name != "Dune (2).epub" {
+		t.Errorf("publish named %q, want it to have stepped aside to %q", name, "Dune (2).epub")
+	}
+	if got := readFile(t, filepath.Join(dir, "Dune.epub")); got != "dropped in by hand" {
+		t.Errorf("the hand-dropped file now reads %q: publishing replaced it", got)
+	}
+}
+
+func TestLibraryNameCountsUpFromThePlainName(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{n: 1, want: "Dune.epub"},
+		{n: 2, want: "Dune (2).epub"},
+		{n: 10, want: "Dune (10).epub"},
+	}
+	for _, tt := range cases {
+		if got := libraryName("Dune", ".epub", tt.n); got != tt.want {
+			t.Errorf("libraryName(n=%d) = %q, want %q", tt.n, got, tt.want)
+		}
 	}
 }

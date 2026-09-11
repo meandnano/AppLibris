@@ -266,16 +266,59 @@ func TestConcurrentConfirmsOfOneNameGetTwoFiles(t *testing.T) {
 	}
 }
 
-// The stage is gone half an hour after it was made, its file with it, and a
-// click on the tab that made it says so rather than acting on a file the
-// janitor deleted a moment ago.
-func TestAStageExpires(t *testing.T) {
+// The janitor is what reclaims a stage nobody came back to. Confirm is
+// deliberately not called first: it removes an expired record itself, so a
+// test that confirmed before sweeping would pass with sweep's body deleted.
+func TestTheJanitorReclaimsAnExpiredStage(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 
 	now := time.Now()
-	clock := func() time.Time { return now }
-	stager, libraryDir := testStagerAt(t, db, 1<<20, clock)
+	stager, libraryDir := testStagerAt(t, db, 1<<20, func() time.Time { return now })
+
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if names := stagingNames(t, stager); len(names) != 1 {
+		t.Fatalf("staging holds %v, want the one staged file", names)
+	}
+
+	// One second short of the time to live, the janitor must leave it be:
+	// a sweep that reclaimed everything would pass the assertions below
+	// without expiry meaning anything.
+	now = now.Add(StageTTL - time.Second)
+	stager.sweep()
+	if names := stagingNames(t, stager); len(names) != 1 {
+		t.Fatalf("the janitor reclaimed a live stage, leaving %v", names)
+	}
+	if _, ok := stager.Get(staged.ID); !ok {
+		t.Fatal("Get lost a stage that has not expired")
+	}
+
+	now = now.Add(time.Second)
+	stager.sweep()
+
+	if names := stagingNames(t, stager); len(names) != 0 {
+		t.Errorf("the janitor left %v in staging", names)
+	}
+	if _, ok := stager.Get(staged.ID); ok {
+		t.Error("the janitor left the record behind")
+	}
+	if names := libraryNames(t, libraryDir); len(names) != 0 {
+		t.Errorf("an expired stage reached the library as %v", names)
+	}
+}
+
+// Confirm rechecks expiry itself, so a click on a tab left open since lunch
+// says so rather than acting on a file the janitor is about to delete —
+// without depending on whether the janitor has run yet.
+func TestConfirmRechecksExpiryWithoutTheJanitor(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	now := time.Now()
+	stager, libraryDir := testStagerAt(t, db, 1<<20, func() time.Time { return now })
 
 	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
 	if err != nil {
@@ -290,13 +333,8 @@ func TestAStageExpires(t *testing.T) {
 	if _, err := stager.Confirm(ctx, staged.ID); !errors.Is(err, ErrExpired) {
 		t.Errorf("Confirm on an expired stage = %v, want ErrExpired", err)
 	}
-
-	stager.sweep()
-	if names := stagingNames(t, stager); len(names) != 0 {
-		t.Errorf("the janitor left %v in staging", names)
-	}
 	if names := libraryNames(t, libraryDir); len(names) != 0 {
-		t.Errorf("an expired stage reached the library as %v", names)
+		t.Errorf("an expired confirm reached the library as %v", names)
 	}
 }
 
@@ -406,5 +444,108 @@ func TestNewEmptiesTheStagingDirectory(t *testing.T) {
 	}
 	if names := stagingNames(t, stager); len(names) != 0 {
 		t.Errorf("New left %v in staging", names)
+	}
+}
+
+// A double click, a slow no-JS submit, two open tabs: whatever produces
+// them, several confirms of one stage must import the book once and all
+// answer the same id. The per-stage mutex is what makes the second wait for
+// the first rather than race it into a second copy of the same bytes, so
+// this is the test that fails if it goes.
+func TestConcurrentConfirmsOfOneStageImportOnce(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, libraryDir := testStager(t, db, 1<<20)
+
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+
+	const confirms = 6
+	ids := make([]int64, confirms)
+	errs := make([]error, confirms)
+
+	// Released together, so the calls actually overlap rather than
+	// queueing behind each other's goroutine start-up.
+	var start, wg sync.WaitGroup
+	start.Add(1)
+	for i := range confirms {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start.Wait()
+			ids[i], errs[i] = stager.Confirm(ctx, staged.ID)
+		}()
+	}
+	start.Done()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Confirm %d: %v", i, err)
+		}
+		if ids[i] == 0 {
+			t.Fatalf("Confirm %d named no book", i)
+		}
+		if ids[i] != ids[0] {
+			t.Errorf("Confirm %d answered book %d, want %d — every caller must get the first call's answer", i, ids[i], ids[0])
+		}
+	}
+
+	if names := libraryNames(t, libraryDir); !slices.Equal(names, []string{"Dune.epub"}) {
+		t.Errorf("the library holds %v, want the one file %d confirms asked for", names, confirms)
+	}
+	if count, err := db.CountBooks(ctx); err != nil || count != 1 {
+		t.Errorf("CountBooks = %d, %v; want 1", count, err)
+	}
+}
+
+func TestStageKeepsACoverItCanIdentify(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, _ := testStager(t, db, 1<<20)
+
+	art := solidPNG(t)
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytesWithCover(t, "Dune", "Frank Herbert", 0, art)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if !staged.HasCover {
+		t.Fatal("HasCover is false for a book with a real cover")
+	}
+
+	data, contentType, ok := stager.Cover(staged.ID)
+	if !ok {
+		t.Fatal("Cover answered nothing for a book with a cover")
+	}
+	if !bytes.Equal(data, art) {
+		t.Errorf("Cover returned %d bytes, want the %d embedded", len(data), len(art))
+	}
+	if contentType != "image/png" {
+		t.Errorf("Cover reported %q, want %q", contentType, "image/png")
+	}
+}
+
+// Neither format reader checks that what a manifest calls a cover is an
+// image, so an upload can put anything at all there. It must not become
+// something the preview route will hand a browser: an HTML document served
+// from this app's own origin is the thing sameSiteOnly admits.
+func TestStageDropsACoverThatIsNotAnImage(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, _ := testStager(t, db, 1<<20)
+
+	html := []byte(`<!doctype html><script>fetch("/recipients/remove",{method:"POST"})</script>`)
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytesWithCover(t, "Dune", "Frank Herbert", 0, html)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+
+	if staged.HasCover {
+		t.Error("HasCover is true for a cover that is an HTML document")
+	}
+	if data, contentType, ok := stager.Cover(staged.ID); ok {
+		t.Errorf("Cover served %d bytes as %q, want nothing", len(data), contentType)
 	}
 }

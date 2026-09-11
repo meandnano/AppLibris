@@ -88,19 +88,22 @@ func (s *Service) StagedImport(ctx context.Context, id string) (*ImportPreview, 
 	return &preview, nil
 }
 
-// StagedCover returns the cover bytes a staged file had embedded, or nil
-// when it had none — what the preview's own image is served from, since a
-// staged book has no entry in COVERS_DIR and should not acquire one before
-// anybody has said to keep it.
-func (s *Service) StagedCover(id string) []byte {
+// StagedCover returns the cover a staged file had embedded, with its media
+// type, or nil when it had none — what the preview's own image is served
+// from, since a staged book has no entry in COVERS_DIR and should not
+// acquire one before anybody has said to keep it.
+//
+// The type travels with the bytes because the transport must not decide it
+// by sniffing: see importer.Stager.Cover.
+func (s *Service) StagedCover(id string) (data []byte, contentType string) {
 	if s.importer == nil {
-		return nil
+		return nil, ""
 	}
-	cover, ok := s.importer.Cover(id)
+	cover, contentType, ok := s.importer.Cover(id)
 	if !ok {
-		return nil
+		return nil, ""
 	}
-	return cover
+	return cover, contentType
 }
 
 // ConfirmImport copies a staged file into the library and indexes it.

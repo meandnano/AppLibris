@@ -35,9 +35,11 @@ here. See Documentation below for what these files may and may not say.
   Note: `docs/notes/storage.md`.
 - `internal/epub`, `internal/fb2` — embedded metadata and cover bytes from
   each format, same `Metadata` shape so the scanner treats them alike.
+  Neither decides that what a file calls a cover is an image.
   `internal/cover` — resize to ~400px, JPEG, atomic write into
-  `COVERS_DIR` keyed by content hash. All three cap what they read from an
-  untrusted file. Note: `docs/notes/formats.md`.
+  `COVERS_DIR` keyed by content hash; `ContentType` is the header read
+  `Store` makes, for a caller that serves raw cover bytes. All three cap
+  what they read from an untrusted file. Note: `docs/notes/formats.md`.
 - `internal/scanner` — walks `LIBRARY_DIR`, syncs it into storage
   (`Scan`), indexes one path on demand (`IndexFile`, the importer's way
   in), reconciles missing files in two phases, regenerates covers, and
@@ -149,6 +151,9 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - `cover.Store` wraps `ErrUnsupportedCover` for anything the bytes decide
   and leaves filesystem errors unwrapped; the scanner's retry logic depends
   on that split.
+- `cover.ContentType` and `Store` share one header read (`inspect`), so
+  what this app calls an image is decided once. Neither format reader
+  decides it, so any caller serving raw cover bytes must ask.
 - Publication date is the edition's: never `creation`/`modification` in
   EPUB, never `title-info/date` over `publish-info/year` in FB2.
 - Every reader of an ISBN calls `storage.NormalizeISBN` — `internal/epub`'s
@@ -314,9 +319,24 @@ tidy-up would break. The note named in the heading carries the reasoning.
   not an error.
 - A failed `IndexFile` leaves the library file in place. Never delete a
   file the library already holds over an index error.
-- The library is written only as `<name>.part` then `Rename`; nothing
-  creates a supported suffix in the library directly. The name is claimed
-  with both an `Lstat` on the final name and an `O_EXCL` on the `.part`.
+- The library is written only as `<name>.part` then published with
+  `os.Link`; nothing creates a supported suffix in the library directly.
+  The link is what refuses to replace an existing name, which `os.Rename`
+  would do silently — never swap it back. A filesystem with no hard links
+  falls back to `Lstat` then `Rename`, logged once, and the window stays
+  open there.
+- A staged cover is served with the media type `cover.ContentType` decided
+  from its header, never `http.DetectContentType` over the bytes: no format
+  reader checks that what a file calls a cover is an image, so sniffing lets
+  an upload choose the type. `HasCover` therefore means "a cover this app
+  would keep", not "the file named one".
+- Every route serving bytes rather than a rendered template sets
+  `X-Content-Type-Options: nosniff` — `/import/{id}/cover`, `/covers/` and
+  `/static/`.
+- The write probe is removed before it is created. `O_EXCL` refuses a name
+  already taken, so a probe left by a crash would otherwise disable
+  importing for good; `O_EXCL` stays, so the create never follows a symlink
+  left at that name.
 - Staged state is in memory and on `os.TempDir()`. Nothing about a stage is
   written to the database, and `importer.New` wipes the staging directory.
 - The write probe runs once at startup. A per-request check would answer
@@ -327,6 +347,10 @@ tidy-up would break. The note named in the heading carries the reasoning.
   in-package tests cannot import `internal/service`. `capmetadata_test.go`
   is `package scanner_test` over `export_test.go` for that reason; do not
   move it back.
+- `cmd/server`'s `TestMain` points `TMPDIR` at a directory of its own,
+  because `run()` derives the staging directory from `os.TempDir()` and
+  `importer.New` wipes it — without that, the package's tests delete a
+  development server's staged uploads.
 
 ### Web and service (`docs/notes/web.md`)
 

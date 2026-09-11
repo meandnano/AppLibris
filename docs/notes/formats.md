@@ -167,6 +167,16 @@ Decoders are registered for GIF, PNG, JPEG and WebP. WebP is an EPUB 3.3
 core media type and the format most likely to arrive embedded and otherwise
 be undecodable.
 
+Neither format reader decides that what a file calls a cover is an image:
+`internal/epub` returns the zip entry the manifest's `cover-image` href
+names without reading that item's `media-type`, and `internal/fb2` returns
+what a `<binary>` decodes to without reading its `content-type`. `Store` is
+where that is settled, which costs nothing while the only reader is the
+scanner. A caller that serves raw cover bytes to a browser needs the same
+answer without storing anything, and asks `ContentType` — the header read
+`Store` makes, exported so the two cannot disagree about what counts as an
+image. `internal/importer` is that caller; see `docs/notes/import.md`.
+
 **Two error classes, and the scanner depends on the split.** Every refusal
 the bytes themselves decide (no registered decoder, a corrupt image, either
 size cap) wraps `ErrUnsupportedCover`. A filesystem failure (`MkdirAll`,

@@ -60,17 +60,39 @@ const maxPixels = 16 * 1000 * 1000
 // end
 var ErrUnsupportedCover = errors.New("cover image cannot be decoded")
 
-// Store decodes raw, resizes it so its long edge is ~maxLongEdge (never
-// upscaling a smaller source), and atomically writes it as a JPEG to
-// dir/contentHash.jpg, creating dir when needed. A failure that lies in raw
-// itself wraps ErrUnsupportedCover; a filesystem failure does not
-func Store(dir, contentHash string, raw []byte) (string, error) {
+// ContentType reports the media type of the cover image raw holds — one of
+// image/jpeg, image/png, image/gif and image/webp — or wraps
+// ErrUnsupportedCover for bytes Store would refuse.
+//
+// It exists because a cover is not an image until something says so.
+// Neither format reader validates one: internal/epub returns whatever zip
+// entry the manifest's cover-image href names, and internal/fb2 returns
+// whatever a <binary> element decodes to, each without reading the declared
+// media type. That costs nothing on the way into Store, which decodes
+// before it writes — but a caller that serves those bytes to a browser is
+// handing it a type chosen by the file, and a manifest pointing at an HTML
+// document would otherwise get text/html back on the app's own origin.
+//
+// The same header read Store makes, so the two cannot disagree about what
+// this app considers an image.
+func ContentType(raw []byte) (string, error) {
+	format, err := inspect(raw)
+	if err != nil {
+		return "", err
+	}
+	return "image/" + format, nil
+}
+
+// inspect reads raw's header alone — never its pixels — and reports the
+// registered name of the format it is in, refusing anything Store would go
+// on to refuse. Split out so ContentType asks exactly the question Store
+// asks, and so an image too large to hold is turned away before a decoder
+// allocates a buffer for it.
+func inspect(raw []byte) (string, error) {
 	if len(raw) > MaxCoverBytes {
 		return "", fmt.Errorf("cover image is %d bytes, over the %d byte limit: %w", len(raw), MaxCoverBytes, ErrUnsupportedCover)
 	}
 
-	// The header is read on its own first, so an image too large to hold is
-	// refused before anything allocates a pixel buffer for it.
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil {
 		// The format is known when the header was recognised and then
@@ -86,6 +108,18 @@ func Store(dir, contentHash string, raw []byte) (string, error) {
 	// the very check meant to refuse it.
 	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > maxPixels {
 		return "", fmt.Errorf("%s cover image is %dx%d, over the %d pixel limit: %w", format, cfg.Width, cfg.Height, maxPixels, ErrUnsupportedCover)
+	}
+	return format, nil
+}
+
+// Store decodes raw, resizes it so its long edge is ~maxLongEdge (never
+// upscaling a smaller source), and atomically writes it as a JPEG to
+// dir/contentHash.jpg, creating dir when needed. A failure that lies in raw
+// itself wraps ErrUnsupportedCover; a filesystem failure does not
+func Store(dir, contentHash string, raw []byte) (string, error) {
+	format, err := inspect(raw)
+	if err != nil {
+		return "", err
 	}
 
 	src, _, err := image.Decode(bytes.NewReader(raw))
