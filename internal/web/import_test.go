@@ -1,0 +1,445 @@
+package web
+
+import (
+	"archive/zip"
+	"bytes"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"library/internal/importer"
+	"library/internal/service"
+	"library/internal/storage"
+)
+
+const importContainerXML = `<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`
+
+const importOPFTemplate = `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>%s</dc:title>
+    <dc:creator>%s</dc:creator>
+  </metadata>
+  <manifest></manifest>
+</package>`
+
+func importEPUB(t *testing.T, title, author string, padding int) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range map[string]string{
+		"mimetype":               "application/epub+zip",
+		"META-INF/container.xml": importContainerXML,
+		"OEBPS/content.opf":      fmt.Sprintf(importOPFTemplate, title, author),
+	} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create %s in zip: %v", name, err)
+		}
+		w.Write([]byte(content))
+	}
+	if padding > 0 {
+		w, err := zw.Create("OEBPS/pad.bin")
+		if err != nil {
+			t.Fatalf("create pad.bin in zip: %v", err)
+		}
+		w.Write(bytes.Repeat([]byte{'x'}, padding))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// newImportHandler builds the whole route table over a real Stager, since
+// what these tests are about is the transport's behaviour against the
+// importer's actual answers rather than against a stand-in for them.
+func newImportHandler(t *testing.T, maxSize int64) (http.Handler, *storage.DB, string) {
+	t.Helper()
+	return newImportHandlerWritable(t, maxSize, true)
+}
+
+func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.Handler, *storage.DB, string) {
+	t.Helper()
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	root := t.TempDir()
+	libraryDir := filepath.Join(root, "library")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		t.Fatalf("mkdir library: %v", err)
+	}
+	coversDir := filepath.Join(root, "covers")
+	if err := os.MkdirAll(coversDir, 0o755); err != nil {
+		t.Fatalf("mkdir covers: %v", err)
+	}
+
+	stager, err := importer.New(db, importer.Options{
+		LibraryDir: libraryDir,
+		CoversDir:  coversDir,
+		TempDir:    filepath.Join(root, "staging"),
+		MaxSize:    maxSize,
+		Writable:   writable,
+	})
+	if err != nil {
+		t.Fatalf("importer.New: %v", err)
+	}
+
+	svc := service.New(db, service.WithImporter(stager))
+	return Routes(svc, coversDir, false, false, svc.ImportEnabled()), db, libraryDir
+}
+
+func uploadRequest(t *testing.T, filename string, content []byte, hx bool) *http.Request {
+	t.Helper()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	part.Write(content)
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/import/file", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if hx {
+		req.Header.Set("HX-Request", "true")
+	}
+	return req
+}
+
+func upload(t *testing.T, handler http.Handler, filename string, content []byte, hx bool) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, uploadRequest(t, filename, content, hx))
+	return rec
+}
+
+// stagedID pulls the id out of a rendered preview, which is how a test
+// follows the flow the way a browser does rather than by reaching into the
+// importer.
+func stagedID(t *testing.T, body string) string {
+	t.Helper()
+	const marker = `action="/import/`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("no staged import in the response:\n%s", body)
+	}
+	rest := body[i+len(marker):]
+	j := strings.IndexByte(rest, '/')
+	if j < 0 {
+		t.Fatalf("malformed confirm action in the response:\n%s", body)
+	}
+	return rest[:j]
+}
+
+func post(handler http.Handler, path string, hx bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, nil)
+	if hx {
+		req.Header.Set("HX-Request", "true")
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestImportUploadPreviewsTheFile(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := upload(t, handler, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 0), true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"Dune", "Frank Herbert", "epub", "Dune.epub", "Import", "Discard"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the preview does not mention %q:\n%s", want, body)
+		}
+	}
+	if got := rec.Header().Get("Vary"); !strings.Contains(got, "HX-Request") || !strings.Contains(got, "HX-History-Restore-Request") {
+		t.Errorf("Vary = %q, want both htmx headers named", got)
+	}
+}
+
+func TestImportUploadAnswersAFragmentToHTMXAndAPageOtherwise(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+	book := importEPUB(t, "Dune", "Frank Herbert", 0)
+
+	fragment := upload(t, handler, "Dune.epub", book, true).Body.String()
+	if strings.Contains(fragment, "<!doctype html>") {
+		t.Errorf("an htmx upload got a whole page:\n%s", fragment)
+	}
+
+	// Without htmx the upload redirects to the preview's own URL, so a
+	// reload re-reads the stage instead of re-sending the file.
+	rec := upload(t, handler, "Dune-2.epub", importEPUB(t, "Dune II", "Frank Herbert", 16), false)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.HasPrefix(location, "/import/") {
+		t.Fatalf("Location = %q, want the preview's URL", location)
+	}
+
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, location, nil))
+	if !strings.Contains(page.Body.String(), "<!doctype html>") {
+		t.Errorf("a plain GET of the preview got a fragment:\n%s", page.Body.String())
+	}
+	if got := page.Header().Get("Vary"); !strings.Contains(got, "HX-Request") {
+		t.Errorf("Vary = %q, want HX-Request named", got)
+	}
+}
+
+func TestImportUploadRefusalsSayWhy(t *testing.T) {
+	cases := []struct {
+		name     string
+		filename string
+		content  []byte
+		want     string
+	}{
+		{name: "too large", filename: "Dune.epub", content: bytes.Repeat([]byte("PK\x03\x04"), 4096), want: "larger than"},
+		{name: "not a book", filename: "notes.txt", content: []byte("just some text"), want: "not an EPUB or FB2 file"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, _, _ := newImportHandler(t, 1024)
+
+			// htmx does not swap a 4xx, so a refusal it has to show is a
+			// 200 carrying the sentence.
+			fragment := upload(t, handler, tt.filename, tt.content, true)
+			if fragment.Code != http.StatusOK {
+				t.Errorf("htmx status = %d, want 200", fragment.Code)
+			}
+			if !strings.Contains(fragment.Body.String(), tt.want) {
+				t.Errorf("the refusal does not say %q:\n%s", tt.want, fragment.Body.String())
+			}
+
+			// The full page is a real rejection and says so.
+			page := upload(t, handler, tt.filename, tt.content, false)
+			if page.Code != http.StatusUnprocessableEntity {
+				t.Errorf("full-page status = %d, want 422", page.Code)
+			}
+			if !strings.Contains(page.Body.String(), tt.want) {
+				t.Errorf("the refusal does not say %q:\n%s", tt.want, page.Body.String())
+			}
+		})
+	}
+}
+
+func TestImportConfirmLandsOnTheBook(t *testing.T) {
+	handler, db, libraryDir := newImportHandler(t, 1<<20)
+
+	id := stagedID(t, upload(t, handler, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 0), true).Body.String())
+
+	rec := post(handler, "/import/"+id+"/confirm", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	redirect := rec.Header().Get("HX-Redirect")
+	if !strings.HasPrefix(redirect, "/books/") {
+		t.Fatalf("HX-Redirect = %q, want a book URL", redirect)
+	}
+
+	if _, err := os.Stat(filepath.Join(libraryDir, "Dune.epub")); err != nil {
+		t.Errorf("the library file is not there: %v", err)
+	}
+	if count, err := db.CountBooks(t.Context()); err != nil || count != 1 {
+		t.Errorf("CountBooks = %d, %v; want 1", count, err)
+	}
+}
+
+func TestImportConfirmRedirectsWithoutHTMX(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	location := upload(t, handler, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 0), false).Header().Get("Location")
+	id := strings.TrimPrefix(location, "/import/")
+
+	rec := post(handler, "/import/"+id+"/confirm", false)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); !strings.HasPrefix(got, "/books/") {
+		t.Errorf("Location = %q, want a book URL", got)
+	}
+}
+
+func TestImportPreviewShowsEachVerdictAndOnlyItsButtons(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+	book := importEPUB(t, "Dune", "Frank Herbert", 0)
+
+	// New: Import is offered and nothing is flagged.
+	first := upload(t, handler, "Dune.epub", book, true).Body.String()
+	if !strings.Contains(first, "/confirm") {
+		t.Errorf("a new book was not offered an Import button:\n%s", first)
+	}
+	if strings.Contains(first, "already in the library") {
+		t.Errorf("a new book was flagged as a duplicate:\n%s", first)
+	}
+	post(handler, "/import/"+stagedID(t, first)+"/confirm", true)
+
+	// Exists: no Import button, and a link to the book instead.
+	duplicate := upload(t, handler, "Dune-copy.epub", book, true).Body.String()
+	if strings.Contains(duplicate, "/confirm") {
+		t.Errorf("a byte-identical duplicate was offered an Import button:\n%s", duplicate)
+	}
+	if !strings.Contains(duplicate, "already in the library") || !strings.Contains(duplicate, `href="/books/`) {
+		t.Errorf("the duplicate verdict does not link to the book:\n%s", duplicate)
+	}
+	if !strings.Contains(duplicate, "/discard") {
+		t.Errorf("the duplicate verdict offers no Discard:\n%s", duplicate)
+	}
+
+	// Title match: Import is offered, under a warning.
+	edition := upload(t, handler, "Dune-2.epub", importEPUB(t, "Dune", "F. Herbert", 64), true).Body.String()
+	if !strings.Contains(edition, "/confirm") {
+		t.Errorf("a second edition was not offered an Import button:\n%s", edition)
+	}
+	if !strings.Contains(edition, "already holds a book called Dune") {
+		t.Errorf("the title-match warning is missing:\n%s", edition)
+	}
+}
+
+func TestImportDiscardPutsTheFormBack(t *testing.T) {
+	handler, _, libraryDir := newImportHandler(t, 1<<20)
+
+	id := stagedID(t, upload(t, handler, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 0), true).Body.String())
+
+	rec := post(handler, "/import/"+id+"/discard", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `type="file"`) {
+		t.Errorf("a discard did not put the file input back:\n%s", rec.Body.String())
+	}
+
+	entries, err := os.ReadDir(libraryDir)
+	if err != nil {
+		t.Fatalf("read library: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a discarded import reached the library: %v", entries)
+	}
+}
+
+// A stage that is gone is not a missing page: the person is looking at a
+// URL that was right a moment ago, and the input they need is on it.
+func TestImportPreviewOfAnExpiredStageExplainsItself(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import/nosuchstage", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "expired") {
+		t.Errorf("the page does not explain the expiry:\n%s", rec.Body.String())
+	}
+}
+
+func TestImportConfirmOfAnExpiredStageSaysSo(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := post(handler, "/import/nosuchstage/confirm", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "expired") {
+		t.Errorf("the refusal does not say the stage expired:\n%s", rec.Body.String())
+	}
+}
+
+func TestImportIsDisabledWhenTheLibraryIsReadOnly(t *testing.T) {
+	handler, _, _ := newImportHandlerWritable(t, 1<<20, false)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "read-only") {
+		t.Errorf("the page does not explain why import is off:\n%s", body)
+	}
+	if strings.Contains(body, `type="file"`) {
+		t.Errorf("a disabled page still offers the file input:\n%s", body)
+	}
+	// The nav link is what the flag actually withholds.
+	if strings.Contains(body, `href="/import"`) {
+		t.Errorf("the masthead links to a page that can only say no:\n%s", body)
+	}
+
+	if got := upload(t, handler, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 0), true); !strings.Contains(got.Body.String(), "read-only") {
+		t.Errorf("an upload to a read-only library was not refused:\n%s", got.Body.String())
+	}
+}
+
+func TestImportNavLinkAppearsWhenImportIsEnabled(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	for _, path := range []string{"/", "/history", "/import"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		body := rec.Body.String()
+		if !strings.Contains(body, "Import") {
+			t.Errorf("%s does not offer the Import nav entry:\n%s", path, body)
+		}
+	}
+}
+
+func TestEveryImportPOSTRefusesACrossSiteRequest(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	for _, path := range []string{"/import/file", "/import/anything/confirm", "/import/anything/discard"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(""))
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("POST %s from a cross-site page = %d, want 403", path, rec.Code)
+		}
+	}
+}
+
+func TestImportCoverIsServedFromTheStage(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	// This fixture carries no cover, so the route has nothing to serve and
+	// says so rather than answering an empty body.
+	id := stagedID(t, upload(t, handler, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 0), true).Body.String())
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import/"+id+"/cover", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for a book with no cover", rec.Code)
+	}
+}
+
+func TestImportFailureLineNamesTheCap(t *testing.T) {
+	got := importFailureLine(importer.ErrTooLarge, 64<<20)
+	if !strings.Contains(got, humanSize(64<<20)) {
+		t.Errorf("importFailureLine = %q, want it to name the cap", got)
+	}
+	if importFailureLine(io.EOF, 0) != "" {
+		t.Errorf("importFailureLine explained an error it cannot describe")
+	}
+}

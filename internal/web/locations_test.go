@@ -40,7 +40,7 @@ func newLocationsTestBook(t *testing.T) (http.Handler, *storage.DB, int64, int64
 		t.Fatalf("SetFilesMissing: %v", err)
 	}
 
-	return Routes(service.New(db), t.TempDir(), false, false), db, id, missingID
+	return Routes(service.New(db), t.TempDir(), false, false, false), db, id, missingID
 }
 
 func postForgetLocation(handler http.Handler, bookID, fileID int64, hx bool, fetchSite string) *httptest.ResponseRecorder {
@@ -152,7 +152,7 @@ func TestForgetLocationRedirectsWhenBookPruned(t *testing.T) {
 			t.Fatalf("SetFilesMissing: %v", err)
 		}
 
-		handler := Routes(service.New(db), t.TempDir(), false, false)
+		handler := Routes(service.New(db), t.TempDir(), false, false, false)
 		rec := postForgetLocation(handler, bookID, file.ID, hx, "same-origin")
 
 		if hx {

@@ -60,7 +60,7 @@ func countCards(body string) int {
 func TestLibraryPageIsBoundedAndCarriesATrigger(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+10, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	rec := get(handler, "/", nil)
 	if rec.Code != http.StatusOK {
@@ -86,7 +86,7 @@ func TestLibraryPageIsBoundedAndCarriesATrigger(t *testing.T) {
 func TestTriggerCarriesBothAnHrefAndHTMXAttributes(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+1, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	body := get(handler, "/", nil).Body.String()
 	li, anchor := triggerElement(body), triggerLine(body)
@@ -114,7 +114,7 @@ func TestTriggerCarriesBothAnHrefAndHTMXAttributes(t *testing.T) {
 func TestTriggerSwapsTheListItemNotTheLinkInsideIt(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+1, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	body := get(handler, "/", nil).Body.String()
 
@@ -131,7 +131,7 @@ func TestTriggerSwapsTheListItemNotTheLinkInsideIt(t *testing.T) {
 func TestLastPageCarriesNoTrigger(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, 3, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	body := get(handler, "/", nil).Body.String()
 	if countCards(body) != 3 {
@@ -149,7 +149,7 @@ func TestPagingThroughTheWholeLibrarySeesEachBookOnce(t *testing.T) {
 	db := newPagingTestDB(t)
 	const total = pageSize*2 + 7
 	seedBooks(t, db, total, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	seen := map[string]int{}
 	target := "/"
@@ -184,7 +184,7 @@ func TestPagingThroughTheWholeLibrarySeesEachBookOnce(t *testing.T) {
 func TestAppendResponseIsCardsOnly(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+5, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	next := hxGetURL(triggerElement(get(handler, "/", nil).Body.String()))
 	if next == "" {
@@ -207,7 +207,7 @@ func TestSearchResultsPageAndCarryTheQuery(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+10, "novel")
 	seedBooks(t, db, 3, "other")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	body := get(handler, "/?q=novel", nil).Body.String()
 	if got := countCards(body); got != pageSize {
@@ -242,7 +242,7 @@ func TestNewSearchResetsPaging(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+10, "novel")
 	seedBooks(t, db, pageSize+10, "essay")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	// Page into the first query, then run a different one.
 	first := get(handler, "/?q=novel", map[string]string{"HX-Request": "true"}).Body.String()
@@ -272,7 +272,7 @@ func TestNewSearchResetsPaging(t *testing.T) {
 func TestPlainNavigationToTheNextPageRendersAWholePage(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+5, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	href := hrefURL(triggerLine(get(handler, "/", nil).Body.String()))
 	if href == "" {
@@ -299,7 +299,7 @@ func TestPlainNavigationToTheNextPageRendersAWholePage(t *testing.T) {
 func TestMalformedCursorFallsBackToTheFirstPage(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, 3, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	rec := get(handler, "/?after_id=not-a-number", nil)
 	if rec.Code != http.StatusOK {
@@ -379,7 +379,7 @@ func cardIDs(body string) []string {
 func TestExactMultipleOfPageSizeHasNoTrigger(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	body := get(handler, "/", nil).Body.String()
 	if got := countCards(body); got != pageSize {
@@ -397,7 +397,7 @@ func TestSearchResultsLineCountsMatchesNotThePage(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+10, "novel")
 	seedBooks(t, db, 5, "other")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	body := get(handler, "/?q=novel", nil).Body.String()
 	line := lineContaining(body, "search__count")
@@ -429,7 +429,7 @@ func TestCursorUsesSortTitleNotTitle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	next := hxGetURL(triggerElement(get(handler, "/", nil).Body.String()))
 	if next == "" {
@@ -458,7 +458,7 @@ func TestCursorUsesSortTitleNotTitle(t *testing.T) {
 func TestDeepPageKeepsALinkBackToTheStart(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+5, "x")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	href := hrefURL(triggerLine(get(handler, "/", nil).Body.String()))
 	body := get(handler, href, nil).Body.String()
@@ -480,7 +480,7 @@ func TestDeepPageKeepsALinkBackToTheStart(t *testing.T) {
 func TestClearLinkIsUnchangedOnTheFirstPageAndOnASearch(t *testing.T) {
 	db := newPagingTestDB(t)
 	seedBooks(t, db, pageSize+5, "novel")
-	handler := Routes(service.New(db), t.TempDir(), false, false)
+	handler := Routes(service.New(db), t.TempDir(), false, false, false)
 
 	for _, tc := range []struct{ name, target string }{
 		{"first page", "/"},

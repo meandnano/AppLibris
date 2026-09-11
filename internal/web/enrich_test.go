@@ -17,7 +17,7 @@ import (
 // enrichment control is what these tests read, and leaving the send
 // control disabled keeps its markup out of the fragments they assert on.
 func enrichRoutes(db *storage.DB) http.Handler {
-	return Routes(service.New(db), "", false, true)
+	return Routes(service.New(db), "", false, true, false)
 }
 
 func postEnrich(handler http.Handler, id int64, hx bool) *httptest.ResponseRecorder {
@@ -230,7 +230,7 @@ func TestEnrichHandlerUnknownBook404s(t *testing.T) {
 func TestEnrichHandlerDisabledServesTheDisabledFragment(t *testing.T) {
 	db := newSendTestDB(t)
 	id := createSendTestBook(t, db)
-	handler := Routes(service.New(db), "", false, false)
+	handler := Routes(service.New(db), "", false, false, false)
 
 	rec := postEnrich(handler, id, true)
 	if rec.Code != http.StatusServiceUnavailable {

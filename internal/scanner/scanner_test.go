@@ -3611,3 +3611,78 @@ func TestScanCaseOnlyRenameMarksOldSpelling(t *testing.T) {
 		t.Errorf("FindFileByPath(books/book.epub) = %+v, %v; want a live row", fresh, err)
 	}
 }
+
+// IndexFile is what internal/importer puts a file it has just written into
+// the library through, so a confirm can redirect to the book rather than to
+// a wait for the next sweep.
+func TestIndexFileIndexesOnePathAndNamesItsBook(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	libraryDir, coversDir := t.TempDir(), t.TempDir()
+
+	path := filepath.Join(libraryDir, "Dune.epub")
+	writeTestEPUB(t, path, "Dune", "Frank Herbert", nil)
+
+	bookID, err := IndexFile(ctx, db, libraryDir, path, coversDir)
+	if err != nil {
+		t.Fatalf("IndexFile: %v", err)
+	}
+	if bookID == 0 {
+		t.Fatal("IndexFile named no book")
+	}
+
+	book, err := db.FindBookByID(ctx, bookID)
+	if err != nil {
+		t.Fatalf("FindBookByID: %v", err)
+	}
+	if book == nil || book.Title != "Dune" {
+		t.Fatalf("the indexed book is %+v, want one titled Dune", book)
+	}
+
+	// The sweep that follows sees a matching path, size and mtime and does
+	// nothing — which is what makes indexing in the request safe.
+	result, err := Scan(ctx, db, libraryDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.New != 0 || result.Unchanged != 1 {
+		t.Errorf("the sweep after an import reported new=%d unchanged=%d, want 0 and 1", result.New, result.Unchanged)
+	}
+
+	// And re-indexing the same path answers the same book rather than a
+	// second one, which is what a repeated confirm relies on.
+	again, err := IndexFile(ctx, db, libraryDir, path, coversDir)
+	if err != nil {
+		t.Fatalf("IndexFile again: %v", err)
+	}
+	if again != bookID {
+		t.Errorf("IndexFile named book %d the second time, want %d", again, bookID)
+	}
+}
+
+// The copy an import is mid-way through, and the probe cmd/server writes to
+// find out whether the library may be written at all, are both invisible to
+// a sweep — one by its suffix, the other by both its suffix and its leading
+// dot.
+func TestScanIgnoresAPartFileAndTheWriteProbe(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	libraryDir, coversDir := t.TempDir(), t.TempDir()
+
+	writeTestEPUB(t, filepath.Join(libraryDir, "Dune.epub.part"), "Half Written", "Nobody", nil)
+	if err := os.WriteFile(filepath.Join(libraryDir, ".applibris-write-probe"), nil, 0o600); err != nil {
+		t.Fatalf("write probe: %v", err)
+	}
+	writeTestEPUB(t, filepath.Join(libraryDir, "Dune.epub"), "Dune", "Frank Herbert", nil)
+
+	result, err := Scan(ctx, db, libraryDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.Scanned != 1 || result.New != 1 {
+		t.Errorf("Scan reported scanned=%d new=%d, want 1 and 1", result.Scanned, result.New)
+	}
+	if count, err := db.CountBooks(ctx); err != nil || count != 1 {
+		t.Errorf("CountBooks = %d, %v; want 1", count, err)
+	}
+}

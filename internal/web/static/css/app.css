@@ -1365,3 +1365,215 @@ a.masthead__link:hover {
 .enrich__status--err .enrich__status-label {
   color: var(--err);
 }
+
+/* ---------- import ---------- */
+
+.page--import {
+  padding: 40px 44px 48px;
+}
+
+.import__heading {
+  margin: 0 0 24px;
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 400;
+}
+
+/* One block for both states, bordered the way the send control is, so the
+   page reads the same whether it is holding an input or a preview. */
+.import {
+  border: 1px solid var(--rule);
+  background: var(--bg-sunken);
+  padding: 22px 24px;
+  max-width: 720px;
+}
+
+.import__disabled {
+  margin: 0;
+  color: var(--fg-faint);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.import__error {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  color: var(--err);
+}
+
+.import__note {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+}
+
+.import__form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.import__label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.import__file {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  color: var(--fg);
+}
+
+.import__hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+}
+
+.import__actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 6px;
+}
+
+/* The indicator and the button are driven by htmx-request on the closest
+   form, the same mechanism the search bar's spinner uses: no script binds
+   either, so the upload feedback works wherever htmx does and the plain
+   form post simply never shows it. */
+.import__indicator {
+  display: none;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--accent);
+}
+
+.htmx-request .import__indicator,
+.htmx-request.import__indicator {
+  display: inline;
+}
+
+.htmx-request .import__submit {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.import__preview {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 24px;
+}
+
+.import__cover {
+  display: block;
+  width: 100%;
+  aspect-ratio: 0.66;
+  object-fit: cover;
+  border: 1px solid var(--rule);
+  background: var(--bg-raised);
+}
+
+.import__cover--missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.import__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.import__title {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.import__author {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--fg-muted);
+}
+
+.import__author--unknown {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+.import__facts {
+  margin: 4px 0 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+
+.import__name {
+  overflow-wrap: anywhere;
+}
+
+.import__rename {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+
+.import__verdict {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--rule);
+  background: var(--bg-raised);
+  font-size: 12.5px;
+  color: var(--fg-muted);
+}
+
+.import__verdict--exists {
+  border-left-color: var(--accent);
+}
+
+.import__verdict--warn {
+  border-left-color: var(--accent);
+  color: var(--fg);
+}
+
+.import__description {
+  margin: 6px 0 0;
+  font-family: var(--serif);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--fg-muted);
+  max-height: 9em;
+  overflow: hidden;
+}
+
+@media (max-width: 700px) {
+  .page--import {
+    padding: 28px 20px 36px;
+  }
+
+  .import__preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .import__rail {
+    max-width: 160px;
+  }
+}

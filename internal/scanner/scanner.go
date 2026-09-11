@@ -192,7 +192,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 		if rel := relSlash(libraryDir, walkPath); rel != "" {
 			seen[rel] = true
 		}
-		if err := scanFile(ctx, db, libraryDir, walkPath, coversDir, &result); err != nil {
+		if _, err := scanFile(ctx, db, libraryDir, walkPath, coversDir, &result); err != nil {
 			slog.Warn("scan file failed", "path", walkPath, "error", err)
 			result.Errors++
 		}
@@ -477,27 +477,31 @@ func matchingPrefix(relPath string, prefixes []string) string {
 	return ""
 }
 
-func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) error {
+// scanFile indexes one file and reports which book the path now belongs
+// to. The id is returned rather than looked up again by the caller,
+// because every branch below already holds it and IndexFile's whole
+// purpose is to answer that question for a path it has just written.
+func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) (int64, error) {
 	// stored relative to libraryDir (slash-separated) so the index survives
 	// the library being mounted at a different absolute path — dev's
 	// ./library versus the container's /library, say; anything that needs
 	// to touch the filesystem below still uses the absolute path
 	rel, err := filepath.Rel(libraryDir, path)
 	if err != nil {
-		return fmt.Errorf("relativize: %w", err)
+		return 0, fmt.Errorf("relativize: %w", err)
 	}
 	rel = filepath.ToSlash(rel)
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("stat: %w", err)
+		return 0, fmt.Errorf("stat: %w", err)
 	}
 	size := info.Size()
 	mtime := info.ModTime()
 
 	bf, err := db.FindFileByPath(ctx, rel)
 	if err != nil {
-		return fmt.Errorf("find file by path: %w", err)
+		return 0, fmt.Errorf("find file by path: %w", err)
 	}
 	if bf != nil && bf.FileSize == size && bf.ModifiedAt.Equal(mtime) {
 		book := &storage.Book{
@@ -508,37 +512,37 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 		}
 		maybeRegenerateCover(ctx, db, book, path, coversDir, result)
 		result.Unchanged++
-		return nil
+		return bf.BookID, nil
 	}
 
 	hash, err := hashFile(path)
 	if err != nil {
-		return fmt.Errorf("hash: %w", err)
+		return 0, fmt.Errorf("hash: %w", err)
 	}
 
 	book, err := db.FindBookByContentHash(ctx, hash)
 	if err != nil {
-		return fmt.Errorf("find book by content hash: %w", err)
+		return 0, fmt.Errorf("find book by content hash: %w", err)
 	}
 
 	if book != nil && bf != nil && bf.BookID == book.ID {
 		// same book, same path: content unchanged, only size/mtime drifted (e.g. touched)
 		if err := db.UpdateBookFileStat(ctx, bf.ID, size, mtime); err != nil {
-			return fmt.Errorf("update file stat: %w", err)
+			return 0, fmt.Errorf("update file stat: %w", err)
 		}
 		maybeRegenerateCover(ctx, db, book, path, coversDir, result)
 		result.Unchanged++
-		return nil
+		return book.ID, nil
 	}
 
 	if book == nil {
-		orphanedID, orphanedTitle, inherited, err := createBook(ctx, db, path, rel, hash, coversDir, size, mtime)
+		bookID, orphanedID, orphanedTitle, inherited, err := createBook(ctx, db, path, rel, hash, coversDir, size, mtime)
 		if err != nil {
-			return fmt.Errorf("create book: %w", err)
+			return 0, fmt.Errorf("create book: %w", err)
 		}
 		logOrphan(path, orphanedID, orphanedTitle, inherited, result)
 		result.New++
-		return nil
+		return bookID, nil
 	}
 
 	maybeRegenerateCover(ctx, db, book, path, coversDir, result)
@@ -550,11 +554,33 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 	// bytes, so there is nothing of its owner's to carry across.
 	_, orphanedID, orphanedTitle, err := db.ReassignFileAndPruneOrphan(ctx, book.ID, rel, size, mtime)
 	if err != nil {
-		return fmt.Errorf("attach file location: %w", err)
+		return 0, fmt.Errorf("attach file location: %w", err)
 	}
 	logOrphan(path, orphanedID, orphanedTitle, nil, result)
 	result.Moved++
-	return nil
+	return book.ID, nil
+}
+
+// IndexFile indexes the single file at path — an absolute path under
+// libraryDir — and reports the book it now belongs to. It is the importer's
+// way into the index: a file the app has just written into the library is
+// indexed in the request that wrote it, so the response can send the reader
+// to the book rather than to a wait for the next sweep.
+//
+// It is deliberately the same per-file path a sweep takes, so an import
+// gets capMetadata, the cover store's ErrUnsupportedCover split and the
+// orphan logging without a second way into the index existing to drift
+// from the first. A sweep that reaches the same path afterwards sees a
+// matching path, size and mtime and does nothing; one that races this call
+// keys on the same content hash and converges on one book with one
+// location.
+//
+// The Result a sweep accumulates has no reader here, so one is made and
+// discarded: what a caller indexing a single file wants is the book id,
+// and the counts belong to a sweep's summary line.
+func IndexFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string) (int64, error) {
+	var result Result
+	return scanFile(ctx, db, libraryDir, path, coversDir, &result)
 }
 
 // coverFileDefinitelyGone reports whether the stored thumbnail is known to
@@ -809,7 +835,7 @@ func logOrphan(path string, orphanedID int64, orphanedTitle string, inherited []
 
 // createBook reads metadata from the file at the absolute path and stores
 // the book under rel, its path relative to the library root.
-func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir string, size int64, mtime time.Time) (orphanedID int64, orphanedTitle string, inherited []storage.MetadataField, err error) {
+func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir string, size int64, mtime time.Time) (bookID int64, orphanedID int64, orphanedTitle string, inherited []storage.MetadataField, err error) {
 	suffix := matchedSuffix(path)
 	meta := capMetadata(path, extractMetadata(path, suffix))
 
@@ -847,8 +873,8 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 		CoverRetry:    coverRetry,
 		Format:        bookFormat(suffix),
 	}
-	_, orphanedID, orphanedTitle, inherited, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
-	return orphanedID, orphanedTitle, inherited, err
+	bookID, orphanedID, orphanedTitle, inherited, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
+	return bookID, orphanedID, orphanedTitle, inherited, err
 }
 
 // capMetadata bounds what a file had embedded in it to the same rules a

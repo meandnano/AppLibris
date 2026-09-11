@@ -17,8 +17,11 @@ here. See Documentation below for what these files may and may not say.
   link and target, and a refused `MkdirAll` names both uids. Opens the
   database, serves immediately, and runs the scan loop, the sender worker and the
   enrichment worker on one cancellable `scanCtx`. Shutdown order: HTTP
-  server, then `waitForBackground` (10s), then the database. Notes:
-  `docs/notes/scanner.md`, `docs/notes/design.md`.
+  server, then `waitForBackground` (10s), then the database. Probes
+  `LIBRARY_DIR` for writability once (`probeWritable`), which is what
+  decides whether importing is offered, and parses `MAX_IMPORT_SIZE`
+  through `parseByteSize`. Notes: `docs/notes/scanner.md`,
+  `docs/notes/design.md`, `docs/notes/import.md`.
 - `internal/storage` — SQLite (`modernc.org/sqlite`, WAL, foreign keys,
   5s busy timeout). Bounded read pool, single-connection write pool
   (`DB.Write`). Embedded migrations under `migrations/`, one statement per
@@ -36,7 +39,8 @@ here. See Documentation below for what these files may and may not say.
   `COVERS_DIR` keyed by content hash. All three cap what they read from an
   untrusted file. Note: `docs/notes/formats.md`.
 - `internal/scanner` — walks `LIBRARY_DIR`, syncs it into storage
-  (`Scan`), reconciles missing files in two phases, regenerates covers, and
+  (`Scan`), indexes one path on demand (`IndexFile`, the importer's way
+  in), reconciles missing files in two phases, regenerates covers, and
   hosts the fsnotify watcher (`watcher.go`) plus the startup mount and
   delivery checks. Note: `docs/notes/scanner.md`.
 - `internal/resend` — one-attachment `Client.Send` against Resend's API.
@@ -50,12 +54,18 @@ here. See Documentation below for what these files may and may not say.
   `internal/openlibrary`, `internal/googlebooks` — the two providers.
   `internal/providers` — the name → constructor registry
   (`METADATA_PROVIDERS`). Note: `docs/notes/enrichment.md`.
+- `internal/importer` — staging, previewing and landing a book uploaded
+  through the web UI: `Stager`, the three `Verdict`s, `detectSuffix`
+  (`sniff.go`) and the library-name derivation and collision loop
+  (`name.go`). Calls `scanner.IndexFile` to index what it wrote. Note:
+  `docs/notes/import.md`.
 - `internal/service` — the layer beneath the HTTP handlers, so a future
   `/api/v1` is a second thin transport. Owns validation and normalisation
   (`UpdateBookMetadata`, `QueueSend`), page assembly (`BookSummary`,
-  `BookDetail`, `SearchResult`), and the `Notify`/`NotifyEnrichment`
-  function fields `cmd/server` wires to the workers. Note:
-  `docs/notes/web.md`.
+  `BookDetail`, `SearchResult`, `ImportPreview`), and the
+  `Notify`/`NotifyEnrichment` function fields `cmd/server` wires to the
+  workers. `New` takes functional options; `WithImporter` is the only one.
+  Note: `docs/notes/web.md`.
 - `internal/web` — `html/template` pages and htmx fragments, CSS and the
   vendored htmx under `static/`, all `go:embed`ded. Routes: `GET /{$}`
   (grid, search, paging), `GET /books/{id}`, `GET`/`POST
@@ -63,11 +73,15 @@ here. See Documentation below for what these files may and may not say.
   `POST /books/{id}/send`, `GET
   /books/{id}/sends/{sendID}`, `POST /books/{id}/enrich`, `GET
   /books/{id}/enrichment/{jobID}`, `POST /recipients/remove`,
-  `GET /history`, `/static/`, `/covers/`. The UI is translated from mockups
+  `GET /history`, `GET /import`, `POST /import/file`, `GET /import/{id}`,
+  `GET /import/{id}/cover`, `POST /import/{id}/confirm`, `POST
+  /import/{id}/discard`, `/static/`, `/covers/`. The UI is translated from mockups
   kept as `UI.md` and `ui-handoff/` on the `init` branch. Note:
   `docs/notes/web.md`.
 - `docs/notes/design.md` — purpose, constraints, the library-directory
   rules, the conversion model behind `derived_from`, and the deferred list.
+- `docs/notes/import.md` — where an import lands, the staging model, the
+  three verdicts and the order confirm writes in.
 - `docs/plans/`, `docs/backlog/` — see Planning and Backlog below.
 
 Logging is `log/slog` on stderr through the package-level functions,
@@ -168,6 +182,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - `LIBRARY_DIR` is stat'd, never created, so a read-only mount works and an
   absent one fails startup. `COVERS_DIR` and `DB_PATH`'s directory are
   created.
+- `IndexFile` is `scanFile` with a fresh `Result`, and returns the book id
+  the path now belongs to. There is no second way into the index; every
+  guard a new book needs lives in `createBook`.
+- A `.part` file and `.applibris-write-probe` are invisible to a sweep by
+  suffix. Nothing else must acquire a supported suffix before it is whole.
 - The watcher never reads, hashes or parses a file. It pokes the one scan
   goroutine, so two sweeps can never overlap and correctness never depends
   on an event arriving.
@@ -286,6 +305,29 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `search_*.json`; each test file says which. Never hand-edit a fixture to
   make a test pass.
 
+### Import (`docs/notes/import.md`)
+
+- Format is decided by content in `detectSuffix`; the client's filename and
+  `Content-Type` never choose the parser or the suffix written.
+- Confirm never trusts the preview's verdict. `IndexFile`'s answer is the
+  truth, and an already-indexed outcome at confirm is a second location,
+  not an error.
+- A failed `IndexFile` leaves the library file in place. Never delete a
+  file the library already holds over an index error.
+- The library is written only as `<name>.part` then `Rename`; nothing
+  creates a supported suffix in the library directly. The name is claimed
+  with both an `Lstat` on the final name and an `O_EXCL` on the `.part`.
+- Staged state is in memory and on `os.TempDir()`. Nothing about a stage is
+  written to the database, and `importer.New` wipes the staging directory.
+- The write probe runs once at startup. A per-request check would answer
+  differently only when confirm is about to report its own error.
+- A repeated confirm answers the first call's book id rather than copying
+  the file in again, which is why the record outlives the confirm.
+- `internal/importer` imports `internal/scanner`, so `internal/scanner`'s
+  in-package tests cannot import `internal/service`. `capmetadata_test.go`
+  is `package scanner_test` over `export_test.go` for that reason; do not
+  move it back.
+
 ### Web and service (`docs/notes/web.md`)
 
 - A fragment is answered when `HX-Request` is present **and**
@@ -309,6 +351,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `Sec-Fetch-Site` through on purpose; the opt-out mode depends on that.
 - Every route that renders the send control copies `SendableNote`, so a
   fragment can never offer a button the full page withholds.
+- The upload route extends its own read deadline through
+  `http.NewResponseController`; `cmd/server`'s `ReadTimeout` is never
+  loosened for the other routes. `http.MaxBytesReader` bounds the body,
+  `importer`'s own count bounds the file, and only the second is the number
+  a refusal names.
 - `providerSourceNote` renders a marker for a provider's name and nothing
   for `embedded`, `manual` or absent. Editing clears the marker because the
   POST handler reloads the book rather than echoing the input.

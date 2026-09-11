@@ -39,6 +39,15 @@ path and is registered in the index in the same transaction that created
 it, so the next sweep sees a known content hash rather than a mystery
 arrival.
 
+The app writes exactly one kind of path into the library today: a book
+imported through the web UI, which lands in the root under a name derived
+from the file that was offered. It is written as `<name>.part` and renamed
+onto `<name>`, so a half-written file is never indexed, and it is indexed in
+the confirming request through the scanner's own per-file path. A library
+directory that cannot be written is a legitimate deployment — the scanner
+only ever reads it — so importing is probed for at startup and offered or
+explained rather than assumed. See `docs/notes/import.md`.
+
 The library is a flat, unorganised pile of files. There are no folder
 conventions and no directory-as-metadata heuristics, because a folder name
 is a guess about the file inside it and the file's own metadata is not.
@@ -107,6 +116,14 @@ been started.
   annoying to undo.
 - **Programmatic API.** Expected later, not OPDS. The service layer
   beneath the HTTP handlers exists so it can be a second thin transport.
+  It is not free, and the obstacle is worth recording before the plan that
+  builds it rediscovers it: every state-changing route is refused unless it
+  carries `Sec-Fetch-Site`, which a non-browser client never sends. So an
+  API needs a credential of its own — a bearer token from an `API_TOKEN`
+  variable — and its routes must bypass `sameSiteOnly` on the strength of
+  it. The service surface itself is ready: import, for instance, takes a
+  reader and returns a stage, or takes an id and returns a book, so a
+  one-shot API import is `StageImport` then `ConfirmImport` in one handler.
 - **Authentication and user management.** See above.
 
 Three things are ruled out within enrichment on the same footing:

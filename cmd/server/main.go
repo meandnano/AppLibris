@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"library/internal/enrich"
+	"library/internal/importer"
 	"library/internal/providers"
 	"library/internal/resend"
 	"library/internal/scanner"
@@ -76,6 +79,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("parse REQUIRE_FETCH_METADATA: %w", err)
 	}
+	maxImportSize, err := parseByteSize(envOrDefault("MAX_IMPORT_SIZE", "64MiB"))
+	if err != nil {
+		return fmt.Errorf("parse MAX_IMPORT_SIZE: %w", err)
+	}
 
 	metadataProviderNames := metadataProviderNames(os.LookupEnv)
 
@@ -131,7 +138,27 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 
-	svc := service.New(db)
+	// The probe runs after the library directory is resolved and before
+	// anything is served, so the answer is settled for the run: import is
+	// either on or it is off, and no request has to rediscover it.
+	importDir := filepath.Join(os.TempDir(), "applibris-imports")
+	libraryWritable := probeWritable(libraryDir)
+	stager, err := importer.New(db, importer.Options{
+		LibraryDir: libraryDir,
+		CoversDir:  coversDir,
+		TempDir:    importDir,
+		MaxSize:    maxImportSize,
+		Writable:   libraryWritable,
+	})
+	if err != nil {
+		// The one early return past storage.Open, so it is also the one
+		// that has to close the database itself.
+		db.Close()
+		return err
+	}
+
+	svc := service.New(db, service.WithImporter(stager))
+	importEnabled := svc.ImportEnabled()
 
 	// Both RESEND_API_KEY and RESEND_FROM must be set to send anything —
 	// browsing must still work on a dev machine with neither, so a missing
@@ -184,7 +211,7 @@ func run(ctx context.Context) error {
 	if !requireFetchMetadata {
 		slog.Warn("REQUIRE_FETCH_METADATA=false: state-changing requests without fetch metadata are admitted, so cross-site protection depends on the listener being unreachable from any browser except through an HTTPS gateway")
 	}
-	mux.Handle("/", fetchMetadataGuard(requireFetchMetadata, web.Routes(svc, coversDir, sendEnabled, enrichEnabled)))
+	mux.Handle("/", fetchMetadataGuard(requireFetchMetadata, web.Routes(svc, coversDir, sendEnabled, enrichEnabled, importEnabled)))
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -206,7 +233,8 @@ func run(ctx context.Context) error {
 		// The three paths are the resolved ones, which is the point of
 		// logging them: a symlinked LIBRARY_DIR is exactly the configuration
 		// whose effective root nothing else on the box makes visible
-		slog.Info("listening", "addr", addr, "db_path", dbPath, "library_dir", libraryDir, "covers_dir", coversDir)
+		slog.Info("listening", "addr", addr, "db_path", dbPath, "library_dir", libraryDir, "covers_dir", coversDir,
+			"import_enabled", importEnabled, "import_staging_dir", importDir, "max_import_size", maxImportSize)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 			return
@@ -298,6 +326,15 @@ func run(ctx context.Context) error {
 		enrichWorker.Run(scanCtx)
 	}()
 
+	// On scanCtx like every other background loop, so a staged file is
+	// never deleted out from under a confirm that is running while the
+	// process shuts down.
+	janitorDone := make(chan struct{})
+	go func() {
+		defer close(janitorDone)
+		stager.RunJanitor(scanCtx)
+	}()
+
 	select {
 	case err := <-serveErr:
 		// A serving failure isn't a signal, so ctx (and scanCtx, derived
@@ -314,6 +351,7 @@ func run(ctx context.Context) error {
 			waitForBackground(cancelScan, workerDone, deadline.Done(), "sender")
 		}
 		waitForBackground(cancelScan, enrichDone, deadline.Done(), "enrichment")
+		waitForBackground(cancelScan, janitorDone, deadline.Done(), "import janitor")
 		cancelDeadline()
 		if closeErr := db.Close(); closeErr != nil {
 			slog.Error("close database", "error", closeErr)
@@ -347,8 +385,107 @@ func run(ctx context.Context) error {
 		waitForBackground(cancelScan, workerDone, shutdownCtx.Done(), "sender")
 	}
 	waitForBackground(cancelScan, enrichDone, shutdownCtx.Done(), "enrichment")
+	waitForBackground(cancelScan, janitorDone, shutdownCtx.Done(), "import janitor")
 
 	return db.Close()
+}
+
+// writeProbeName is the file probeWritable creates and removes. It begins
+// with a dot and carries no supported suffix, so a sweep that overlaps it
+// walks past it: the scanner indexes neither.
+const writeProbeName = ".applibris-write-probe"
+
+// probeWritable reports whether the process can create a file in dir, which
+// is what decides whether importing is offered for the run.
+//
+// A probe rather than a look at the mode bits, because a read-only mount,
+// an ACL and a uid mismatch all fail at the same call and none of them
+// shows in the mode. Once at startup rather than per request, because the
+// answer does not change while the process runs and a confirm that fails
+// anyway reports its own error.
+//
+// Failing is not a startup failure: the read-only library is the
+// documented deployment, and everything else about the app works on one.
+// It is a Warn naming both uids, the shape mkdirError already uses for the
+// first thing that goes wrong in a container.
+func probeWritable(dir string) bool {
+	path := filepath.Join(dir, writeProbeName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		slog.Warn("importing disabled", "error", importProbeError(dir, err))
+		return false
+	}
+	f.Close()
+	// A probe left behind is the one piece of litter this can produce, so
+	// it is worth a line of its own: it is harmless, the scanner ignores
+	// it, and the next run reuses the name.
+	if err := os.Remove(path); err != nil {
+		slog.Warn("could not remove the library write probe", "path", path, "error", err)
+	}
+	return true
+}
+
+// importProbeError explains a library directory the process may not write,
+// naming the uid it runs as and the uid that owns the directory — the same
+// two facts mkdirError names, and for the same reason: a NAS bind mount is
+// owned by the share's user, an Unraid one by nobody, and neither is
+// visible from the bare permission-denied.
+func importProbeError(dir string, err error) error {
+	wrapped := fmt.Errorf("cannot write to library directory %s: %w", dir, err)
+	if !errors.Is(err, fs.ErrPermission) {
+		return wrapped
+	}
+	if owner, path, ok := nearestOwnerUID(dir); ok {
+		return fmt.Errorf("%w (running as uid %d; %s is owned by uid %d)", wrapped, os.Getuid(), path, owner)
+	}
+	return fmt.Errorf("%w (running as uid %d)", wrapped, os.Getuid())
+}
+
+// byteSuffixes maps the size suffixes MAX_IMPORT_SIZE accepts to their
+// multipliers. Both spellings are here because both are in circulation and
+// neither reading is surprising enough to refuse: "64M" from a person
+// thinking in megabytes and "64Mi" from one thinking in mebibytes should
+// not differ by a factor nobody asked about, so the decimal ones are exact
+// powers of ten and the binary ones exact powers of two, as written.
+var byteSuffixes = []struct {
+	suffix string
+	unit   int64
+}{
+	{"KiB", 1 << 10}, {"MiB", 1 << 20}, {"GiB", 1 << 30},
+	{"Ki", 1 << 10}, {"Mi", 1 << 20}, {"Gi", 1 << 30},
+	{"KB", 1000}, {"MB", 1000 * 1000}, {"GB", 1000 * 1000 * 1000},
+	{"K", 1000}, {"M", 1000 * 1000}, {"G", 1000 * 1000 * 1000},
+	{"B", 1},
+}
+
+// parseByteSize reads a byte count with an optional unit suffix.
+//
+// Zero and negative are refused rather than read as "no limit": the cap is
+// what bounds an upload into temporary space, and a deployment that meant
+// to disable importing takes away write access to the library instead,
+// which is the thing the app actually checks.
+func parseByteSize(raw string) (int64, error) {
+	text := strings.TrimSpace(raw)
+	unit := int64(1)
+	for _, s := range byteSuffixes {
+		if len(s.suffix) < len(text) && strings.EqualFold(text[len(text)-len(s.suffix):], s.suffix) {
+			unit = s.unit
+			text = strings.TrimSpace(text[:len(text)-len(s.suffix)])
+			break
+		}
+	}
+
+	n, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a byte count", raw)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("must be positive: %q", raw)
+	}
+	if n > math.MaxInt64/unit {
+		return 0, fmt.Errorf("is too large: %q", raw)
+	}
+	return n * unit, nil
 }
 
 // resolveDir creates dir if it is absent and returns it with every symlink

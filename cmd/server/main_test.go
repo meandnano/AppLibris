@@ -767,3 +767,98 @@ func TestRunScanKeepsTheReportedSetWhenNothingWasReconciled(t *testing.T) {
 		}
 	})
 }
+
+// The probe is what decides whether importing is offered for the run, and
+// a read-only mount is the deployment the README documents — so it warns
+// and carries on rather than failing startup.
+func TestProbeWritableDisablesImportOnAReadOnlyLibrary(t *testing.T) {
+	requireModeEnforced(t)
+
+	libDir := t.TempDir()
+	if err := os.Chmod(libDir, 0o555); err != nil {
+		t.Fatalf("chmod the library read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(libDir, 0o755) })
+
+	var logs strings.Builder
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if probeWritable(libDir) {
+		t.Fatal("probeWritable reported a read-only directory writable")
+	}
+	if !strings.Contains(logs.String(), "running as uid") || !strings.Contains(logs.String(), "owned by uid") {
+		t.Errorf("the warning names neither side of the mismatch:\n%s", logs.String())
+	}
+}
+
+func TestProbeWritableLeavesNothingBehind(t *testing.T) {
+	libDir := t.TempDir()
+
+	if !probeWritable(libDir) {
+		t.Fatal("probeWritable reported a writable directory unwritable")
+	}
+	entries, err := os.ReadDir(libDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", libDir, err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the probe left %v behind", entries)
+	}
+}
+
+func TestParseByteSize(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{raw: "64MiB", want: 64 << 20},
+		{raw: "64Mi", want: 64 << 20},
+		{raw: "100M", want: 100 * 1000 * 1000},
+		{raw: "100MB", want: 100 * 1000 * 1000},
+		{raw: "512KiB", want: 512 << 10},
+		{raw: "2GiB", want: 2 << 30},
+		{raw: " 1024 ", want: 1024},
+		{raw: "1024B", want: 1024},
+		{raw: "64mib", want: 64 << 20},
+		{raw: "0", wantErr: true},
+		{raw: "-1", wantErr: true},
+		{raw: "abc", wantErr: true},
+		{raw: "", wantErr: true},
+		{raw: "MiB", wantErr: true},
+		{raw: "9223372036854775807GiB", wantErr: true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := parseByteSize(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseByteSize(%q) = %d, want an error", tt.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseByteSize(%q): %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseByteSize(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsABadImportSize(t *testing.T) {
+	t.Setenv("ADDR", freeAddr(t))
+	t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "library.db"))
+	t.Setenv("LIBRARY_DIR", t.TempDir())
+	t.Setenv("COVERS_DIR", t.TempDir())
+	t.Setenv("METADATA_PROVIDERS", "")
+	t.Setenv("MAX_IMPORT_SIZE", "0")
+
+	err := run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "MAX_IMPORT_SIZE") {
+		t.Fatalf("run = %v, want a MAX_IMPORT_SIZE failure", err)
+	}
+}
