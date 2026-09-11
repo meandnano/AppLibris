@@ -113,10 +113,10 @@ owner of the nearest *existing* ancestor, since the target is what
 neither side of the mismatch it reports, and both are needed to fix it —
 the container runs as whatever uid it was given while a NAS bind mount is
 owned by the share's user, an Unraid one by `nobody`, and a fresh named
-volume by root. The ancestor is named as an absolute path: the configured
-defaults are relative against a working directory of `/`, so the ancestor of
-`./data/covers` reads back as `data`, which is not the mount the person
-wrote and not a path they can go and look at. The
+volume by root. The ancestor is named as an absolute path: a relative
+`COVERS_DIR`, which is what the development target passes, leaves the
+ancestor of `./data/covers` reading back as `data`, which is neither the
+path the person wrote nor one they can go and look at. The
 owner comes from the platform's stat struct, so `ownerUID` is build-tagged
 `unix` — not `linux`, though the image is: `syscall.Stat_t` carries `Uid` on
 every unix, and the test asserting the message runs on the development

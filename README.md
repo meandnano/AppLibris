@@ -143,11 +143,11 @@ working directory, which is `/` in the container.
 | Variable | Default | Meaning |
 |---|---|---|
 | `ADDR` | `:8080` | Address the HTTP server listens on. |
-| `LIBRARY_DIR` | `./library` | Directory holding the books. Only ever read, so it may be read-only, but it must already exist — it is never created. A symlink is followed; a dangling one fails startup. |
-| `COVERS_DIR` | `./data/covers` | Where cover thumbnails are written. Created on first run, so its parent must be writable. Safe to delete. |
-| `DB_PATH` | `./data/library.db` | SQLite database file. Created on first run, so its directory must be writable. |
+| `LIBRARY_DIR` | `/library` | Directory holding the books. Only ever read, so it may be read-only, but it must already exist — it is never created. A symlink is followed; a dangling one fails startup. |
+| `COVERS_DIR` | `/data/covers` | Where cover thumbnails are written. Created on first run, so its parent must be writable. Safe to delete. |
+| `DB_PATH` | `/data/library.db` | SQLite database file. Created on first run, so its directory must be writable. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR`. Logs go to stderr. |
-| `SCAN_INTERVAL` | `15m` | How often the library is rescanned regardless of filesystem events. |
+| `SCAN_INTERVAL` | `1h` | How often the library is rescanned regardless of filesystem events. |
 | `MISSING_GRACE` | `24h` | How long a file must stay missing before its record is removed. Must not be negative. |
 | `WATCH_ENABLED` | `true` | Watch the library directory for changes. `false` relies on the rescan alone. |
 | `WATCH_SETTLE` | `5s` | How long the directory must be quiet after a change before a rescan runs. |

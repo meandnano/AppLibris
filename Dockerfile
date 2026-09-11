@@ -17,11 +17,12 @@ RUN CGO_ENABLED=0 go build -o /server ./cmd/server
 # account up, so any uid works with nothing to create in the image. That
 # user needs write access to DB_PATH and COVERS_DIR, and only read access to
 # LIBRARY_DIR, on whatever volumes are mounted over them.
-FROM gcr.io/distroless/static-debian12:nonroot
-# The nonroot image sets WORKDIR /home/nonroot; cmd/server's defaults
-# (./library, ./data/library.db, ./data/covers) are relative paths that
-# must resolve from / to match CLAUDE.md's documented dev-vs-container
-# convention (dev's ./library, a container's /library) — override it back.
+FROM gcr.io/distroless/static-debian13:nonroot
+
+# The nonroot image sets WORKDIR /home/nonroot. cmd/server's defaults
+# (/library, /data/library.db, /data/covers) are absolute, so this is only
+# what a relative path given in the environment resolves against — / and not
+# a home directory nothing is ever mounted over.
 WORKDIR /
 COPY --from=build /server /server
 EXPOSE 8080
