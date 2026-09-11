@@ -609,10 +609,10 @@ func TestMkdirPermissionErrorNamesBothUIDs(t *testing.T) {
 	}
 }
 
-// COVERS_DIR and DB_PATH default to relative paths and the container's
-// working directory is /, so the ancestor of "./data/covers" is the
-// component "data". Naming that is naming something the person cannot go
-// and look at, and which does not appear in the mount they wrote
+// A relative COVERS_DIR or DB_PATH, as the development target passes,
+// makes the ancestor of "./data/covers" the component "data". Naming that
+// is naming something the person cannot go and look at, and which does not
+// appear in the path they configured
 func TestMkdirPermissionErrorNamesAnAbsolutePath(t *testing.T) {
 	requireModeEnforced(t)
 
@@ -622,8 +622,8 @@ func TestMkdirPermissionErrorNamesAnAbsolutePath(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(parent, 0o755) })
 
-	// Relative to the parent, so resolveDir sees exactly the shape the
-	// container's defaults give it
+	// Relative to the parent, so resolveDir sees exactly the shape a
+	// relative COVERS_DIR gives it
 	t.Chdir(parent)
 
 	_, err := resolveDir("covers directory", filepath.Join(".", "data", "covers"))

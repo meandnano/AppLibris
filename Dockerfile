@@ -19,10 +19,10 @@ RUN CGO_ENABLED=0 go build -o /server ./cmd/server
 # LIBRARY_DIR, on whatever volumes are mounted over them.
 FROM gcr.io/distroless/static-debian13:nonroot
 
-# The nonroot image sets WORKDIR /home/nonroot; cmd/server's defaults
-# (./library, ./data/library.db, ./data/covers) are relative paths that
-# must resolve from / to match CLAUDE.md's documented dev-vs-container
-# convention (dev's ./library, a container's /library) — override it back.
+# The nonroot image sets WORKDIR /home/nonroot. cmd/server's defaults
+# (/library, /data/library.db, /data/covers) are absolute, so this is only
+# what a relative path given in the environment resolves against — / and not
+# a home directory nothing is ever mounted over.
 WORKDIR /
 COPY --from=build /server /server
 EXPOSE 8080

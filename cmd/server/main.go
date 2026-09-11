@@ -445,11 +445,10 @@ func mkdirError(label, dir string, err error) error {
 // nearestOwnerUID walks dir's components from the deepest down and reports
 // the owner of the first one that exists, along with the path it read.
 //
-// The path is made absolute for the message. The configured defaults are
-// relative and the container's working directory is /, so the ancestor of
-// "./data/covers" reads back as "data" — a name the person is then asked to
-// go and check the ownership of, and which does not appear in the mount
-// they wrote
+// The path is made absolute for the message, since a relative COVERS_DIR
+// or DB_PATH leaves the ancestor of "./data/covers" reading back as
+// "data" — a name the person is then asked to go and check the ownership
+// of, and which does not appear in the path they configured
 func nearestOwnerUID(dir string) (uid int, path string, ok bool) {
 	components := ancestors(dir)
 	for i := len(components) - 1; i >= 0; i-- {
