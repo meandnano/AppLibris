@@ -104,7 +104,7 @@ func sanitizeValue(field storage.MetadataField, value string) string {
 	if field != storage.FieldDescription {
 		value = strings.Join(strings.Fields(value), " ")
 	} else {
-		value = capBlankLines(value)
+		value = storage.CapBlankLines(value)
 	}
 	value = strings.TrimSpace(value)
 
@@ -121,40 +121,6 @@ func sanitizeValue(field storage.MetadataField, value string) string {
 	}
 	if len(value) > limit {
 		value = strings.ToValidUTF8(value[:limit], "")
-	}
-	return value
-}
-
-// capBlankLines collapses a run of three or more newlines to two, leaving a
-// single newline alone: at most one blank line between paragraphs.
-//
-// A description is the one field that keeps its line breaks, and
-// .detail__description renders them, so what a provider sends is now what a
-// reader sees — including the four blank lines a scraped blurb arrives
-// with. internal/googlebooks already normalises its own HTML on the way
-// out; doing it here as well makes it a property of every provider's value
-// rather than of one client, which is where the next provider will need it.
-// Open Library's edition descriptions are plain and mostly single-block, so
-// this costs nothing there today.
-//
-// It normalises \r\n first, so a CRLF description is not left with a lone
-// carriage return in the middle of a paragraph, and strips each line's
-// trailing whitespace before counting. A line of two spaces is a blank
-// line to a reader, and `pre-line` collapses the spaces while keeping both
-// newlines around them, so without the strip a blurb padded with spaces
-// renders exactly the run of blank lines this exists to prevent.
-func capBlankLines(value string) string {
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = strings.ReplaceAll(value, "\r", "\n")
-
-	lines := strings.Split(value, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, " \t")
-	}
-	value = strings.Join(lines, "\n")
-
-	for strings.Contains(value, "\n\n\n") {
-		value = strings.ReplaceAll(value, "\n\n\n", "\n\n")
 	}
 	return value
 }

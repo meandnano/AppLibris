@@ -713,3 +713,52 @@ func TestReadMetadataRefusesOPFOverTheByteCap(t *testing.T) {
 		t.Fatal("ReadMetadata: want an error for an OPF over the byte cap")
 	}
 }
+
+// A publisher's dc:description is often marketing copy carrying escaped
+// HTML, which the XML decoder hands back as literal tags. Nothing
+// downstream renders a description as markup, so the parser flattens it —
+// internal/fb2 reaches the same shape structurally, and the scanner treats
+// the two formats alike.
+func TestReadMetadataFlattensHTMLDescription(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Marketing Copy</dc:title>
+    <dc:description>&lt;b&gt;Selected&lt;/b&gt; by &lt;i&gt;the paper&lt;/i&gt;.&lt;p&gt;Faced with war &amp;amp; crime.&lt;/p&gt;&lt;p&gt;It continues.&lt;/p&gt;</dc:description>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+
+	want := "Selected by the paper.\nFaced with war & crime.\n\nIt continues."
+	if got.Description != want {
+		t.Errorf("Description = %q, want %q", got.Description, want)
+	}
+}
+
+// A '<' a book's own prose uses is not markup, and the flattening must not
+// eat the text behind it.
+func TestReadMetadataKeepsABareLessThanInADescription(t *testing.T) {
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Inequalities</dc:title>
+    <dc:description>Why a &lt; b matters.</dc:description>
+  </metadata>
+</package>`
+
+	path := buildTestEPUB(t, opfXML)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if got.Description != "Why a < b matters." {
+		t.Errorf("Description = %q, want the prose intact", got.Description)
+	}
+}

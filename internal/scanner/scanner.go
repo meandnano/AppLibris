@@ -851,11 +851,11 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 	return orphanedID, orphanedTitle, inherited, err
 }
 
-// capMetadata bounds what a file had embedded in it to the same limits a
-// person's edit and a provider's answer meet, so a length the editor
-// refuses is never stored: a book whose 10 MB dc:description reached the
-// column as it came is a book whose description can no longer be saved
-// unchanged, and nothing else re-derives that value afterwards.
+// capMetadata bounds what a file had embedded in it to the same rules a
+// person's edit and a provider's answer meet, so a value the editor refuses
+// is never stored: a book whose 10 MB dc:description reached the column as
+// it came is a book whose description can no longer be saved unchanged, and
+// nothing else re-derives that value afterwards.
 //
 // Truncated, never rejected. A book whose description is too long is still
 // a book, and a filename title beside a dropped one is worse than prose cut
@@ -880,12 +880,38 @@ func capMetadata(path string, m bookMeta) bookMeta {
 	return m
 }
 
-// capValue truncates value to limit bytes on a rune boundary, exactly as
-// internal/enrich's sanitizeValue does, and trims what the cut exposed so
-// the stored value is one internal/service's normalizeField hands back
-// unchanged. Info rather than Warn: a verbose file is worth knowing about
-// and is not an error
+// capValue bounds one embedded value to what internal/service's
+// normalizeField hands back unchanged, exactly as internal/enrich's
+// sanitizeValue bounds a provider's answer: every field but description is
+// collapsed onto one line, then truncated to limit bytes on a rune boundary
+// with what the cut exposed trimmed off.
+//
+// Length is not the only thing normalizeField refuses. It rejects a line
+// break in every field but description, and neither parser prevents one: a
+// metadata element whose text is wrapped across two lines in the source XML
+// keeps the break, since TrimSpace only removes what sits at either end. A
+// stored break never reaches that validation error — it reaches the editor,
+// where an <input type="text"> drops it on submit and rewrites the field
+// behind the person's back, and where a wrapped author name in the
+// <textarea> is split into two authors by normalizeAuthors.
+//
+// The collapse runs before the length cut, since it can only shorten the
+// value and cutting first would let a truncation boundary decide whether a
+// break survives. Description takes the trim alone, which is the rest of what
+// normalizeField would hand back: its line breaks are the point, and each
+// parser has already capped its blank lines through storage.CapBlankLines —
+// internal/epub inside PlainDescription, internal/fb2 at the end of
+// annotationText. Doing it again here would cap a run neither of them can
+// produce.
+//
+// Info rather than Warn on truncation: a verbose file is worth knowing about
+// and is not an error. A collapsed break is not worth a line at all
 func capValue(path string, field storage.MetadataField, value string, limit int) string {
+	if field != storage.FieldDescription {
+		value = strings.Join(strings.Fields(value), " ")
+	} else {
+		value = strings.TrimSpace(value)
+	}
 	if len(value) <= limit {
 		return value
 	}

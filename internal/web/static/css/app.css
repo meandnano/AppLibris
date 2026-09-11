@@ -1,4 +1,4 @@
-/* Bookshelf — library UI.
+/* AppLibris — library UI.
    Editorial: hairline rules, a serif for titles, mono for anything the
    machine is saying. Covers do the colour work; one accent, used sparingly.
    Light is the default; dark follows the OS unless [data-theme] overrides. */
@@ -997,7 +997,12 @@ a.masthead__link:hover {
   color: var(--fg-faint);
 }
 
+/* Takes the row's free space, so a value sits against its label rather
+   than against the far edge: the row is space-between, and a dd sized to
+   its content would be pushed right. */
 .detail__meta-row dd {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: 13.5px;
 }
@@ -1251,7 +1256,6 @@ a.masthead__link:hover {
   font-size: 11px;
 }
 
-.editable--meta dd,
 .editable--meta form {
   width: 100%;
 }

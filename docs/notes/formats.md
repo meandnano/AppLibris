@@ -61,6 +61,31 @@ The check digit is never validated: a malformed ISBN in a file is still the
 best identifier it offers, and a wrong check digit still keys a provider
 lookup that answers no-match cleanly.
 
+**Description.** `dc:description` legally holds escaped HTML, and
+publishers put marketing copy there, so the XML decoder hands back a string
+of literal tags. It is flattened through `storage.PlainDescription` before
+it leaves the package: nothing downstream renders a description as markup,
+and a tag left in shows a reader a literal `<p>` and offers them the same
+markup to hand-fix in the edit textarea. The same function is
+`internal/googlebooks`' flattening, which is why it sits in
+`internal/storage` below both — `storage.md` carries the argument.
+
+The flattening also decodes character references, which is why it decodes
+only terminated ones: after the XML decoder has run, what is left is as
+often ordinary prose as it is markup, and a bare `&` in prose must survive.
+
+That is what makes the shared `Metadata` shape carry plain text from either
+format. FB2 needs no flattening pass of its own: its annotation is flattened
+structurally, by a decoder that drops inline markup and joins paragraphs,
+rather than by rewriting a string.
+
+It does need the other half. A `<p>` is chardata, so a paragraph wrapped
+across source lines keeps every break it was written with, which the join
+between paragraphs cannot see — `annotationText` therefore ends on
+`storage.CapBlankLines`, the call `PlainDescription` also ends on. Blank
+lines in a description are the parser's business in both formats, which is
+what lets `internal/scanner` cap lengths and leave shape alone.
+
 **Cover.** EPUB 3's `properties="cover-image"` manifest item, falling back
 to EPUB 2's `<meta name="cover">`. The href is percent-decoded and any
 fragment stripped before the zip lookup, since a manifest href is a URI

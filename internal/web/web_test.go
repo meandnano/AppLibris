@@ -1373,3 +1373,65 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { slog.SetDefault(restore) })
 	return &buf
 }
+
+// The brand appears in three places that have to agree: the masthead, the
+// document title every page renders, and the suffix edit.js re-applies
+// after an inline title edit. A rename that misses the script leaves a tab
+// silently renamed the moment someone saves a title, which no handler test
+// would notice.
+func TestBrandIsConsistentAcrossMastheadTitleAndScript(t *testing.T) {
+	const brand = "AppLibris"
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	handler := Routes(service.New(db), t.TempDir(), false, false)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "<title>Library · "+brand+"</title>") {
+		t.Errorf("the document title does not carry %q; body = %q", brand, body)
+	}
+	if !strings.Contains(body, `<span class="masthead__brand">`+brand+`</span>`) {
+		t.Errorf("the masthead does not carry %q", brand)
+	}
+
+	js, err := fs.ReadFile(staticFS, "static/js/edit.js")
+	if err != nil {
+		t.Fatalf("read edit.js: %v", err)
+	}
+	if !strings.Contains(string(js), `" · `+brand+`"`) {
+		t.Errorf("edit.js re-applies a different brand than the page renders")
+	}
+}
+
+// .detail__meta-row is justify-content: space-between, so a <dd> sized to
+// its content is pushed to the far edge. Four of the five rows carry an
+// editor whose control fills the cell; `added` is the one that does not, and
+// flex: 1 on every <dd> is the only thing keeping its value level with the
+// rest. It reads as redundant, which is why it is pinned.
+func TestMetadataValuesTakeTheRowsFreeSpace(t *testing.T) {
+	css, err := fs.ReadFile(staticFS, "static/css/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+
+	blocks := regexp.MustCompile(`(?s)([^{}]*)\{([^}]*)\}`).FindAllStringSubmatch(string(css), -1)
+	for _, b := range blocks {
+		// The capture runs back to the previous rule, so it carries any
+		// comment above this one; the selector is its last line
+		lines := strings.Split(strings.TrimSpace(b[1]), "\n")
+		if strings.TrimSpace(lines[len(lines)-1]) != ".detail__meta-row dd" {
+			continue
+		}
+		if !strings.Contains(b[2], "flex: 1") {
+			t.Errorf(".detail__meta-row dd does not grow, so the added row's value is pushed to the far edge; body = %q", b[2])
+		}
+		return
+	}
+	t.Error("no .detail__meta-row dd rule, so every metadata value falls back to the row's space-between")
+}

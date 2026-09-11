@@ -98,11 +98,14 @@ func ReadMetadata(path string) (Metadata, error) {
 	}
 
 	return Metadata{
-		Title:         first(pkg.Metadata.Title),
-		Authors:       trimAll(pkg.Metadata.Creator),
-		Language:      first(pkg.Metadata.Language),
-		ISBN:          findISBN(pkg),
-		Description:   first(pkg.Metadata.Description),
+		Title:    first(pkg.Metadata.Title),
+		Authors:  trimAll(pkg.Metadata.Creator),
+		Language: first(pkg.Metadata.Language),
+		ISBN:     findISBN(pkg),
+		// dc:description legally holds escaped HTML, and publishers put
+		// marketing copy there; the scanner's Metadata shape carries plain
+		// text, which internal/fb2 arrives at structurally
+		Description:   storage.PlainDescription(first(pkg.Metadata.Description)),
 		Publisher:     first(pkg.Metadata.Publisher),
 		PublishedDate: findPublishedDate(pkg),
 		Cover:         readCover(&zr.Reader, opfPath, pkg),

@@ -27,7 +27,8 @@ here. See Documentation below for what these files may and may not say.
   `enrichment_jobs`. Search sanitisation (`SanitizeFTSQuery`,
   `NormalizeSearchQuery`), the keyset cursor (`BookPage`), and the
   derivations and limits every writer of a metadata column shares
-  (`SortTitle`, `NormalizeISBN`, the `Max*` constants) live here.
+  (`SortTitle`, `NormalizeISBN`, `PlainDescription`, `CapBlankLines`, the
+  `Max*` constants) live here.
   Note: `docs/notes/storage.md`.
 - `internal/epub`, `internal/fb2` — embedded metadata and cover bytes from
   each format, same `Metadata` shape so the scanner treats them alike.
@@ -144,6 +145,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
   guard (`bareISBN`, the whole identifier must be the run) rather than
   making the shared function pay for it. A scheme-marked EPUB identifier
   holding no run falls through to the next.
+- A format package hands the scanner a plain-text description. EPUB's
+  `dc:description` legally holds escaped HTML, so `internal/epub` runs it
+  through `storage.PlainDescription`; `internal/fb2` reaches the same shape
+  structurally and calls nothing. `PlainDescription` is also
+  `internal/googlebooks`' flattening — one derivation, never a private copy.
 - FB2's declared charset is decoded through `htmlindex`; only a label
   `htmlindex` does not know passes through unchanged.
 - Cover files are named by the *book's* content hash, not the thumbnail's
@@ -154,9 +160,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Identity is the content hash; path is an attribute. Known content at a
   new path is a `book_files` row, not a new book. `file_path` is relative to
   `LIBRARY_DIR`, slash-separated.
-- `capMetadata` caps embedded metadata in `createBook`, through
-  `storage.Max*`: truncate on a rune boundary and log at Info, never reject
-  the file, and the field stays `embedded`.
+- `capMetadata` bounds embedded metadata in `createBook` to what the editor
+  accepts: every field but description is collapsed onto one line, then
+  truncated through `storage.Max*` on a rune boundary and logged at Info.
+  The collapse runs **before** the cut. Never reject the file; the field
+  stays `embedded`.
 - `LIBRARY_DIR` is stat'd, never created, so a read-only mount works and an
   absent one fails startup. `COVERS_DIR` and `DB_PATH`'s directory are
   created.
@@ -238,7 +246,16 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - All three writers of the metadata columns — `internal/service`,
   `sanitizeValue` here and `internal/scanner`'s `capMetadata` — cap through
   `storage.Max*`; never restate a number, or a value one writes becomes
-  uneditable. A description also caps consecutive newlines at two.
+  uneditable. A description that arrives on its own is also capped at two
+  consecutive newlines, through `storage.CapBlankLines`: `sanitizeValue`
+  here, `internal/epub` through `PlainDescription`, `internal/fb2` at the
+  end of `annotationText`. A person's edit is deliberately not capped —
+  `normalizeField` trims and bounds a description and shapes it no further,
+  since the blank lines someone typed are their own.
+- `sanitizeValue` does not flatten markup. Google's description is HTML and
+  `internal/googlebooks` flattens it through `storage.PlainDescription`
+  before it leaves that package; Open Library's is plain, and a blanket
+  strip here would answer for a source that never sends markup.
 - Providers name a cover URL and never download it. The worker fetches
   under `enrich.MaxCoverBytes` with the scheme checked on every redirect
   hop, and refuses loopback, private, link-local, multicast and

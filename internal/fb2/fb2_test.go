@@ -657,3 +657,40 @@ func TestReadMetadataOverCapCoverBinaryCostsOnlyTheCappedCopy(t *testing.T) {
 		t.Errorf("reading the node as the cover cost %d bytes over skipping it, want under %d (the capped copy and its growth)", coverCost-skipCost, 3*maxCoverBase64Bytes)
 	}
 }
+
+const testFB2AnnotationBlankLinesTemplate = `<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info>
+      <book-title>Wrapped Annotation</book-title>
+      <annotation>
+        <p>First paragraph.
+
+
+
+
+Still the same paragraph.</p>
+        <p>Second paragraph.</p>
+      </annotation>
+    </title-info>
+  </description>
+</FictionBook>`
+
+// A <p> is chardata, so joining paragraphs is not the whole shape: a
+// paragraph wrapped across source lines carries every break it was written
+// with, and .detail__description renders them. The cap is
+// storage.CapBlankLines, the same one internal/epub reaches through
+// storage.PlainDescription, so a description's blank lines are the parser's
+// business in either format.
+func TestReadMetadataAnnotationCapsBlankLines(t *testing.T) {
+	path := buildTestFB2(t, testFB2AnnotationBlankLinesTemplate)
+
+	got, err := ReadMetadata(path)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	want := "First paragraph.\n\nStill the same paragraph.\n\nSecond paragraph."
+	if got.Description != want {
+		t.Errorf("Description = %q, want %q", got.Description, want)
+	}
+}

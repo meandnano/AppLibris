@@ -217,3 +217,139 @@ func TestCreateBookCappedValuesAreEditable(t *testing.T) {
 		t.Errorf("authors round-tripped to %d names, want the %d they went in as", len(authorsAfter), len(authors))
 	}
 }
+
+// wrappedEPUB writes an EPUB whose metadata elements wrap across lines in
+// the source XML, which is legal and is what a generator that pretty-prints
+// its output produces. TrimSpace removes only what sits at either end, so
+// every break here is interior and reaches capValue
+func wrappedEPUB(t *testing.T, path string) {
+	t.Helper()
+
+	opfXML := `<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Violence
+      and Its Discontents</dc:title>
+    <dc:creator>Jean
+      Baptiste Roe</dc:creator>
+    <dc:publisher>Penguin
+      Publishing Group</dc:publisher>
+    <dc:description>One paragraph.
+Another paragraph.</dc:description>
+  </metadata>
+  <manifest></manifest>
+</package>`
+
+	writeTestEPUBWithOPF(t, path, opfXML)
+}
+
+// The other half of the property above: a value the editor refuses is never
+// stored either. normalizeField rejects a line break in every field but
+// description, so a wrapped one reaches the editor rather than the
+// validation error — an <input type="text"> drops it on submit and rewrites
+// the field behind the person's back, and a wrapped author name in the
+// <textarea> is split into two authors by normalizeAuthors
+func TestCreateBookWrappedValuesAreEditable(t *testing.T) {
+	libDir := t.TempDir()
+	coversDir := t.TempDir()
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	wrappedEPUB(t, filepath.Join(libDir, "wrapped.epub"))
+
+	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	file, err := db.FindFileByPath(ctx, "wrapped.epub")
+	if err != nil || file == nil {
+		t.Fatalf("FindFileByPath = %v, %v", file, err)
+	}
+	book, err := db.FindBookByID(ctx, file.BookID)
+	if err != nil || book == nil {
+		t.Fatalf("FindBookByID = %v, %v", book, err)
+	}
+
+	if book.Title != "Violence and Its Discontents" {
+		t.Errorf("Title = %q, want it collapsed onto one line", book.Title)
+	}
+	if book.Publisher != "Penguin Publishing Group" {
+		t.Errorf("Publisher = %q, want it collapsed onto one line", book.Publisher)
+	}
+	// Description is the one field that keeps its breaks, and the one
+	// normalizeField accepts them in
+	if !strings.Contains(book.Description, "\n") {
+		t.Errorf("Description = %q, want its paragraph break kept", book.Description)
+	}
+
+	authors, err := db.ListAuthorsForBook(ctx, book.ID)
+	if err != nil {
+		t.Fatalf("ListAuthorsForBook: %v", err)
+	}
+	if len(authors) != 1 || authors[0] != "Jean Baptiste Roe" {
+		t.Fatalf("Authors = %v, want one name on one line", authors)
+	}
+
+	svc := service.New(db)
+	for _, tt := range []struct {
+		field string
+		value string
+	}{
+		{"title", book.Title},
+		{"publisher", book.Publisher},
+		{"description", book.Description},
+		{"authors", strings.Join(authors, "\n")},
+	} {
+		if _, err := svc.UpdateBookMetadata(ctx, book.ID, service.MetadataUpdate{Field: tt.field, Value: tt.value}); err != nil {
+			t.Fatalf("UpdateBookMetadata %s: %v", tt.field, err)
+		}
+	}
+
+	authorsAfter, err := db.ListAuthorsForBook(ctx, book.ID)
+	if err != nil {
+		t.Fatalf("ListAuthorsForBook after the edits: %v", err)
+	}
+	if !slices.Equal(authorsAfter, authors) {
+		t.Errorf("authors round-tripped to %v, want the %v they went in as", authorsAfter, authors)
+	}
+
+	after, err := db.FindBookByID(ctx, book.ID)
+	if err != nil || after == nil {
+		t.Fatalf("FindBookByID after the edits = %v, %v", after, err)
+	}
+	if after.Title != book.Title || after.Publisher != book.Publisher || after.Description != book.Description {
+		t.Errorf("a field changed across a Save of what was shown: %q/%q/%q",
+			after.Title, after.Publisher, after.Description)
+	}
+}
+
+// capValue is what makes CLAUDE.md's claim about capMetadata true, so it is
+// tested directly rather than only through a scan: the property is a
+// property of the function, not of the two parsers that happen to trim
+// before calling it.
+func TestCapValueShapesEveryFieldTheEditorAccepts(t *testing.T) {
+	tests := []struct {
+		name  string
+		field storage.MetadataField
+		value string
+		want  string
+	}{
+		{"a wrapped title is one line", storage.FieldTitle, "Violence\n  and Its Discontents", "Violence and Its Discontents"},
+		{"a scalar is edge-trimmed", storage.FieldPublisher, "  Penguin  ", "Penguin"},
+		{"an author name is one line", storage.FieldAuthors, "Jean\n  Baptiste Roe", "Jean Baptiste Roe"},
+		{"a description keeps its breaks", storage.FieldDescription, "One.\n\nTwo.", "One.\n\nTwo."},
+		{"a description is edge-trimmed", storage.FieldDescription, "\n  One.\n\nTwo.  \n", "One.\n\nTwo."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limit := storage.MaxScalarBytes
+			if tt.field == storage.FieldDescription {
+				limit = storage.MaxDescriptionBytes
+			}
+			if got := capValue("t.epub", tt.field, tt.value, limit); got != tt.want {
+				t.Errorf("capValue(%s, %q) = %q, want %q", tt.field, tt.value, got, tt.want)
+			}
+		})
+	}
+}

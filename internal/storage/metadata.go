@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"html"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 )
 
 var ErrInvalidMetadataField = errors.New("invalid metadata field")
@@ -220,6 +222,281 @@ func isbnFromRun(run string) (string, bool) {
 
 	isbn := digits.String()
 	return isbn, len(isbn) == 10 || len(isbn) == 13
+}
+
+// blockTags are the tags whose boundary is a line break in the plain text
+// a description column holds. The markup a blurb arrives with is shallow —
+// paragraphs, line breaks and the odd list — so the rest carry no structure
+// worth preserving and are simply dropped
+var blockTags = map[string]bool{
+	"br": true, "p": true, "div": true, "li": true, "tr": true, "h1": true,
+	"h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+}
+
+// PlainDescription renders an HTML-formatted description as the plain text
+// books.description holds: a block tag becomes a line break, every other tag
+// is dropped, and a '<' that starts nothing tag-shaped is left where it is.
+//
+// One derivation for every reader that can be handed markup — internal/epub,
+// where dc:description legally holds escaped HTML, and internal/googlebooks,
+// whose Volumes API documents volumeInfo.description as HTML ("simple
+// formatting elements, such as b, i and br tags"). Nothing downstream renders
+// a description as markup: html/template escapes the detail page's, so a tag
+// left in shows a reader a literal "<p>" and the edit textarea then offers
+// them the same markup to hand-fix.
+//
+// internal/enrich's sanitizeValue deliberately does not call it. Open
+// Library's description is plain to begin with, and a blanket strip across
+// every provider would answer a question that source never asks.
+//
+// References are decoded only after the tags are gone, so text that was
+// itself escaped markup ("&lt;b&gt;") survives as the literal characters an
+// author wrote rather than being stripped as a tag.
+//
+// Every path returns one shape: capped through CapBlankLines and trimmed.
+// The condition on the scan is a fast path over the work, never over the
+// result — a description's blank lines cannot be capped only when it happens
+// to contain an ampersand, since one caller is handed markup and the other
+// ordinary prose and the page renders both with `white-space: pre-line`.
+// The trim is part of that shape: a caller testing the result against "" to
+// decide whether a source said anything — internal/googlebooks' enrichVolume
+// does — would otherwise read a description of "   " as an answer and
+// overwrite a real one with whitespace that internal/enrich's sanitizeValue
+// then trims to nothing, losing the field outright
+func PlainDescription(raw string) string {
+	text := raw
+	if strings.ContainsAny(raw, "<&") {
+		var b strings.Builder
+		b.Grow(len(raw))
+		for i := 0; i < len(raw); {
+			if raw[i] != '<' {
+				b.WriteByte(raw[i])
+				i++
+				continue
+			}
+			// A '<' that starts nothing tag-shaped is a character in the
+			// description, not markup: "a < b" must survive intact
+			end, name := tagAt(raw, i)
+			if end < 0 {
+				b.WriteByte(raw[i])
+				i++
+				continue
+			}
+			if blockTags[name] {
+				b.WriteByte('\n')
+			}
+			i = end
+		}
+		text = unescapeReferences(b.String())
+	}
+
+	return trimBlank(CapBlankLines(text))
+}
+
+// maxReferenceName bounds the run referenceAt will scan before giving up on
+// finding a terminating ';'. 31 is the longest name HTML defines,
+// CounterClockwiseContourIntegral — the entity table's keys carry the
+// semicolon and so measure 32, which this does not span.
+//
+// It bounds a numeric reference's digits by the same figure, where HTML has
+// no limit at all: "&#" and thirty-two leading zeros is a legal spelling of
+// a character this leaves as text. That is the safe direction for a bound
+// whose only job is to stop an unterminated '&' scanning to the end of a
+// description, and no writer of one spells a character that way
+const maxReferenceName = 31
+
+// unescapeReferences decodes the character references in s, and only those:
+// an '&' that starts no terminated reference comes back out as itself.
+//
+// html.UnescapeString alone decodes HTML's semicolon-less legacy references,
+// which is right for a string that is markup and wrong for one that is not.
+// internal/epub hands this ordinary prose, where "Rock &copy roll" is a band
+// and a verb rather than a copyright sign, and there is no second chance at
+// the value: nothing re-reads a file whose bytes have not changed.
+//
+// A terminated reference is left for html.UnescapeString and every other '&'
+// is re-escaped on the way in, so one pass decodes exactly what was
+// well-formed. A terminated reference that names nothing is still HTML's to
+// interpret — "&notanentity;" really does parse as "¬anentity;" — and is
+// deliberately left alone
+func unescapeReferences(s string) string {
+	if !strings.Contains(s, "&") {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '&' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if end := referenceAt(s, i); end > 0 {
+			b.WriteString(s[i:end])
+			i = end
+			continue
+		}
+		b.WriteString("&amp;")
+		i++
+	}
+	return html.UnescapeString(b.String())
+}
+
+// referenceAt reports the index just past the ';' of the character reference
+// starting at s[i] (which the caller has already checked is '&'), or -1 when
+// what follows is not one: '#' and digits, "#x" and hex digits, or a run of
+// alphanumerics, then a ';' within maxReferenceName
+func referenceAt(s string, i int) int {
+	j := i + 1
+	digits := func(c byte) bool { return c >= '0' && c <= '9' }
+	accept := isReferenceNameByte
+	if j < len(s) && s[j] == '#' {
+		j++
+		accept = digits
+		if j < len(s) && (s[j] == 'x' || s[j] == 'X') {
+			j++
+			accept = isHexByte
+		}
+	}
+
+	start := j
+	for j < len(s) && j-start < maxReferenceName && accept(s[j]) {
+		j++
+	}
+	if j == start || j >= len(s) || s[j] != ';' {
+		return -1
+	}
+	return j + 1
+}
+
+func isReferenceNameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+func isHexByte(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+// zeroWidth are the characters that carry no ink and that unicode.IsSpace
+// does not call space, so strings.TrimSpace leaves them behind. A
+// description of nothing but one of them — "&#8203;" unescapes to exactly
+// that — would otherwise read as an answer to every "is this empty" test
+// between here and the column, and overwrite a real description with a
+// value that renders as nothing
+const zeroWidth = "\u200b\u200c\u200d\ufeff"
+
+// trimBlank is strings.TrimSpace widened to the zero-width characters, so
+// "blank" here means "renders as nothing" rather than "is Unicode
+// whitespace"
+//
+// Composed with unicode.IsSpace rather than written as a cutset, which is
+// the distinction that matters: strings.Trim with a hand-listed cutset is
+// not TrimSpace, and spelling out the ASCII spaces plus a couple of
+// favourites drops the other seventeen runes IsSpace accepts — U+3000, the
+// ordinary CJK ideographic space, among them. Widening a trim by narrowing
+// it is an easy trade to make by accident, and this library holds Chinese
+// and Japanese books.
+func trimBlank(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(zeroWidth, r)
+	})
+}
+
+// tagAt reports the index just past the tag starting at raw[i] (which the
+// caller has already checked is '<') along with its lower-cased name, or
+// -1 when what follows is not tag-shaped
+func tagAt(raw string, i int) (int, string) {
+	j := i + 1
+	if j < len(raw) && raw[j] == '/' {
+		j++
+	}
+	start := j
+	for j < len(raw) && isTagNameByte(raw[j]) {
+		j++
+	}
+	if j == start {
+		return -1, ""
+	}
+	name := strings.ToLower(raw[start:j])
+	for ; j < len(raw); j++ {
+		if raw[j] == '>' {
+			return j + 1, name
+		}
+	}
+	// An unterminated '<' runs to the end of the string, which is a
+	// truncated description rather than a tag
+	return -1, ""
+}
+
+func isTagNameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// CapBlankLines collapses a run of three or more newlines to two, leaving a
+// single newline alone: at most one blank line between paragraphs.
+//
+// A description is the one field that keeps its line breaks, and
+// .detail__description renders them with `white-space: pre-line`, so what a
+// file or a provider sends is what a reader sees — including the four blank
+// lines a scraped blurb arrives with, and the pair an opening and a closing
+// block tag each contribute when PlainDescription flattens one.
+//
+// It lives here, below every writer of the column, for the reason its
+// neighbours do: internal/enrich caps a provider's answer and
+// PlainDescription caps what it flattens, and two copies of the rule are two
+// descriptions shaped differently by which door they came through.
+//
+// CRLF is folded first, so a Windows-authored description is not left with a
+// lone carriage return in the middle of a paragraph and a run of them is one
+// the count can see. Each line's trailing whitespace is stripped before
+// counting: a line of two spaces is a blank line to a reader, and `pre-line`
+// collapses the spaces while keeping both newlines around them, so without
+// the strip a blurb padded with spaces renders exactly the run of blank lines
+// this exists to prevent
+// One pass, because the obvious spelling — two ReplaceAll, a Split/TrimRight/
+// Join round trip and a loop that ReplaceAll's "\n\n\n" until it stops
+// finding one — allocates in proportion to the line count on a value that is
+// not yet capped. internal/epub bounds a package document at 4 MiB and
+// internal/scanner cuts a description to 64 KiB only afterwards, so the
+// widest input this sees is four megabytes of newlines read out of a file
+// nobody here wrote
+func CapBlankLines(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+
+	newlines := 0
+	// Start of the run of spaces and tabs not yet written, or -1. Held back
+	// rather than written, since a run that turns out to end a line is that
+	// line's trailing whitespace and goes with it
+	wsStart := -1
+
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; {
+		case c == '\r' || c == '\n':
+			if c == '\r' && i+1 < len(value) && value[i+1] == '\n' {
+				i++
+			}
+			wsStart = -1
+			newlines++
+			if newlines <= 2 {
+				b.WriteByte('\n')
+			}
+		case c == ' ' || c == '\t':
+			if wsStart < 0 {
+				wsStart = i
+			}
+		default:
+			if wsStart >= 0 {
+				b.WriteString(value[wsStart:i])
+				wsStart = -1
+			}
+			newlines = 0
+			b.WriteByte(c)
+		}
+	}
+	// Whatever is still held back is the last line's trailing whitespace
+	return b.String()
 }
 
 func setFieldSourceTx(ctx context.Context, tx *sql.Tx, bookID int64, field MetadataField, source string) error {

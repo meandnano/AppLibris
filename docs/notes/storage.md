@@ -80,6 +80,53 @@ them drifts. For the limits the drift is concrete: a value one writer
 stores but another's validation would reject is a field the app can no
 longer edit. `formats.md` carries what `NormalizeISBN` accepts and why.
 
+`PlainDescription` is here on the same argument, for a different set of
+callers: everything that can be handed a description carrying markup.
+`internal/epub` is one, since `dc:description` legally holds escaped HTML,
+and `internal/googlebooks` is the other, since the Volumes API documents
+its description as HTML. Nothing downstream renders a description as
+markup — `html/template` escapes the detail page's — so a tag left in shows
+a reader a literal `<p>` and then offers them the same markup to hand-fix
+in the edit textarea. Block tags become a line break, every other tag is
+dropped, and character references are decoded only afterwards, so text that
+was itself escaped markup survives as the characters an author wrote. A `<`
+that starts nothing tag-shaped is left alone, which is what lets a book
+about inequalities keep its prose.
+
+Only a reference with a terminating `;` is decoded. `html.UnescapeString`
+alone also decodes HTML's semicolon-less legacy references, which is right
+for a string that is markup and wrong for one that is not: one caller is
+handed prose, where `Rock &copy roll` is a band and a verb, and nothing
+re-reads a file whose bytes have not changed, so there is no second chance
+at the value. A terminated reference that names nothing stays HTML's to
+read — `&notanentity;` really does parse as `¬anentity;`.
+
+Both paths return one shape. The test for markup is a fast path over the
+work and never over the result, since a description whose blank lines were
+capped only when it happened to contain an ampersand would render one way
+from a file and another from a provider.
+
+`internal/enrich`'s `sanitizeValue` deliberately does not call it. Open
+Library's description is plain to begin with, and a strip applied to every
+provider answers for a source that never sends markup.
+
+`CapBlankLines` is the tail of that shape and is here for the same reason,
+with one more caller than its neighbour: `sanitizeValue` caps a provider's
+answer, `PlainDescription` caps what it flattens, and `internal/fb2`'s
+`annotationText` caps what a wrapped `<p>` carried across source lines. A
+person's edit is the one description nothing caps, deliberately — the blank
+lines someone typed are their own. Copies of the rule would be descriptions
+shaped differently by which door they came through.
+
+It is one hand-rolled pass rather than the obvious fold-trim-collapse
+spelling, because it runs on a value that is not yet capped: `internal/epub`
+bounds a package document at 4 MiB and `internal/scanner` cuts a description
+to 64 KiB only afterwards. A test keeps the obvious spelling as its oracle,
+so the two cannot drift. It folds CRLF and a lone CR first, so a
+carriage return is a break the count can see rather than one it cannot, and
+strips each line's trailing whitespace before counting, since `pre-line`
+collapses a line of two spaces while keeping both newlines around it.
+
 Authors are a table with a `book_authors` join, not a comma-separated
 column, so correcting a spelling and browsing by author both stay cheap.
 The join carries `position`: `author_id` order is first-sight-in-the-
