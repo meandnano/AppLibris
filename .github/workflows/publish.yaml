@@ -147,14 +147,24 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "${IMAGE}@sha256:%s " *)
 
+      # the digest is the manifest list's own, so the pull line in the
+      # release notes names the exact index these two builds produced and
+      # not whatever the tag points at when somebody reads it
       - name: Inspect
-        run: docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}"
+        id: inspect
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{.Manifest.Digest}}')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           VERSION: ${{ steps.meta.outputs.version }}
+          DIGEST: ${{ steps.inspect.outputs.digest }}
         run: |
           previous="$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)"
           range="${TAG}"
@@ -163,8 +173,8 @@ jobs:
           fi
 
           {
+            printf '```sh\ndocker pull %s:%s@%s\n```\n\n' "$IMAGE" "$VERSION" "$DIGEST"
             git log --no-merges --reverse --pretty='- %s' "$range"
-            printf '\n\n```sh\ndocker pull %s:%s\n```\n' "$IMAGE" "$VERSION"
           } > /tmp/notes.md
 
           prerelease=""
