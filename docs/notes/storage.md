@@ -80,6 +80,23 @@ them drifts. For the limits the drift is concrete: a value one writer
 stores but another's validation would reject is a field the app can no
 longer edit. `formats.md` carries what `NormalizeISBN` accepts and why.
 
+`PlainDescription` is here on the same argument, for a different set of
+callers: everything that can be handed a description carrying markup.
+`internal/epub` is one, since `dc:description` legally holds escaped HTML,
+and `internal/googlebooks` is the other, since the Volumes API documents
+its description as HTML. Nothing downstream renders a description as
+markup — `html/template` escapes the detail page's — so a tag left in shows
+a reader a literal `<p>` and then offers them the same markup to hand-fix
+in the edit textarea. Block tags become a line break, every other tag is
+dropped, and entities are unescaped only afterwards, so text that was
+itself escaped markup survives as the characters an author wrote. A `<`
+that starts nothing tag-shaped is left alone, which is what lets a book
+about inequalities keep its prose.
+
+`internal/enrich`'s `sanitizeValue` deliberately does not call it. Open
+Library's description is plain to begin with, and a strip applied to every
+provider answers for a source that never sends markup.
+
 Authors are a table with a `book_authors` join, not a comma-separated
 column, so correcting a spelling and browsing by author both stay cheap.
 The join carries `position`: `author_id` order is first-sight-in-the-

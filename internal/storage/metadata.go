@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"html"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 )
 
 var ErrInvalidMetadataField = errors.New("invalid metadata field")
@@ -220,6 +222,148 @@ func isbnFromRun(run string) (string, bool) {
 
 	isbn := digits.String()
 	return isbn, len(isbn) == 10 || len(isbn) == 13
+}
+
+// blockTags are the tags whose boundary is a line break in the plain text
+// a description column holds. The markup a blurb arrives with is shallow —
+// paragraphs, line breaks and the odd list — so the rest carry no structure
+// worth preserving and are simply dropped
+var blockTags = map[string]bool{
+	"br": true, "p": true, "div": true, "li": true, "tr": true, "h1": true,
+	"h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+}
+
+// PlainDescription renders an HTML-formatted description as the plain text
+// books.description holds: a block tag becomes a line break, every other tag
+// is dropped, and a '<' that starts nothing tag-shaped is left where it is.
+//
+// One derivation for every reader that can be handed markup — internal/epub,
+// where dc:description legally holds escaped HTML, and internal/googlebooks,
+// whose Volumes API documents volumeInfo.description as HTML ("simple
+// formatting elements, such as b, i and br tags"). Nothing downstream renders
+// a description as markup: html/template escapes the detail page's, so a tag
+// left in shows a reader a literal "<p>" and the edit textarea then offers
+// them the same markup to hand-fix.
+//
+// internal/enrich's sanitizeValue deliberately does not call it. Open
+// Library's description is plain to begin with, and a blanket strip across
+// every provider would answer a question that source never asks.
+//
+// Entities are unescaped only after the tags are gone, so text that was
+// itself escaped markup ("&lt;b&gt;") survives as the literal characters an
+// author wrote rather than being stripped as a tag
+func PlainDescription(raw string) string {
+	if !strings.ContainsAny(raw, "<&") {
+		// Trimmed even on the fast path, so every return from this
+		// function is trimmed. A caller testing the result against "" to
+		// decide whether a source said anything — internal/googlebooks'
+		// enrichVolume does — would otherwise read a description of "   "
+		// as an answer and overwrite a real one with whitespace that
+		// internal/enrich's sanitizeValue then trims to nothing, losing the
+		// field outright
+		return trimBlank(raw)
+	}
+
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); {
+		if raw[i] != '<' {
+			b.WriteByte(raw[i])
+			i++
+			continue
+		}
+		// A '<' that starts nothing tag-shaped is a character in the
+		// description, not markup: "a < b" must survive intact
+		end, name := tagAt(raw, i)
+		if end < 0 {
+			b.WriteByte(raw[i])
+			i++
+			continue
+		}
+		if blockTags[name] {
+			b.WriteByte('\n')
+		}
+		i = end
+	}
+
+	text := html.UnescapeString(b.String())
+	return trimBlank(collapseBlankLines(text))
+}
+
+// zeroWidth are the characters that carry no ink and that unicode.IsSpace
+// does not call space, so strings.TrimSpace leaves them behind. A
+// description of nothing but one of them — "&#8203;" unescapes to exactly
+// that — would otherwise read as an answer to every "is this empty" test
+// between here and the column, and overwrite a real description with a
+// value that renders as nothing
+const zeroWidth = "\u200b\u200c\u200d\ufeff"
+
+// trimBlank is strings.TrimSpace widened to the zero-width characters, so
+// "blank" here means "renders as nothing" rather than "is Unicode
+// whitespace"
+//
+// Composed with unicode.IsSpace rather than written as a cutset, which is
+// the distinction that matters: strings.Trim with a hand-listed cutset is
+// not TrimSpace, and spelling out the ASCII spaces plus a couple of
+// favourites drops the other seventeen runes IsSpace accepts — U+3000, the
+// ordinary CJK ideographic space, among them. Widening a trim by narrowing
+// it is an easy trade to make by accident, and this library holds Chinese
+// and Japanese books.
+func trimBlank(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(zeroWidth, r)
+	})
+}
+
+// tagAt reports the index just past the tag starting at raw[i] (which the
+// caller has already checked is '<') along with its lower-cased name, or
+// -1 when what follows is not tag-shaped
+func tagAt(raw string, i int) (int, string) {
+	j := i + 1
+	if j < len(raw) && raw[j] == '/' {
+		j++
+	}
+	start := j
+	for j < len(raw) && isTagNameByte(raw[j]) {
+		j++
+	}
+	if j == start {
+		return -1, ""
+	}
+	name := strings.ToLower(raw[start:j])
+	for ; j < len(raw); j++ {
+		if raw[j] == '>' {
+			return j + 1, name
+		}
+	}
+	// An unterminated '<' runs to the end of the string, which is a
+	// truncated description rather than a tag
+	return -1, ""
+}
+
+func isTagNameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// collapseBlankLines caps a run of newlines at two, since an opening and a
+// closing block tag each contribute one and a paragraph break needs only
+// the pair
+func collapseBlankLines(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	newlines := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			newlines++
+			if newlines > 2 {
+				continue
+			}
+		} else {
+			newlines = 0
+		}
+		b.WriteByte(text[i])
+	}
+	return b.String()
 }
 
 func setFieldSourceTx(ctx context.Context, tx *sql.Tx, bookID int64, field MetadataField, source string) error {

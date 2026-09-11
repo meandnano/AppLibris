@@ -1373,3 +1373,38 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { slog.SetDefault(restore) })
 	return &buf
 }
+
+// The brand appears in three places that have to agree: the masthead, the
+// document title every page renders, and the suffix edit.js re-applies
+// after an inline title edit. A rename that misses the script leaves a tab
+// silently renamed the moment someone saves a title, which no handler test
+// would notice.
+func TestBrandIsConsistentAcrossMastheadTitleAndScript(t *testing.T) {
+	const brand = "AppLibris"
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	handler := Routes(service.New(db), t.TempDir(), false, false)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "<title>Library · "+brand+"</title>") {
+		t.Errorf("the document title does not carry %q; body = %q", brand, body)
+	}
+	if !strings.Contains(body, `<span class="masthead__brand">`+brand+`</span>`) {
+		t.Errorf("the masthead does not carry %q", brand)
+	}
+
+	js, err := fs.ReadFile(staticFS, "static/js/edit.js")
+	if err != nil {
+		t.Fatalf("read edit.js: %v", err)
+	}
+	if !strings.Contains(string(js), `" · `+brand+`"`) {
+		t.Errorf("edit.js re-applies a different brand than the page renders")
+	}
+}

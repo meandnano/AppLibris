@@ -46,7 +46,7 @@
     if (read) read.focus();
     if (field.dataset.field === "title") {
       var title = field.querySelector(".detail__title span");
-      if (title) document.title = title.textContent + " · Bookshelf";
+      if (title) document.title = title.textContent + " · AppLibris";
     }
   });
 })();

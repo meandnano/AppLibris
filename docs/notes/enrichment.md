@@ -431,15 +431,17 @@ because the column is one short code that three other writers fill without
 any subtag.
 
 Google's description is HTML on the detail endpoint and is rendered to plain
-text (`plainText`) before it leaves the package: block tags become line
-breaks, inline ones are dropped, entities are unescaped only afterwards so
-text that was itself escaped markup survives as the characters an author
-wrote. Nothing downstream treats a description as markup, so a tag left in
-shows a reader a literal `<p>` and offers it back in the edit textarea. It
-lives here rather than in `sanitizeValue` because Open Library's edition
-description is plain to begin with, and stripping tags from every provider
-would mangle one that legitimately contains a `<`. Paragraph breaks reach
-the column and the page alike: `.detail__description` renders with
+text through `storage.PlainDescription` before it leaves the package: block
+tags become line breaks, inline ones are dropped, entities are unescaped only
+afterwards so text that was itself escaped markup survives as the characters
+an author wrote. Nothing downstream treats a description as markup, so a tag
+left in shows a reader a literal `<p>` and offers it back in the edit
+textarea. The derivation sits in `internal/storage` because `internal/epub`
+needs the same one for `dc:description`; `storage.md` carries why, and it is
+called here rather than in `sanitizeValue` because Open Library's edition
+description is plain to begin with and a strip applied to every provider
+answers for a source that never sends markup. Paragraph breaks reach the
+column and the page alike: `.detail__description` renders with
 `white-space: pre-line`.
 
 A detail-request failure leaves the list answer exactly as it was and marks

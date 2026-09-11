@@ -294,6 +294,12 @@ it names no resource. Both paths load the book before choosing a shape,
 so an unknown book is the same plain 404 on each rather than a 303 for a
 book that does not exist.
 
+The metadata block is a two-column grid of `space-between` rows, and every
+`<dd>` in it takes the row's free space so a value sits against its label
+rather than against the far edge. That has to be a property of the row, not
+of the editable rows alone: `added` is the one value with no editor behind
+it, and a `<dd>` sized to its content is the odd one out pushed right.
+
 `storage.ParseMetadataField` is the gate on these routes and on `?edit=`,
 and `cover` is deliberately absent from it: `cover_path` holds a path
 `internal/cover.Store` produced, never text a person types. Admitting the

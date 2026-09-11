@@ -19,8 +19,8 @@ A cheap `path + size + mtime` comparison against `book_files` skips an
 unchanged file entirely. Only a mismatch pays for a SHA-256 hash and a
 metadata parse, which is what keeps a rescan of a large library fast.
 
-**Embedded metadata is capped where it is extracted** (`capMetadata`), to
-the same limits a person's edit and a provider's answer meet — one set of
+**Embedded metadata is bounded where it is extracted** (`capMetadata`), to
+the same rules a person's edit and a provider's answer meet — one set of
 constants in `internal/storage`, below all three writers. Scalars are
 truncated on a UTF-8 boundary and the author list is cut at
 `storage.MaxAuthors`, with an Info line naming the path and the field: a
@@ -28,9 +28,25 @@ verbose file is worth knowing about and is not an error. Truncated, never
 rejected, because a book whose description is too long is still a book and a
 filename title is worse than prose cut at 64 KiB. A cut field is still
 `embedded` in `field_sources`: provenance says where a value came from, not
-whether it arrived whole. The point is that a length the editor refuses is
-never stored — a 10 MB `<dc:description>` in the column is a description
-that can no longer be saved unchanged, and nothing re-derives it.
+whether it arrived whole.
+
+Length is not the only thing the editor refuses. `normalizeField` rejects a
+line break in every field but description, and a metadata element whose
+text is wrapped across two lines in the source XML — legal, and what a
+generator that pretty-prints produces — reaches the parsers with the break
+intact, since `TrimSpace` removes only what sits at either end. So every
+field but description is collapsed onto one line first, the same
+`strings.Fields` join `internal/enrich`'s `sanitizeValue` applies to a
+provider's answer. The collapse runs before the length cut: it can only
+shorten the value, and cutting first would let a truncation boundary decide
+whether a break survives.
+
+The point of both is that a value the editor refuses is never stored. A
+10 MB `<dc:description>` in the column is a description that can no longer
+be saved unchanged; a wrapped title is one an `<input type="text">` silently
+rewrites on submit, flipping its provenance to `manual`, and a wrapped
+author name is one the textarea's Save splits into two authors. Nothing
+re-derives either afterwards.
 
 **Identity is the content hash, not the path.** Known content at a new
 path gets an additional `book_files` row rather than a new book. A moved
