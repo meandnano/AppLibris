@@ -57,7 +57,7 @@ docker run -d \
   -v /path/to/data:/data \
   -e RESEND_API_KEY=re_... \
   -e RESEND_FROM=library@yourdomain.example \
-  ghcr.io/meandnano/applibris:0.1.0
+  ghcr.io/meandnano/applibris:0.1
 ```
 
 `/library` holds your books, `/data` holds the database and the cover
