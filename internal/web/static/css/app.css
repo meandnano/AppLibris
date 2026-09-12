@@ -36,9 +36,9 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #121110;
-    --bg-raised: #1a1817;
-    --bg-sunken: #221f1d;
+    --bg: #1a1613;
+    --bg-raised: #231d19;
+    --bg-sunken: #2c251f;
     --fg: #f1ede5;
     --fg-muted: #a9a29a;
     --fg-faint: #7b756c;
