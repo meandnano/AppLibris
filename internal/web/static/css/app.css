@@ -1,19 +1,25 @@
 /* AppLibris — library UI.
    Editorial: hairline rules, a serif for titles, mono for anything the
    machine is saying. Covers do the colour work; one accent, used sparingly.
-   Light is the default; dark follows the OS unless [data-theme] overrides. */
+   Both themes live in one token list; color-scheme picks which half
+   applies, following the OS unless [data-theme] pins it. */
 
 :root {
-  --bg: #fbfaf8;
-  --bg-raised: #ffffff;
-  --bg-sunken: #f4f2ee;
-  --fg: #17140f;
-  --fg-muted: #57534b;
-  --fg-faint: #8d877d;
-  --rule: #ded9d1;
-  --rule-faint: #eae6e0;
-  --accent: #8a5a3c;
-  --accent-soft: #f3ebe4;
+  /* Both themes of a colour live in one declaration: light-dark() resolves
+     against the element's used color-scheme, which `html` below leaves to
+     the OS and which the [data-theme] rules pin once someone has used the
+     toggle. One declaration per colour is what keeps the two themes from
+     drifting apart */
+  --bg: light-dark(#fbfaf8, #1a1613);
+  --bg-raised: light-dark(#ffffff, #231d19);
+  --bg-sunken: light-dark(#f4f2ee, #2c251f);
+  --fg: light-dark(#17140f, #f1ede5);
+  --fg-muted: light-dark(#57534b, #a9a29a);
+  --fg-faint: light-dark(#8d877d, #7b756c);
+  --rule: light-dark(#ded9d1, #322e2a);
+  --rule-faint: light-dark(#eae6e0, #262322);
+  --accent: light-dark(#8a5a3c, #c98a5f);
+  --accent-soft: light-dark(#f3ebe4, #2b211a);
 
   /* Status colours: used only for a send's state, per TOKENS.md — status
      is the only place colour carries meaning besides the accent, so
@@ -21,10 +27,10 @@
      same state today (the book detail page's send control, and the
      history table's status column), never a second meaning. Queued and
      sending read as --fg-muted/--accent instead; there's no separate pair
-     for them. */
-  --ok: #3f6b52;
-  --err: #9a3b34;
-  --err-soft: #f7ece9;
+     for them */
+  --ok: light-dark(#3f6b52, #7fae90);
+  --err: light-dark(#9a3b34, #d98b81);
+  --err-soft: light-dark(#f7ece9, #2c1e1c);
 
   --serif: "Newsreader", Georgia, "Times New Roman", serif;
   --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -32,40 +38,6 @@
 
   --shelf-height: 210px;
   --card-width: 148px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #1a1613;
-    --bg-raised: #231d19;
-    --bg-sunken: #2c251f;
-    --fg: #f1ede5;
-    --fg-muted: #a9a29a;
-    --fg-faint: #7b756c;
-    --rule: #322e2a;
-    --rule-faint: #262322;
-    --accent: #c98a5f;
-    --accent-soft: #2b211a;
-    --ok: #7fae90;
-    --err: #d98b81;
-    --err-soft: #2c1e1c;
-  }
-}
-
-:root[data-theme="dark"] {
-  --bg: #121110;
-  --bg-raised: #1a1817;
-  --bg-sunken: #221f1d;
-  --fg: #f1ede5;
-  --fg-muted: #a9a29a;
-  --fg-faint: #7b756c;
-  --rule: #322e2a;
-  --rule-faint: #262322;
-  --accent: #c98a5f;
-  --accent-soft: #2b211a;
-  --ok: #7fae90;
-  --err: #d98b81;
-  --err-soft: #2c1e1c;
 }
 
 *,
@@ -76,6 +48,16 @@
 
 html {
   color-scheme: light dark;
+}
+
+/* The toggle's stored preference pins the scheme, which is what the
+   palette's light-dark() pairs resolve against */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 body {
