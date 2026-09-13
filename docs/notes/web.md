@@ -519,8 +519,7 @@ text affordance rather than a button.
 resolves to `#fff` in light theme, which reads as the obvious
 simplification, but `--accent` is a light tan in dark theme, where white
 on it measures 2.9:1, under even the 3:1 large-text floor, on the primary
-action of the whole application. The token holds 5.8:1 in light and 6.1:1
-in dark.
+action of the whole application. The token holds 5.8:1 in both themes.
 
 Two rules read as tidy-ups and are load-bearing: `--md`/`--lg` reset the
 base's `min-height`, without which the enrichment button gains a pixel,
