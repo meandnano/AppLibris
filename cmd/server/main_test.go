@@ -875,6 +875,58 @@ func TestProbeWritableLeavesNothingBehind(t *testing.T) {
 	}
 }
 
+// A hardened container — run --read-only with no tmpfs at /tmp — has a
+// library worth serving and no staging directory to create. That disables
+// importing the way an unwritable library does, and must not end the run:
+// the same warning, naming the directory so TMPDIR is the obvious remedy.
+func TestNewStagerDisablesImportWhenStagingCannotBeCreated(t *testing.T) {
+	requireModeEnforced(t)
+
+	db := openServerTestDB(t)
+	libDir := t.TempDir()
+
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatalf("chmod the staging parent read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o755) })
+	importDir := filepath.Join(parent, "applibris-imports")
+
+	var logs strings.Builder
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if stager := newStager(db, libDir, t.TempDir(), importDir, 1<<20); stager != nil {
+		t.Fatal("newStager built an importer with no staging directory to put files in")
+	}
+	if !strings.Contains(logs.String(), "importing disabled") || !strings.Contains(logs.String(), importDir) {
+		t.Errorf("the warning does not name the staging directory:\n%s", logs.String())
+	}
+}
+
+func TestNewStagerBuildsAnImporterWhenBothDirectoriesAreWritable(t *testing.T) {
+	db := openServerTestDB(t)
+	importDir := filepath.Join(t.TempDir(), "applibris-imports")
+
+	if stager := newStager(db, t.TempDir(), t.TempDir(), importDir, 1<<20); stager == nil {
+		t.Fatal("newStager built no importer for a writable library and staging directory")
+	}
+	if _, err := os.Stat(importDir); err != nil {
+		t.Errorf("the staging directory was not created: %v", err)
+	}
+}
+
+func openServerTestDB(t *testing.T) *storage.DB {
+	t.Helper()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
 func TestParseByteSize(t *testing.T) {
 	cases := []struct {
 		raw     string

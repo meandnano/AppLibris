@@ -29,6 +29,8 @@ func TestLibraryStemSanitisesWhatTheClientOffered(t *testing.T) {
 		{name: "leading dots are not a hidden file", original: ".hidden.epub", suffix: ".epub", want: "hidden"},
 		{name: "control characters become spaces", original: "Du\x00ne\tII.epub", suffix: ".epub", want: "Du ne II"},
 		{name: "a colon goes", original: "Dune: Messiah.epub", suffix: ".epub", want: "Dune Messiah"},
+		{name: "characters windows refuses go", original: `Dune? <II> | "Messiah"*.epub`, suffix: ".epub", want: "Dune II Messiah"},
+		{name: "a name of only such characters falls back to the title", original: `"?*".epub`, title: "Dune", suffix: ".epub", want: "Dune"},
 		{name: "whitespace collapses", original: "  Dune    II  .epub", suffix: ".epub", want: "Dune II"},
 		{name: "only dots falls back to the title", original: "....", title: "Dune", suffix: ".epub", want: "Dune"},
 		{name: "nothing at all falls back to the id", original: "", title: "", suffix: ".epub", want: "stage-id"},

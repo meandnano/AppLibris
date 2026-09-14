@@ -138,29 +138,11 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 
-	// The probe runs after the library directory is resolved and before
-	// anything is served, so the answer is settled for the run: import is
-	// either on or it is off, and no request has to rediscover it.
-	// A Stager exists exactly when importing is available: there is no
-	// disabled Stager, and internal/service answers a nil one with its own
-	// explanation. A read-only library is the documented deployment, so the
-	// probe failing is a Warn and not a startup failure.
+	// Decided after the library directory is resolved and before anything is
+	// served, so the answer is settled for the run: import is either on or
+	// it is off, and no request has to rediscover it.
 	importDir := filepath.Join(os.TempDir(), "applibris-imports")
-	var stager *importer.Stager
-	if probeWritable(libraryDir) {
-		stager, err = importer.New(db, importer.Options{
-			LibraryDir: libraryDir,
-			CoversDir:  coversDir,
-			TempDir:    importDir,
-			MaxSize:    maxImportSize,
-		})
-		if err != nil {
-			// The one early return past storage.Open, so it is also the
-			// one that has to close the database itself.
-			db.Close()
-			return err
-		}
-	}
+	stager := newStager(db, libraryDir, coversDir, importDir, maxImportSize)
 
 	svc := service.New(db, service.WithImporter(stager))
 	importEnabled := svc.ImportEnabled()
@@ -401,6 +383,35 @@ func run(ctx context.Context) error {
 	}
 
 	return db.Close()
+}
+
+// newStager builds the importer when this run can import, and returns nil
+// when it cannot — which is the whole of what "importing is offered" means.
+// A Stager exists exactly when importing is available: there is no disabled
+// Stager, and internal/service answers a nil one with its own explanation.
+//
+// Two preconditions, and neither failing is a startup failure. The library
+// directory must be writable, which the probe decides, and a read-only
+// library is the documented deployment. The staging directory must be
+// creatable, and it is os.TempDir(), which a hardened container — one run
+// --read-only with no tmpfs at /tmp — does not provide; a library that can
+// be read is still worth serving there. The Warn names the directory so
+// TMPDIR is the obvious remedy.
+func newStager(db *storage.DB, libraryDir, coversDir, importDir string, maxSize int64) *importer.Stager {
+	if !probeWritable(libraryDir) {
+		return nil
+	}
+	stager, err := importer.New(db, importer.Options{
+		LibraryDir: libraryDir,
+		CoversDir:  coversDir,
+		TempDir:    importDir,
+		MaxSize:    maxSize,
+	})
+	if err != nil {
+		slog.Warn("importing disabled", "error", err)
+		return nil
+	}
+	return stager
 }
 
 // writeProbeName is the file probeWritable creates and removes. It begins

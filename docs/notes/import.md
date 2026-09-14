@@ -179,9 +179,12 @@ false positives are annoying to undo.
 ## Confirm writes in an order that cannot half-fail
 
 1. **Name.** The offered name is reduced to a base name on either
-   separator, stripped of control characters, `/`, `\`, `:` and leading
+   separator, stripped of control characters, `/`, `\`, `:`, the six
+   characters Windows refuses (`<`, `>`, `"`, `|`, `?`, `*`) and leading
    dots, collapsed onto single spaces and cut to 200 bytes on a rune
-   boundary; the sniffed suffix replaces whatever extension it carried. When
+   boundary; the sniffed suffix replaces whatever extension it carried. A
+   mounted library is read from Windows often enough to be worth not
+   creating a name it cannot open. When
    nothing survives, the staged title is tried the same way and then the
    stage id, which cannot be empty. If the name is taken, ` (2)`, ` (3)` and
    so on go before the suffix.
@@ -273,6 +276,14 @@ process runs and a confirm that fails anyway reports its own error.
 
 The probe name begins with a dot and carries no supported suffix, so a sweep
 that overlaps it walks past it.
+
+The staging directory is the other precondition, decided in the same place.
+`importer.New` wipes and creates `os.TempDir()/applibris-imports`, and a
+hardened container — run `--read-only` with no tmpfs at `/tmp` — has no
+such directory to give. That disables importing the way the probe does,
+at Warn, rather than ending the run: the library can still be read, and
+everything but the Import page works on one that can. The Warn names the
+directory, so `TMPDIR` is the obvious remedy.
 
 The routes stay registered when importing is off, so a tab open since before
 a restart gets an explanation rather than a 404. What the flag withholds is

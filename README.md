@@ -134,9 +134,11 @@ into the root of `/library` under its own name only when you press Import.
 Nothing is written to the library before that, an unconfirmed upload is
 thrown away after thirty minutes, and the directory is emptied on every
 restart. Several uploads may be waiting at once, so size `TMPDIR` for four
-times `MAX_IMPORT_SIZE` — 256 MB at the default — and note that `/tmp` in a
+times `MAX_IMPORT_SIZE` — 256 MiB at the default — and note that `/tmp` in a
 container is often a tmpfs carved out of RAM. Nothing in there is worth
-keeping.
+keeping. A `TMPDIR` the server cannot write disables importing with a
+warning at startup and changes nothing else, so a container run
+`--read-only` needs a tmpfs at `/tmp` or another `TMPDIR` to import.
 
 What the file actually is decides how it is saved: an FB2 named `.epub` is
 saved as `.fb2`, and the preview tells you the name it will get. A file the
@@ -177,7 +179,7 @@ working directory, which is `/` in the container.
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR`. Logs go to stderr. |
 | `SCAN_INTERVAL` | `1h` | How often the library is rescanned regardless of filesystem events. |
 | `MISSING_GRACE` | `24h` | How long a file must stay missing before its record is removed. Must not be negative. |
-| `MAX_IMPORT_SIZE` | `64MiB` | Largest file the Import page accepts. A byte count, optionally suffixed `K`/`M`/`G` (powers of ten) or `Ki`/`Mi`/`Gi` (powers of two). Must be positive. |
+| `MAX_IMPORT_SIZE` | `64MiB` | Largest file the Import page accepts. A byte count, optionally suffixed `B`, `K`/`M`/`G` or `KB`/`MB`/`GB` (powers of ten), or `Ki`/`Mi`/`Gi` or `KiB`/`MiB`/`GiB` (powers of two), in any case. Must be positive. |
 | `WATCH_ENABLED` | `true` | Watch the library directory for changes. `false` relies on the rescan alone. |
 | `WATCH_SETTLE` | `5s` | How long the directory must be quiet after a change before a rescan runs. |
 | `REQUIRE_FETCH_METADATA` | `true` | Refuse state-changing requests that carry no `Sec-Fetch-Site` header. `false` admits them and logs a warning instead. |

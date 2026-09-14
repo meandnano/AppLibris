@@ -46,9 +46,11 @@ var noHardLinks sync.Once
 // name survives (on either separator, since a browser on Windows offers a
 // backslash path), control characters and the separators themselves go,
 // a colon goes because it names a stream on some filesystems and a drive on
-// others, whitespace collapses to single spaces, and leading dots go so an
-// upload cannot write a hidden file. What is left is cut to maxStemBytes on
-// a rune boundary.
+// others, and < > " | ? * go because Windows refuses them — a mounted
+// library is read from there often enough to be worth not creating a name
+// it cannot open. Whitespace collapses to single spaces, and leading dots go
+// so an upload cannot write a hidden file. What is left is cut to
+// maxStemBytes on a rune boundary.
 //
 // title is the fallback when nothing survives, and it is sanitised the same
 // way rather than trusted: it comes out of an uploaded file's metadata,
@@ -98,7 +100,7 @@ func stripSuffix(name, suffix string) string {
 func sanitizeStem(raw string) string {
 	cleaned := strings.Map(func(r rune) rune {
 		switch {
-		case r == '/', r == '\\', r == ':':
+		case r == '/', r == '\\', r == ':', r == '<', r == '>', r == '"', r == '|', r == '?', r == '*':
 			return -1
 		case r == unicode.ReplacementChar:
 			return -1

@@ -486,7 +486,7 @@ func importFailureLine(err error, maxBytes int64) string {
 	case errors.Is(err, errNoFileChosen):
 		return "Choose a file first."
 	case errors.Is(err, service.ErrImportDisabled):
-		return "The library directory is read-only, so importing is disabled."
+		return "Importing is disabled: the library directory is read-only or the staging directory could not be created. See the server log."
 	default:
 		return ""
 	}

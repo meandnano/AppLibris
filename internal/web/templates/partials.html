@@ -449,7 +449,7 @@
 {{define "import-panel"}}
 <div class="import" id="import">
   {{if not .Enabled}}
-  <p class="import__disabled">The library directory is read-only, so importing is disabled. Give the server write access to it and restart.</p>
+  <p class="import__disabled">Importing is disabled. At startup the server could not write to the library directory &mdash; a read-only mount &mdash; or could not create its staging directory; the log says which. Fix that and restart.</p>
   {{else}}
   {{if .Failure}}<p class="import__error" role="alert">{{.Failure}}</p>{{end}}
   {{if .Note}}<p class="import__note" role="status">{{.Note}}</p>{{end}}

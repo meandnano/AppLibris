@@ -19,10 +19,12 @@ here. See Documentation below for what these files may and may not say.
   the enrichment worker and the import janitor on one cancellable
   `scanCtx`; the janitor exists only when the importer does. Shutdown
   order: HTTP server, then `waitForBackground` (10s) over each of them,
-  then the database. Probes `LIBRARY_DIR` for writability once
-  (`probeWritable`) and builds an `importer.Stager` only if it succeeds,
-  which is the whole of what "importing is offered" means; parses
-  `MAX_IMPORT_SIZE` through `parseByteSize`. Notes: `docs/notes/scanner.md`,
+  then the database. Builds an `importer.Stager` through `newStager` only
+  if both the writability probe on `LIBRARY_DIR` (`probeWritable`) and the
+  staging directory under `os.TempDir()` succeed, which is the whole of
+  what "importing is offered" means; either failing disables import at
+  Warn and never fails startup. Parses `MAX_IMPORT_SIZE` through
+  `parseByteSize`. Notes: `docs/notes/scanner.md`,
   `docs/notes/design.md`, `docs/notes/import.md`.
 - `internal/storage` — SQLite (`modernc.org/sqlite`, WAL, foreign keys,
   5s busy timeout). Bounded read pool, single-connection write pool
@@ -382,10 +384,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Staged state is in memory and on `os.TempDir()`. Nothing about a stage is
   written to the database, and `importer.New` wipes the staging directory.
 - A `Stager` exists exactly when importing is available; there is no
-  disabled `Stager`. `cmd/server` builds one only when the probe succeeds,
-  and `internal/service` answers a nil one with `ErrImportDisabled`, the
-  convention `Notify` follows. Never add a second disabled state inside the
-  importer.
+  disabled `Stager`. `cmd/server` builds one only when the probe succeeds
+  and the staging directory can be created; either failing is a Warn, never
+  a startup failure, since a library that can be read is still worth
+  serving. `internal/service` answers a nil one with `ErrImportDisabled`,
+  the convention `Notify` follows. Never add a second disabled state inside
+  the importer.
 - Whether the nav offers Import comes from `svc.ImportEnabled()`, not from
   a flag threaded down beside `sendEnabled` and `enrichEnabled`: those two
   are configuration the service never sees, where the importer is its own.
