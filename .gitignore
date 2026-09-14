@@ -5,3 +5,6 @@
 *.db
 *.db-wal
 *.db-shm
+
+# revmux review archive
+.revmux/tasks/
