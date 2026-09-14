@@ -381,7 +381,11 @@ Three helpers are exported for the same caller — `MatchedSuffix`,
 `BookFormat` and `ExtractMetadata`. A preview has to say what a file is,
 what its format will be called and what it holds, and every one of those
 answers has to be the answer a sweep would give, or the page is describing
-a book the import will not produce. `ExtractMetadata` takes its fallback
+a book the import will not produce. `MatchedSuffix` earns its export twice:
+it is what strips the extension a person's filename carried, and it is why
+the `.part` an import writes mid-copy is inert to a sweep.
+
+`ExtractMetadata` takes its fallback
 title as a parameter and hands its parse error back, because those are the
 two things the callers genuinely differ on: a sweep falls back to the
 file's own name and logs the path it was walking, while an import falls

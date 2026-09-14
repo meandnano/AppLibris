@@ -41,9 +41,11 @@ arrival.
 
 The app writes exactly one kind of path into the library today: a book
 imported through the web UI, which lands in the root under a name derived
-from the file that was offered. It is written as `<name>.part` and renamed
-onto `<name>`, so a half-written file is never indexed, and it is indexed in
-the confirming request through the scanner's own per-file path. A library
+from the file that was offered. It is written as `<name>.part`, which no
+sweep indexes because the suffix matches no format, and published by
+`os.Link` onto the first free name — a link fails rather than replacing,
+where `os.Rename` would silently destroy whatever is at the name. It is then
+indexed in the confirming request through the scanner's own per-file path. A library
 directory that cannot be written is a legitimate deployment — the scanner
 only ever reads it — so importing is probed for at startup and offered or
 explained rather than assumed. See `docs/notes/import.md`.

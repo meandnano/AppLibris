@@ -61,6 +61,34 @@ guessing the number next to its own. It is not a credential — every
 state-changing route is same-site-only regardless — it is what keeps two
 people's imports apart on a server that has no idea who either of them is.
 
+## What may be staged at once
+
+Staging is bounded, in total bytes rather than in stages: what costs a small
+machine something is what is held, and one budget means the same thing
+whether it is one large upload or twenty small ones. `os.TempDir()` is tmpfs
+in a container, so an unconfirmed upload is RAM on a machine whose whole job
+is to serve a library. The budget is `stagingBudgetFactor` times the import
+cap, and an upload past it is refused with `ErrStagingFull` and a sentence
+telling the person to finish or discard what is already waiting.
+
+The reservation is taken **at the cap, before the copy starts**, because the
+body's size is not known until it has been written — a check made afterwards
+is a budget that admits everything and reports later. It is corrected to
+what the stage actually retains once the copy lands, and two uploads racing
+the check therefore cannot both pass it and overshoot together.
+
+What it charges is everything the record holds, not just the file: the cover
+kept in memory for the preview, which each format package caps at
+`cover.MaxCoverBytes`, and the metadata the preview renders. Charging the
+file alone would let a ten-kilobyte upload hold eight megabytes of cover —
+a compressible image inside a small archive — against a ten-kilobyte
+reservation.
+
+It is given back wherever what it charges goes: a discard, an expiry, a
+confirm, and the duplicate verdict that deletes the file the moment it is
+reached. The duplicate is the one partial release — its file goes at once
+and its cover stays, because the preview still renders.
+
 ## Format by content, extension by format
 
 `detectSuffix` decides what a file is from its bytes. The client's filename
@@ -69,9 +97,17 @@ and `Content-Type` are hints and nothing more: a browser sends
 
 A zip is read through `archive/zip`, which costs one open and inflates
 nothing: `META-INF/container.xml` makes it an EPUB, exactly one `.fb2` entry
-and no container makes it an `.fb2.zip`. A plain file beginning, after an
-optional byte-order mark and whitespace, with `<?xml` or `<FictionBook` is
-an `.fb2`. Anything else is refused.
+and no container makes it an `.fb2.zip`. A plain file is an `.fb2` only when it
+satisfies both halves: it must begin, after an optional byte-order mark and
+whitespace, with `<?xml` or `<FictionBook`, **and** `<FictionBook` must
+appear somewhere in the sniffed window. Anything else is refused.
+
+Both halves, because a declaration says a file is XML and not which XML it
+is: an SVG or a bare OPF passes the opening test and would be written into
+the library as a `.fb2` and indexed as a book under its filename. The root
+is searched for across the window rather than matched as a prefix, since a
+real FB2 carries its declaration — and sometimes a DOCTYPE and a comment —
+ahead of it, and the window is 4 KiB so none of that can push it out.
 
 The staged file is then named `<id><suffix>`, because `epub.ReadMetadata`
 and `fb2.ReadMetadata` are picked by the suffix and read the path they are
@@ -172,7 +208,10 @@ false positives are annoying to undo.
    else writes the same name mid-copy.
 4. **Index.** `scanner.IndexFile` in the confirming request, so the
    response can redirect to the book.
-5. **Clean up.** The staged file and the record go.
+5. **Clean up.** The staged file goes, and the cover held beside it. The
+   record does not: it carries the book id, which is what lets a second
+   confirm answer instead of copying the same bytes in again, so it is left
+   for the janitor to expire.
 
 A copy and not a rename out of staging, because `/tmp` and `/library` are
 different filesystems in every deployment that matters and `os.Rename`

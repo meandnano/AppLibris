@@ -30,6 +30,12 @@ const minUploadWindow = 30 * time.Second
 // to a link speed this code cannot measure.
 const uploadRate = 1 << 20
 
+// responseWindow is the slack a write deadline leaves for rendering and
+// sending the response, once whatever the deadline covers is finished. The
+// body is a page or a fragment over a local network, so this is generous
+// rather than measured.
+const responseWindow = 30 * time.Second
+
 // importPage is the data import.html and its fragments render against.
 // Preview nil is the idle state, where the panel shows the file input;
 // non-nil is a staged file waiting on a decision. Failure is the sentence a
@@ -131,7 +137,7 @@ func importUploadHandler(svc *service.Service) http.HandlerFunc {
 		// drain to have a limit.
 		limit := svc.MaxImportBytes() + multipartOverhead
 		r.Body = http.MaxBytesReader(w, r.Body, limit)
-		extendReadDeadline(w, limit)
+		extendDeadlines(w, uploadWindow(limit), uploadWindow(limit)+responseWindow)
 
 		if !page.Enabled {
 			page.Failure = importFailureLine(service.ErrImportDisabled, svc.MaxImportBytes())
@@ -215,6 +221,10 @@ func importPreviewHandler(svc *service.Service) http.HandlerFunc {
 func importConfirmHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
+
+		// No body to read, and a handler that copies the staged file into
+		// the library and indexes it before it renders anything.
+		extendDeadlines(w, 0, confirmWindow(svc.MaxImportBytes()))
 
 		page, err := newImportPage(r, svc)
 		if err != nil {
@@ -414,19 +424,46 @@ func uploadWindow(bytes int64) time.Duration {
 	return window
 }
 
-// extendReadDeadline gives this one request long enough to receive a body
-// the size of the cap.
+// extendDeadlines gives this one request longer than cmd/server allows a
+// page request: read for as long as its body may take to arrive, write for
+// as long as the handler may take to answer. A zero duration leaves that
+// half alone.
 //
-// cmd/server's ReadTimeout covers the body and is sized for a page request;
-// sixty-four megabytes over Wi-Fi to a NAS routinely takes longer. Extended
-// per request rather than globally so every other route keeps the tight
-// timeout, and extended rather than removed so a stalled upload still ends.
-// A server that does not support the control is left alone, and the global
-// timeout applies.
-func extendReadDeadline(w http.ResponseWriter, bytes int64) {
-	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadWindow(bytes))); err != nil {
-		slog.Debug("could not extend the upload read deadline", "error", err)
+// Both halves, and the write half is the one that is easy to forget. Go
+// installs the write deadline once, from the moment the request headers
+// were read, and nothing extends it afterwards — so a read window widened
+// to sixty-four seconds for a large upload sits inside a sixty-second write
+// deadline that expired while the body was still arriving. The import then
+// succeeds and its answer never reaches the browser, which is worse than
+// refusing it: the file is staged, the person sees a network error, and a
+// retry stages it again.
+//
+// Extended per request rather than globally, so every other route keeps
+// cmd/server's tight timeouts, and extended rather than removed so a
+// stalled request still ends. A server that does not support the control is
+// left alone, and the global timeouts apply.
+func extendDeadlines(w http.ResponseWriter, read, write time.Duration) {
+	rc := http.NewResponseController(w)
+	now := time.Now()
+	if read > 0 {
+		if err := rc.SetReadDeadline(now.Add(read)); err != nil {
+			slog.Debug("could not extend the read deadline", "error", err)
+		}
 	}
+	if write > 0 {
+		if err := rc.SetWriteDeadline(now.Add(write)); err != nil {
+			slog.Debug("could not extend the write deadline", "error", err)
+		}
+	}
+}
+
+// confirmWindow is how long a confirm may take before its answer is due: the
+// staged file is copied into the library and then indexed, and the importer
+// allows IndexTimeout for the second half alone. Derived from the importer's
+// own budget rather than restated, or the two drift and the handler starts
+// abandoning imports the importer is still allowed to be making.
+func confirmWindow(maxBytes int64) time.Duration {
+	return uploadWindow(maxBytes) + importer.IndexTimeout + responseWindow
 }
 
 // importFailureLine composes the sentence a refused import shows, or ""

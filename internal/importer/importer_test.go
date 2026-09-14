@@ -310,6 +310,15 @@ func TestTheJanitorReclaimsAnExpiredStage(t *testing.T) {
 	if _, ok := stager.Get(staged.ID); ok {
 		t.Error("the janitor left the record behind")
 	}
+	// Expiry is one of the four paths that drop a stage, and each has to
+	// give the budget back or the next upload is charged for a file that
+	// is gone.
+	stager.mu.Lock()
+	held := stager.staged
+	stager.mu.Unlock()
+	if held != 0 {
+		t.Errorf("an expired stage still holds %d bytes of the budget", held)
+	}
 	if names := libraryNames(t, libraryDir); len(names) != 0 {
 		t.Errorf("an expired stage reached the library as %v", names)
 	}
@@ -367,6 +376,12 @@ func TestDiscardDropsTheStagedFile(t *testing.T) {
 
 	if _, ok := stager.Get(staged.ID); ok {
 		t.Error("Get answered a discarded stage")
+	}
+	stager.mu.Lock()
+	held := stager.staged
+	stager.mu.Unlock()
+	if held != 0 {
+		t.Errorf("a discarded stage still holds %d bytes of the budget", held)
 	}
 	if names := stagingNames(t, stager); len(names) != 0 {
 		t.Errorf("a discard left %v in staging", names)
@@ -649,14 +664,18 @@ func TestConfirmingGivesTheBudgetBack(t *testing.T) {
 	}
 }
 
-// A duplicate's file is deleted the moment the verdict is decided, so it
-// holds no budget from that moment either.
-func TestADuplicateGivesTheBudgetBack(t *testing.T) {
+// A duplicate's file is deleted the moment the verdict is decided, so the
+// file's share of the budget goes back at once — but the record survives to
+// render the preview, cover and all, and what it still holds stays charged.
+// Charging only the file is what lets a small upload hold megabytes.
+func TestADuplicateReleasesItsFileButKeepsHoldingItsCover(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	stager, _ := testStager(t, db, 1<<20)
 
-	book := epubBytes(t, "Dune", "Frank Herbert", 0)
+	art := solidPNG(t)
+	book := epubBytesWithCover(t, "Dune", "Frank Herbert", 4096, art)
+
 	first, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(book))
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
@@ -664,15 +683,54 @@ func TestADuplicateGivesTheBudgetBack(t *testing.T) {
 	if _, err := stager.Confirm(ctx, first.ID); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
-	if _, err := stager.Stage(ctx, "Dune-copy.epub", bytes.NewReader(book)); err != nil {
+
+	duplicate, err := stager.Stage(ctx, "Dune-copy.epub", bytes.NewReader(book))
+	if err != nil {
 		t.Fatalf("Stage a duplicate: %v", err)
+	}
+	if duplicate.Verdict != VerdictExists {
+		t.Fatalf("Verdict = %q, want %q", duplicate.Verdict, VerdictExists)
+	}
+
+	stager.mu.Lock()
+	held := stager.staged
+	stager.mu.Unlock()
+
+	if held >= int64(len(book)) {
+		t.Errorf("a duplicate holds %d bytes, want the file's %d back", held, len(book))
+	}
+	if held < int64(len(art)) {
+		t.Errorf("a duplicate holds %d bytes, want at least the %d its cover keeps in memory", held, len(art))
+	}
+}
+
+// A confirmed import drops the cover with the file — the redirect goes to
+// the book's own page — so nothing of it stays charged.
+func TestConfirmingDropsTheCoverAndReleasesEverything(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	stager, _ := testStager(t, db, 1<<20)
+
+	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(
+		epubBytesWithCover(t, "Dune", "Frank Herbert", 0, solidPNG(t))))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if !staged.HasCover {
+		t.Fatal("the fixture carries no cover, so this proves nothing")
+	}
+	if _, err := stager.Confirm(ctx, staged.ID); err != nil {
+		t.Fatalf("Confirm: %v", err)
 	}
 
 	stager.mu.Lock()
 	held := stager.staged
 	stager.mu.Unlock()
 	if held != 0 {
-		t.Errorf("a duplicate still holds %d bytes of the budget, though its file is gone", held)
+		t.Errorf("a confirmed import still holds %d bytes of the budget", held)
+	}
+	if _, _, ok := stager.Cover(staged.ID); ok {
+		t.Error("a confirmed import still holds its cover in memory")
 	}
 }
 

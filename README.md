@@ -133,7 +133,9 @@ is `/tmp` in the container) while you look at the preview, and is copied
 into the root of `/library` under its own name only when you press Import.
 Nothing is written to the library before that, an unconfirmed upload is
 thrown away after thirty minutes, and the directory is emptied on every
-restart — so `TMPDIR` needs room for one book, and nothing in it is worth
+restart. Several uploads may be waiting at once, so size `TMPDIR` for four
+times `MAX_IMPORT_SIZE` — 256 MB at the default — and note that `/tmp` in a
+container is often a tmpfs carved out of RAM. Nothing in there is worth
 keeping.
 
 What the file actually is decides how it is saved: an FB2 named `.epub` is

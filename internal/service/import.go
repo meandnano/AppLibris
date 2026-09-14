@@ -58,7 +58,12 @@ func (s *Service) StageImport(ctx context.Context, name string, r io.Reader) (*I
 
 // StagedImport returns one staged import, or nil, nil when it has expired
 // or was never there — the same absent-isn't-an-error contract GetBook
-// uses, so the handler turns it into a 404 the same way.
+// uses.
+//
+// What a transport makes of that is its own decision, and the web one
+// deliberately does not 404: a person looking at the URL of a stage that
+// has just expired is looking at a page that was right a moment ago, and
+// the file input they need is on it. See importPreviewHandler.
 func (s *Service) StagedImport(ctx context.Context, id string) (*ImportPreview, error) {
 	if s.importer == nil {
 		return nil, ErrImportDisabled

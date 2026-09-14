@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"library/internal/scanner"
 	"sync"
 	"unicode"
 )
@@ -19,9 +21,9 @@ import (
 const maxStemBytes = 200
 
 // partSuffix is what a copy in progress is called. Neither the scanner nor
-// the watcher acts on a name ending in it — matchedSuffix answers "" — so a
-// half-written file is never indexed, and the rename that publishes it is
-// atomic.
+// the watcher acts on a name ending in it — scanner.MatchedSuffix answers
+// "" — so a half-written file is never indexed, and publish is what gives
+// it a name the library holds.
 const partSuffix = ".part"
 
 // maxNameAttempts bounds the name search. Reaching it means two hundred
@@ -66,20 +68,26 @@ func libraryStem(original, title, id, suffix string) string {
 // suffix replaces it rather than being appended to it: an FB2 offered as
 // book.epub is written book.fb2, and the preview says so.
 //
-// A supported suffix is matched whole, because .fb2.zip is two extensions
-// and filepath.Ext sees only the last. Anything else loses one extension,
-// which is what a name like Dune.txt deserves; a name whose only dot leads
-// it keeps everything, since that dot is stripped as a hidden-file marker
-// rather than read as an extension.
+// A supported suffix is matched whole through scanner.MatchedSuffix, which
+// is the one place that decides what this app calls a book file — .fb2.zip
+// is two extensions and filepath.Ext sees only the last, and a second copy
+// of that list here would be a second answer to drift from it. The sniffed
+// suffix is tried after it, for the name a person offered under an
+// extension the scanner does not know.
+//
+// Anything else loses one extension, which is what a name like Dune.txt
+// deserves; a name whose only dot leads it keeps everything, since that dot
+// is stripped as a hidden-file marker rather than read as an extension.
 func stripSuffix(name, suffix string) string {
 	base := name
 	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
 		base = base[i+1:]
 	}
-	for _, s := range []string{".epub", ".fb2.zip", ".fb2", suffix} {
-		if len(s) < len(base) && strings.EqualFold(base[len(base)-len(s):], s) {
-			return base[:len(base)-len(s)]
-		}
+	if s := scanner.MatchedSuffix(base); len(s) > 0 && len(s) < len(base) {
+		return base[:len(base)-len(s)]
+	}
+	if len(suffix) < len(base) && strings.EqualFold(base[len(base)-len(suffix):], suffix) {
+		return base[:len(base)-len(suffix)]
 	}
 	if ext := filepath.Ext(base); len(ext) < len(base) {
 		return base[:len(base)-len(ext)]

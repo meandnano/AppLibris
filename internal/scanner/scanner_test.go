@@ -15,7 +15,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -3692,5 +3694,73 @@ func TestScanIgnoresAPartFileAndTheWriteProbe(t *testing.T) {
 	}
 	if count, err := db.CountBooks(ctx); err != nil || count != 1 {
 		t.Errorf("CountBooks = %d, %v; want 1", count, err)
+	}
+}
+
+// A sweep and an import can both reach the same content at the same moment:
+// scanFile reads by hash and only inserts after parsing the file and storing
+// a cover, so two callers that both read nil both try to insert, and
+// books.content_hash is UNIQUE. The loser must attach its path to the book
+// the winner made, which is what IndexFile's own comment promises — "one
+// book with one location" — rather than failing the import.
+func TestConcurrentIndexFileOfIdenticalContentConvergesOnOneBook(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	libraryDir, coversDir := t.TempDir(), t.TempDir()
+
+	// One book's bytes under several names, so every goroutine hashes to
+	// the same value and only one insert can win.
+	const copies = 6
+	paths := make([]string, copies)
+	writeTestEPUB(t, filepath.Join(libraryDir, "source.epub"), "Dune", "Frank Herbert", testCoverImage(t))
+	content, err := os.ReadFile(filepath.Join(libraryDir, "source.epub"))
+	if err != nil {
+		t.Fatalf("read the source: %v", err)
+	}
+	for i := range copies {
+		paths[i] = filepath.Join(libraryDir, "copy-"+strconv.Itoa(i)+".epub")
+		if err := os.WriteFile(paths[i], content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", paths[i], err)
+		}
+	}
+	os.Remove(filepath.Join(libraryDir, "source.epub"))
+
+	var start, wg sync.WaitGroup
+	start.Add(1)
+	ids := make([]int64, copies)
+	errs := make([]error, copies)
+	for i := range copies {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start.Wait()
+			ids[i], _, errs[i] = IndexFile(ctx, db, libraryDir, paths[i], coversDir)
+		}()
+	}
+	start.Done()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("IndexFile %d: %v", i, err)
+		}
+		if ids[i] != ids[0] {
+			t.Errorf("IndexFile %d answered book %d, want %d — identical content is one book", i, ids[i], ids[0])
+		}
+	}
+
+	count, err := db.CountBooks(ctx)
+	if err != nil {
+		t.Fatalf("CountBooks: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("CountBooks = %d, want 1: %d copies of one book", count, copies)
+	}
+	files, err := db.ListBookFiles(ctx, ids[0])
+	if err != nil {
+		t.Fatalf("ListBookFiles: %v", err)
+	}
+	if len(files) != copies {
+		t.Errorf("the book has %d locations, want %d", len(files), copies)
 	}
 }

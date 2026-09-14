@@ -540,12 +540,29 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 
 	if book == nil {
 		bookID, orphanedID, orphanedTitle, inherited, err := createBook(ctx, db, path, rel, hash, coversDir, size, mtime)
-		if err != nil {
-			return 0, fmt.Errorf("create book: %w", err)
+		switch {
+		case err == nil:
+			logOrphan(path, orphanedID, orphanedTitle, inherited, result)
+			result.New++
+			return bookID, nil
+		default:
+			// The read above and the insert inside createBook are not one
+			// transaction, and the gap between them is wide: a whole parse
+			// and a cover resize. A sweep and an IndexFile that both find
+			// no book for this hash therefore both try to insert it, and
+			// books.content_hash is UNIQUE, so the loser arrives here with
+			// a book that now exists. Re-reading turns that into the
+			// ordinary case below — known content at a path the index does
+			// not have — which is what the whole path was converging on
+			// anyway. Only a failure that is still a failure after the
+			// re-read is reported.
+			raced, findErr := db.FindBookByContentHash(ctx, hash)
+			if findErr != nil || raced == nil {
+				return 0, fmt.Errorf("create book: %w", err)
+			}
+			slog.Debug("book created concurrently, attaching this path to it", "path", path, "book_id", raced.ID)
+			book = raced
 		}
-		logOrphan(path, orphanedID, orphanedTitle, inherited, result)
-		result.New++
-		return bookID, nil
 	}
 
 	maybeRegenerateCover(ctx, db, book, path, coversDir, result)

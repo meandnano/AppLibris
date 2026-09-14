@@ -44,12 +44,16 @@ const StageTTL = 30 * time.Minute
 // of MAX_IMPORT_SIZE can work out.
 const stagingBudgetFactor = 4
 
-// indexTimeout bounds the index write that follows a copy into the library.
+// IndexTimeout bounds the index write that follows a copy into the library.
 // It runs on a context detached from the request's, so it needs a deadline
 // of its own — and a long one, because indexing hashes the whole file and
 // may extract and resize a cover, where internal/sender's markTimeout
 // covers one small SQLite write.
-const indexTimeout = 2 * time.Minute
+//
+// Exported because a transport has to give the request a write deadline
+// that outlasts it. A handler whose response deadline expires while Confirm
+// is still inside this budget imports the book and loses the answer.
+const IndexTimeout = 2 * time.Minute
 
 // janitorInterval is how often expired stages are swept. Expiry is also
 // rechecked on confirm, so this only bounds how long a dead file sits on
@@ -330,8 +334,9 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 		cover:     meta.Cover,
 		coverType: coverType,
 		created:   s.now(),
-		reserved:  size,
+		reserved:  0, // filled below, once the record is complete
 	}
+	record.reserved = retained(size, record)
 
 	if err := s.decideVerdict(ctx, record); err != nil {
 		os.Remove(staged)
@@ -339,14 +344,38 @@ func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, e
 	}
 
 	s.mu.Lock()
-	// The record now owns what it holds, charged at the file's real size
-	// rather than at the cap it was admitted under.
+	// The record now owns what it holds, charged at what it actually
+	// retains rather than at the cap it was admitted under.
 	s.staged -= s.maxSize - record.reserved
 	s.stages[id] = record
 	s.mu.Unlock()
 	reserved = 0
 
 	return record.staged, nil
+}
+
+// retained is everything one staged import holds once Stage returns: the
+// file on disk, the cover kept in memory for the preview, and the metadata
+// the preview renders. size is the file's, or 0 once it has been deleted.
+//
+// All of it, and not just the file. Each part outlives the request by up to
+// the time to live, and charging only the file lets a ten-kilobyte upload
+// hold eight megabytes of cover — a compressible image inside a small
+// archive — against a ten-kilobyte reservation. The metadata is small per
+// stage and capped by storage.CapField, but it is the same shape: bounded
+// in bytes rather than in stages, a budget that ignores it is a budget a
+// great many tiny uploads walk straight past.
+func retained(size int64, record *stage) int64 {
+	n := size + int64(len(record.cover))
+
+	m := record.staged
+	n += int64(len(m.Title) + len(m.Description) + len(m.Language) + len(m.ISBN) +
+		len(m.Publisher) + len(m.PublishedDate) + len(m.OriginalName) +
+		len(m.LibraryName) + len(m.ExistingTitle) + len(m.Format) + len(m.ID))
+	for _, author := range m.Authors {
+		n += int64(len(author))
+	}
+	return n
 }
 
 // reserve charges n against the staging budget, reporting false when it
@@ -414,10 +443,11 @@ func (s *Stager) decideVerdict(ctx context.Context, record *stage) error {
 		record.staged.ExistingTitle = existing.Title
 		os.Remove(record.path)
 		record.path = ""
-		// Nothing left on disk, so it holds none of the budget either —
-		// the record survives only so the page can render and be
-		// discarded.
-		record.reserved = 0
+		// The file goes at once, since there is nothing left to confirm,
+		// and its share of the budget with it. What the record still holds
+		// is charged: the preview renders, cover and all, until somebody
+		// discards it or it expires.
+		record.reserved = retained(0, record)
 		record.done = true
 		record.bookID = existing.ID
 		return nil
@@ -529,7 +559,7 @@ func (s *Stager) Confirm(ctx context.Context, id string) (int64, error) {
 	// later confirm report a failure that did not happen — about a file
 	// sitting in the library that the next sweep will index anyway. The
 	// same rule internal/sender applies once Resend has accepted a message.
-	indexCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), indexTimeout)
+	indexCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), IndexTimeout)
 	defer cancel()
 
 	bookID, created, err := scanner.IndexFile(indexCtx, s.db, s.libraryDir, filepath.Join(s.libraryDir, name), s.coversDir)
@@ -557,7 +587,7 @@ func (s *Stager) Confirm(ctx context.Context, id string) (int64, error) {
 // publishes it under a name nothing else holds, which is the only way
 // anything in this package creates a supported suffix in the library
 // directory. A sweep or the watcher meeting the copy sees only the .part,
-// which matchedSuffix answers "" for.
+// which scanner.MatchedSuffix answers "" for.
 //
 // A copy and not a rename out of staging: those are different filesystems
 // in every deployment that matters, and os.Rename across them fails. Sync
@@ -666,8 +696,16 @@ func (s *Stager) taken(record *stage) {
 		os.Remove(record.path)
 		record.path = ""
 	}
+	// The cover goes with the file. A confirmed import redirects to the
+	// book's own page, which serves the cover the scanner stored, so
+	// nothing asks this record for one again.
+	record.cover = nil
+	record.coverType = ""
+
 	// The record outlives the confirm so a double click gets its answer,
-	// but it is holding no bytes any more and must not hold budget either.
+	// but what it holds now is an id and a few strings — far below the
+	// granularity of the budget, and released so the next upload is not
+	// charged for a book that already landed.
 	s.staged -= record.reserved
 	record.reserved = 0
 	record.done = true

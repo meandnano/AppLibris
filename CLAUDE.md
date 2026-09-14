@@ -200,6 +200,13 @@ tidy-up would break. The note named in the heading carries the reasoning.
   the path now belongs to along with whether it created one. There is no
   second way into the index; every guard a new book needs lives in
   `createBook`.
+- `scanFile` reads by content hash on the read pool and inserts later, so
+  two callers can both find nothing and both insert against the UNIQUE
+  `books.content_hash`. The loser re-reads and attaches its path to the
+  winner's book rather than failing — that is what makes the promise that a
+  sweep and an import "converge on one book" true. Every other unique column
+  is either `ON CONFLICT` or read and written inside the single-connection
+  write pool.
 - `MatchedSuffix`, `BookFormat` and `ExtractMetadata` are exported because
   `internal/importer` must agree with a sweep about what a file is, what
   its format is called and what it holds. `ExtractMetadata` takes the
@@ -334,8 +341,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
   shows what would be stored — and so the title-match verdict compares a
   capped title against the capped `sort_title` the scanner derived.
 - Staging is bounded in total bytes, not in stages. The reservation is taken
-  at the cap before the copy and corrected after, and given back by every
-  path that drops a staged file.
+  at the cap before the copy and corrected after to everything the stage
+  retains — the file, the cover held for the preview, the metadata — never
+  the file alone, or a small upload holds megabytes of cover against a small
+  charge. It is given back by every path that drops a staged file: discard,
+  expiry, confirm, and the duplicate verdict, which releases the file's
+  share and keeps charging the cover its page still renders.
 - Confirm does not re-check a `new` or `title-match` verdict: it copies,
   and `IndexFile`'s answer is the truth, so landing on a book the index
   already had is a second location and not an error. `exists` is the one
@@ -417,11 +428,15 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `Sec-Fetch-Site` through on purpose; the opt-out mode depends on that.
 - Every route that renders the send control copies `SendableNote`, so a
   fragment can never offer a button the full page withholds.
-- The upload route extends its own read deadline through
-  `http.NewResponseController`; `cmd/server`'s `ReadTimeout` is never
-  loosened for the other routes. `http.MaxBytesReader` bounds the body,
-  `importer`'s own count bounds the file, and only the second is the number
-  a refusal names.
+- The upload and confirm routes extend their own deadlines through
+  `http.NewResponseController`, **both halves**; `cmd/server`'s timeouts are
+  never loosened for the other routes. Go installs the write deadline once,
+  when the request headers are read, so a read window widened for a large
+  body sits inside a write deadline that expired while it was arriving — the
+  import lands and its answer never reaches the browser. `confirmWindow` is
+  derived from `importer.IndexTimeout` rather than restating it.
+  `http.MaxBytesReader` bounds the body, `importer`'s own count bounds the
+  file, and only the second is the number a refusal names.
 - `providerSourceNote` renders a marker for a provider's name and nothing
   for `embedded`, `manual` or absent. Editing clears the marker because the
   POST handler reloads the book rather than echoing the input.
