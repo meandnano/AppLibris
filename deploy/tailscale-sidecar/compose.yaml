@@ -1,0 +1,98 @@
+# AppLibris behind a Tailscale sidecar
+#
+# The application container has no network of its own: it joins the
+# tailscale container's namespace, listens on 127.0.0.1:8080 there, and is
+# reached only through Tailscale Serve, which terminates HTTPS for the
+# node's tailnet name. Nothing is published to the host, so the only way in
+# is the tailnet.
+#
+# Copy .env.example to .env and fill it in before the first `docker compose up -d`.
+# `configs.content` needs Compose v2.23.1 or newer.
+
+configs:
+  ts-serve:
+    # $${TS_CERT_DOMAIN} reaches tailscaled as a literal, which expands it
+    # to this node's MagicDNS name, so the file needs no hostname in it
+    content: |
+      {"TCP":{"443":{"HTTPS":true}},
+      "Web":{"$${TS_CERT_DOMAIN}:443":
+          {"Handlers":{"/":
+          {"Proxy":"http://127.0.0.1:8080"}}}},
+      "AllowFunnel":{"$${TS_CERT_DOMAIN}:443":false}}
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale-${SERVICE}
+    hostname: ${SERVICE_HOSTNAME} # the name AppLibris gets on your tailnet
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SERVE_CONFIG=/config/serve.json
+      - TS_USERSPACE=false
+      - TS_ENABLE_HEALTH_CHECK=true
+      - TS_LOCAL_ADDR_PORT=127.0.0.1:41234 # where the healthz endpoint below lives
+      - TS_ACCEPT_DNS=true
+      - TS_AUTH_ONCE=true
+    configs:
+      - source: ts-serve
+        target: /config/serve.json
+    volumes:
+      - ${TS_CONFIG_LOCATION}:/config
+      - ${TS_STATE_LOCATION}:/var/lib/tailscale # node identity, keep it across restarts
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+    # Uncomment to also reach AppLibris from the host, bypassing Tailscale.
+    # It needs ADDR=0.0.0.0:8080 below as well, since a published port is
+    # forwarded to the namespace's own address and not to its loopback. That
+    # listener is plain HTTP, which carries no Sec-Fetch-Site over a
+    # non-local address, so saving, sending and fetching metadata are
+    # refused on it unless REQUIRE_FETCH_METADATA is turned off
+    #ports:
+    #  - 127.0.0.1:8080:8080
+    # If MagicDNS resolution misbehaves, name a resolver explicitly
+    #dns:
+    #  - ${DNS_SERVER}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:41234/healthz"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: always
+
+  application:
+    image: ${IMAGE_URL}
+    network_mode: service:tailscale
+    container_name: ${SERVICE}
+    user: ${APP_UID}:${APP_GID} # must own DATA_LOCATION and be able to read LIBRARY_LOCATION
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      # Loopback only: the tailnet address belongs to the same namespace,
+      # and binding it would serve the app over plain HTTP alongside Serve
+      - ADDR=127.0.0.1:8080
+      - LIBRARY_DIR=/library
+      - DB_PATH=/data/library.db
+      - COVERS_DIR=/data/covers
+      - LOG_LEVEL=${LOG_LEVEL}
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - RESEND_FROM=${RESEND_FROM}
+      - METADATA_PROVIDERS=${METADATA_PROVIDERS}
+      - GOOGLE_BOOKS_API_KEY=${GOOGLE_BOOKS_API_KEY}
+      - TZ=${TZ} # zoneinfo ships in the image, so this is all local time needs
+    volumes:
+      - ${LIBRARY_LOCATION}:/library
+      - ${DATA_LOCATION}:/data
+    depends_on:
+      tailscale:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      # The image is distroless: no shell and no wget to probe /healthz
+      # with. The sidecar's own healthcheck is what gates startup here
+      disable: true

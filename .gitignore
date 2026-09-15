@@ -8,3 +8,7 @@
 
 # revmux review archive
 .revmux/tasks/
+
+/deploy/tailscale-sidecar/.env
+/deploy/tailscale-sidecar/data
+/deploy/tailscale-sidecar/tailscale
