@@ -21,8 +21,9 @@ import (
 //
 // When sending is unconfigured, this still 503s with the disabled
 // fragment rather than 404ing: a stale open tab gets an explanation
-// instead of a dead link, and cmd/server has already logged why at
-// startup.
+// instead of a dead link — send__form carries hx-status:503, without which
+// noSwap's 5xx would leave that tab's button doing nothing at all — and
+// cmd/server has already logged why at startup.
 func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
@@ -34,6 +35,8 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 		}
 
 		if !sendEnabled {
+			// send__form carries hx-status:503, which is what lets htmx
+			// swap the disabled fragment in past noSwap's 5xx
 			page := bookDetailPage{ID: id, SendEnabled: false}
 			applySendState(&page, nil)
 			w.WriteHeader(http.StatusServiceUnavailable)

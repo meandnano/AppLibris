@@ -156,20 +156,32 @@ sets no `Vary` at all.
 The page configures htmx through the `htmx-config` meta tag in
 `document-head`. Its `noSwap` lists `4xx` and `5xx` beside `204` and
 `304`, so an error response swaps only when the element that asked opts
-its status in with `hx-status`, which htmx checks before `noSwap`'s
-wildcard. A plain-text `internal error` or `404 page not found` therefore
-never replaces a control, while a rejection that carries something to show
-answers its honest status and is swapped in:
+its status in with `hx-status`, which htmx reaches at the exact-status step
+before the wildcard step where `noSwap` matches. A plain-text `internal
+error` or `404 page not found` therefore never replaces a control, while an
+error response that carries something to show answers its honest status and
+is swapped in:
 
 - a rejected inline edit, send address, upload or confirm answers 422, and
   each of those forms carries `hx-status:422="swap:outerHTML"`;
 - a refused fetch-metadata request answers 403, and every page's `<body>`
-  carries `hx-status:403:inherited="swap:afterbegin"` (further below).
+  carries `hx-status:403:inherited="swap:afterbegin"` (further below);
+- a send with Resend unconfigured and an enrich with no provider answer 503
+  with the disabled control, and `send__form` and `enrich__form` each carry
+  `hx-status:503="swap:outerHTML"` — the opt-in belongs on the enabled form,
+  since the tab that needs it is one loaded before the feature went away.
 
-The status and the opt-in are a pair. A route answering a 4xx body without
-the matching attribute on its form swaps nothing, and Save looks like it
-did nothing, the worst failure the page has; the handler tests assert the
-attribute in the rejected response for that reason.
+An opt-in names the exact status rather than a wildcard, because htmx walks
+`422`, `42x`, `4xx` in turn and consults `noSwap` before the element at
+each step: an `hx-status:4xx` or `hx-status:5xx` sits behind `noSwap`'s own
+entry for that wildcard and is never reached.
+
+The status and the opt-in are a pair. A route answering an error body, 4xx
+or 5xx, without the matching attribute on the element that asked swaps
+nothing, and Save looks like it did nothing, the worst failure the page
+has; the handler tests assert the attribute where the form renders — in the
+rejected response for a 422, on the enabled control for a 503, whose own
+refusal carries no form to put it on.
 
 The same tag sets `defaultTimeout` to `0`, so htmx never abandons a
 request of its own accord and the server's deadlines are the only bound.

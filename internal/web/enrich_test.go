@@ -223,6 +223,38 @@ func TestEnrichHandlerUnknownBook404s(t *testing.T) {
 	}
 }
 
+// No provider configured answers 503 with the disabled fragment, and
+// noSwap holds 5xx, so a tab still holding the enabled form shows that
+// sentence only because the form names the status. It names 503 exactly:
+// noSwap is consulted before the element at every wildcard step, so an
+// hx-status:5xx could never be reached.
+func TestEnabledEnrichFormOptsIts503IntoSwapping(t *testing.T) {
+	db := newSendTestDB(t)
+	id := createSendTestBook(t, db)
+	handler := enrichRoutes(db)
+
+	const want = `hx-status:503="swap:outerHTML"`
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET book page = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("the book page's enrich form is missing %q; body = %q", want, rec.Body.String())
+	}
+
+	// The opt-in has to survive the fragment route too, or a tab that has
+	// swapped its control in since loading holds a form without it.
+	fragment := postEnrich(handler, id, true)
+	if fragment.Code != http.StatusOK {
+		t.Fatalf("POST enrich = %d, want 200; body = %s", fragment.Code, fragment.Body.String())
+	}
+	if !strings.Contains(fragment.Body.String(), want) {
+		t.Errorf("the re-rendered enrich control is missing %q; body = %q", want, fragment.Body.String())
+	}
+}
+
 // No provider configured means the control cannot do what it offers, so it
 // 503s with the disabled fragment rather than 404ing — a stale open tab
 // gets an explanation, the same treatment the send control gets when
@@ -238,6 +270,11 @@ func TestEnrichHandlerDisabledServesTheDisabledFragment(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "not configured") {
 		t.Errorf("disabled fragment missing its explanation; body = %q", rec.Body.String())
+	}
+	// The form's hx-status:503 swaps this body over #enrich, so a whole page
+	// here would splice a document into the control.
+	if !strings.Contains(rec.Body.String(), `id="enrich"`) || strings.Contains(rec.Body.String(), "<html") {
+		t.Errorf("503 body is not the enrich-control fragment; body = %q", rec.Body.String())
 	}
 	job, err := db.LatestEnrichmentForBook(context.Background(), id)
 	if err != nil {

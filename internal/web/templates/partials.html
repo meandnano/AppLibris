@@ -4,9 +4,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{/* noSwap keeps every error response out of the page unless the element
        that asked opts its status in with hx-status, so a plain-text internal
-       error never replaces the control it came from. defaultTimeout 0 leaves
-       the bound to the server, whose upload and confirm windows outlast
-       htmx's own sixty-second default */}}
+       error never replaces the control it came from. An opt-in names the
+       exact status: noSwap is consulted before the element at each step, so
+       a wildcard listed here shadows an opt-in on the same wildcard.
+       defaultTimeout 0 leaves the bound to the server, whose upload and
+       confirm windows outlast htmx's own sixty-second default */}}
   <meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"defaultTimeout":0}'>
   <title>{{.Title}} · AppLibris</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -239,7 +241,7 @@
        refusal always has its reason. */}}
   <p class="send__disabled">{{.SendableNote}}</p>
   {{else}}
-  <form class="send__form" method="post" action="/books/{{.ID}}/send" hx-post="/books/{{.ID}}/send" hx-target="#send" hx-swap="outerHTML" hx-status:422="swap:outerHTML">
+  <form class="send__form" method="post" action="/books/{{.ID}}/send" hx-post="/books/{{.ID}}/send" hx-target="#send" hx-swap="outerHTML" hx-status:422="swap:outerHTML" hx-status:503="swap:outerHTML">
     {{if .SendError}}
     <p class="send__error">{{.SendError}}</p>
     {{end}}
@@ -338,7 +340,7 @@
   {{if not .EnrichEnabled}}
   <p class="enrich__disabled">Metadata providers are not configured</p>
   {{else}}
-  <form class="enrich__form" method="post" action="/books/{{.ID}}/enrich" hx-post="/books/{{.ID}}/enrich" hx-target="#enrich" hx-swap="outerHTML">
+  <form class="enrich__form" method="post" action="/books/{{.ID}}/enrich" hx-post="/books/{{.ID}}/enrich" hx-target="#enrich" hx-swap="outerHTML" hx-status:503="swap:outerHTML">
     <button class="button button--md button--tertiary" type="submit"{{if .EnrichPending}} disabled{{end}}>
       {{if .EnrichPending}}<span class="spinner spinner--sm" aria-hidden="true"></span>{{end}}
       {{.EnrichButtonLabel}}

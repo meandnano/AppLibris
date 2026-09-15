@@ -21,8 +21,10 @@ import (
 // second code path to drift.
 //
 // With no provider configured this 503s with the disabled fragment rather
-// than 404ing, sendHandler's rule: a stale open tab gets an explanation,
-// and cmd/server has already logged why at startup.
+// than 404ing, sendHandler's rule: a stale open tab gets an explanation —
+// enrich__form carries hx-status:503, without which noSwap's 5xx would
+// leave that tab's button doing nothing at all — and cmd/server has
+// already logged why at startup.
 func enrichHandler(svc *service.Service, enrichEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
@@ -34,6 +36,8 @@ func enrichHandler(svc *service.Service, enrichEnabled bool) http.HandlerFunc {
 		}
 
 		if !enrichEnabled {
+			// enrich__form carries hx-status:503, which is what lets htmx
+			// swap the disabled fragment in past noSwap's 5xx
 			page := bookDetailPage{ID: id, EnrichEnabled: false}
 			w.WriteHeader(http.StatusServiceUnavailable)
 			if err := render(w, "enrich-control", page); err != nil {

@@ -415,9 +415,14 @@ tidy-up would break. The note named in the heading carries the reasoning.
   (the plain path is a `303` back to the book). The `htmx-config` meta tag
   in `document-head` keeps `4xx` and `5xx` in `noSwap`, so an error swaps
   only when the element that asked names it: every form whose route answers
-  422 carries `hx-status:422="swap:outerHTML"`. A route that gains a 4xx
-  body gains the matching `hx-status` on its form, or the rejection never
-  shows.
+  422 carries `hx-status:422="swap:outerHTML"`, `send__form` and
+  `enrich__form` also carry `hx-status:503="swap:outerHTML"` for the
+  disabled control their route answers with, and every page's `<body>`
+  carries the 403 one. A route that gains an error body, 4xx or 5xx, gains
+  the matching `hx-status` on the element that asked, or the rejection
+  never shows. The opt-in names the exact status, never a wildcard:
+  `noSwap` is consulted before the element at each of the three steps, so
+  an opt-in on a wildcard `noSwap` itself lists is unreachable.
 - That tag's `defaultTimeout` stays `0`: htmx 4 otherwise abandons a request
   after 60s, and an upload or confirm outlasts that while the import lands.
 - Every import route that can answer a fragment names both htmx headers in
