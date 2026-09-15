@@ -102,11 +102,14 @@ func TestMetadataRejectedValueComesBackAsAnEditor(t *testing.T) {
 
 	rec := postField(handler, id, "title", url.Values{"value": {"   "}}, htmx)
 	body := rec.Body.String()
-	// 200 on purpose: the page configures htmx not to swap a 4xx, so a rejected
-	// fragment answered with 422 would leave the editor untouched and make
-	// Save look like it did nothing. See metadataError.
-	if rec.Code != http.StatusOK {
-		t.Errorf("blank title fragment = %d, want 200 — htmx will not swap a 4xx", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("blank title fragment = %d, want 422", rec.Code)
+	}
+	// noSwap keeps 4xx out of the page, so without the form's own opt-in the
+	// rejection would leave the editor untouched and Save would look like it
+	// did nothing
+	if !strings.Contains(body, `hx-status:422="swap:outerHTML"`) {
+		t.Errorf("rejected editor form does not opt its 422 into swapping: %q", body)
 	}
 	if !strings.Contains(body, "Title is required") || !strings.Contains(body, "<form") {
 		t.Errorf("rejected value did not come back as an editor with its message: %q", body)
@@ -159,8 +162,8 @@ func TestMetadataOverlongValueIsAFieldErrorNotABareStatus(t *testing.T) {
 	rec := postField(handler, id, "description",
 		url.Values{"value": {strings.Repeat("x", maxMetadataFormBody+1)}}, htmx)
 	body := rec.Body.String()
-	if rec.Code != http.StatusOK {
-		t.Errorf("oversized body fragment = %d, want 200", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("oversized body fragment = %d, want 422", rec.Code)
 	}
 	if !strings.Contains(body, "editable__error") || !strings.Contains(body, "<form") {
 		t.Errorf("oversized body did not come back through the form: %q", body)

@@ -382,6 +382,17 @@ func TestHTMXConfigContract(t *testing.T) {
 	if body := rec.Body.String(); !strings.Contains(body, want) {
 		t.Errorf("page missing %s; body = %q", want, body)
 	}
+
+	// The fetch-metadata refusal is a 403 that noSwap would drop, and the
+	// wrapper cannot know which control posted, so every page template opts
+	// it in once on <body>
+	for _, path := range []string{"/", "/books/1", "/history", "/import"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if want := `<body hx-status:403:inherited="swap:afterbegin">`; !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("GET %s (%d) missing %s", path, rec.Code, want)
+		}
+	}
 }
 
 func TestSearchNoResultsIsDistinctFromEmptyLibrary(t *testing.T) {
@@ -1281,12 +1292,12 @@ func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
 		wantSwap string
 	}{
 		{name: "POST with no header", method: http.MethodPost, wantCode: http.StatusForbidden, wantBody: "HTTPS address"},
-		// An htmx caller is refused with a 200 and a swap instruction, since
-		// the vendored htmx does not swap a 4xx and a refusal nobody can see
-		// is indistinguishable from a broken button. Same security property:
-		// next is not called either way.
+		// An htmx caller gets the refusal line as a 403 body, swapped in by
+		// the page's inherited hx-status:403 rather than a header, since the
+		// page decides where it lands. Same security property: next is not
+		// called either way.
 		{name: "htmx POST with no header", method: http.MethodPost, headers: map[string]string{"HX-Request": "true"},
-			wantCode: http.StatusOK, wantBody: "Refused", wantSwap: "afterbegin"},
+			wantCode: http.StatusForbidden, wantBody: "Refused"},
 		// A history-restore request is swapped into the whole body, so it
 		// is not a fragment caller and gets the plain 403 like everyone else.
 		{name: "htmx history-restore POST with no header", method: http.MethodPost,

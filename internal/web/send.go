@@ -90,7 +90,11 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 		}
 
 		page := bookDetailPage{ID: id, SendEnabled: true, SendableNote: detail.SendableNote}
+		status := http.StatusOK
 		if errors.Is(err, service.ErrInvalidAddress) {
+			// send__form carries hx-status:422, which is what lets htmx swap
+			// the rejection in past noSwap's 4xx
+			status = http.StatusUnprocessableEntity
 			// Nothing was queued, so the control has to come back showing
 			// the state it already had — re-reading it rather than passing
 			// nil, which would retract a Delivered or Failed result the
@@ -117,7 +121,7 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 		}
 		page.Recipients = recipients
 
-		if err := render(w, "send-control", page); err != nil {
+		if err := renderStatus(w, status, "send-control", page); err != nil {
 			slog.Error("render template failed", "template", "send-control", "error", err)
 		}
 	}

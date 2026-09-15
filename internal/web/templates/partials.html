@@ -2,11 +2,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  {{/* noSwap keeps every error response out of the page: a refusal worth
-       showing answers 200, and a plain-text internal error must never
-       replace the control it came from. defaultTimeout 0 leaves the bound
-       to the server, whose upload and confirm windows outlast htmx's own
-       sixty-second default */}}
+  {{/* noSwap keeps every error response out of the page unless the element
+       that asked opts its status in with hx-status, so a plain-text internal
+       error never replaces the control it came from. defaultTimeout 0 leaves
+       the bound to the server, whose upload and confirm windows outlast
+       htmx's own sixty-second default */}}
   <meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"defaultTimeout":0}'>
   <title>{{.Title}} · AppLibris</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -239,7 +239,7 @@
        refusal always has its reason. */}}
   <p class="send__disabled">{{.SendableNote}}</p>
   {{else}}
-  <form class="send__form" method="post" action="/books/{{.ID}}/send" hx-post="/books/{{.ID}}/send" hx-target="#send" hx-swap="outerHTML">
+  <form class="send__form" method="post" action="/books/{{.ID}}/send" hx-post="/books/{{.ID}}/send" hx-target="#send" hx-swap="outerHTML" hx-status:422="swap:outerHTML">
     {{if .SendError}}
     <p class="send__error">{{.SendError}}</p>
     {{end}}
@@ -385,7 +385,7 @@
 {{define "book-field-title"}}
 <div id="book-field-title" class="editable editable--title{{if .Edit}} editable--editing{{end}}" data-editable-field data-field="title">
   {{if .Edit}}
-  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML">
+  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML" hx-status:422="swap:outerHTML">
     <input class="editable__control detail__title" type="text" name="value" value="{{.Value}}" required maxlength="1024" autofocus aria-label="Title">
     {{template "edit-actions" .}}
   </form>
@@ -398,7 +398,7 @@
 {{define "book-field-authors"}}
 <div id="book-field-authors" class="editable editable--authors{{if .Edit}} editable--editing{{end}}" data-editable-field data-field="authors">
   {{if .Edit}}
-  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML">
+  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML" hx-status:422="swap:outerHTML">
     <textarea class="editable__control editable__control--authors" name="value" rows="3" autofocus aria-label="Authors" placeholder="{{.Placeholder}}">{{.Value}}</textarea>
     {{template "edit-actions" .}}
   </form>
@@ -411,7 +411,7 @@
 {{define "book-field-description"}}
 <div id="book-field-description" class="editable editable--description{{if .Edit}} editable--editing{{end}}" data-editable-field data-field="description">
   {{if .Edit}}
-  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML">
+  <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML" hx-status:422="swap:outerHTML">
     <label class="editable__section-label" for="description-value">Description</label>
     <textarea id="description-value" class="editable__control detail__description" name="value" rows="5" autofocus aria-label="Description" placeholder="{{.Placeholder}}">{{.Value}}</textarea>
     {{template "edit-actions" .}}
@@ -427,7 +427,7 @@
   <dt>{{.Label}}</dt>
   <dd>
     {{if .Edit}}
-    <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML">
+    <form method="post" action="{{.ReadURL}}" hx-post="{{.ReadURL}}" hx-target="closest [data-editable-field]" hx-swap="outerHTML" hx-status:422="swap:outerHTML">
       <input class="editable__control{{if .Mono}} editable__control--mono{{end}}" type="text" name="value" value="{{.Value}}" maxlength="4096" autofocus aria-label="{{.Label}}" placeholder="{{.Placeholder}}">
       {{template "edit-actions" .}}
     </form>
@@ -438,12 +438,11 @@
 </div>
 {{end}}
 
-{{/* What RequireFetchMetadata hands an htmx caller it has refused. It
-     arrives with HX-Reswap: afterbegin, so it lands as the first child of
-     whatever the posting form targets and the control below it survives.
-     A 200 rather than the 403 every other client gets, because htmx is
-     configured not to swap a 4xx and a refusal nobody can see is a broken
-     button */}}
+{{/* What RequireFetchMetadata hands an htmx caller it has refused, at 403.
+     Every page's <body> carries hx-status:403:inherited="swap:afterbegin",
+     so it lands as the first child of whatever the posting form targets and
+     the control below it survives, without the wrapper knowing which
+     control posted */}}
 {{define "fetch-metadata-refused"}}
 <p class="refused" role="alert">Refused: this page must be reached through the service&rsquo;s HTTPS address &mdash; see the server log.</p>
 {{end}}
@@ -474,7 +473,7 @@
 {{define "import-form"}}
 <form class="import__form" method="post" action="/import/file" enctype="multipart/form-data"
       hx-post="/import/file" hx-encoding="multipart/form-data"
-      hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form">
+      hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form" hx-status:422="swap:outerHTML">
   <label class="import__label" for="import-file">EPUB or FB2 file</label>
   <input class="import__file" id="import-file" type="file" name="file" accept=".epub,.fb2,.fb2.zip,.zip" required>
   <p class="import__hint">Up to {{.MaxSizeLabel}}. The file is copied into the library directory under its own name.</p>
@@ -530,7 +529,7 @@
     <div class="import__actions">
       {{if .Importable}}
       <form class="import__confirm-form" method="post" action="{{.ConfirmURL}}"
-            hx-post="{{.ConfirmURL}}" hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form">
+            hx-post="{{.ConfirmURL}}" hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form" hx-status:422="swap:outerHTML">
         <button class="button button--lg button--primary import__submit" type="submit">Import</button>
         <span class="import__indicator" role="status">Importing &hellip;</span>
       </form>

@@ -410,10 +410,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
 
 - A fragment is answered when `HX-Request` is present **and**
   `HX-History-Restore-Request` is absent. `Vary` names both.
-- **A rejected edit fragment answers 200; the rejected full page answers
-  422.** The `htmx-config` meta tag in `document-head` lists `4xx` and `5xx`
-  in `noSwap`, so no error response is swapped. Do not opt 422 in from the
-  client.
+- **A rejection answers 422 on both paths** — an edit, a send address, an
+  import upload or confirm. The `htmx-config` meta tag in `document-head`
+  keeps `4xx` and `5xx` in `noSwap`, so an error swaps only when the element
+  that asked names it: every form whose route answers 422 carries
+  `hx-status:422="swap:outerHTML"`. A route that gains a 4xx body gains the
+  matching `hx-status` on its form, or the rejection never shows.
 - That tag's `defaultTimeout` stays `0`: htmx 4 otherwise abandons a request
   after 60s, and an upload or confirm outlasts that while the import lands.
 - Every import route that can answer a fragment names both htmx headers in
@@ -429,10 +431,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Every read affordance carries both `href` and `hx-get`, every editor both
   `action` and `hx-post`. One markup path; no separate no-JS path.
 - Every state-changing route is wrapped in `sameSiteOnly`, and
-  `cmd/server` wraps the whole handler in `fetchMetadataGuard`. An htmx
-  fragment refusal is a 200 with the `fetch-metadata-refused` partial and
-  `HX-Reswap: afterbegin`; every other client gets 403. `next` is not
-  called in either shape. `sameSiteOnly` itself passes an *empty*
+  `cmd/server` wraps the whole handler in `fetchMetadataGuard`. A refusal is
+  a 403 for every client; an htmx fragment caller's carries the
+  `fetch-metadata-refused` partial, which every page template's `<body>`
+  swaps in through `hx-status:403:inherited="swap:afterbegin"`. `next` is
+  not called in either shape. `sameSiteOnly` itself passes an *empty*
   `Sec-Fetch-Site` through on purpose; the opt-out mode depends on that.
 - Every route that renders the send control copies `SendableNote`, so a
   fragment can never offer a button the full page withholds.

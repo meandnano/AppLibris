@@ -91,7 +91,7 @@ func metadataHandler(svc *service.Service, sendEnabled, enrichEnabled bool) http
 			http.Redirect(w, r, fmt.Sprintf("/books/%d", id), http.StatusSeeOther)
 			return
 		}
-		renderField(w, field, makeFieldViews(detail, "")[field])
+		renderField(w, http.StatusOK, field, makeFieldViews(detail, "")[field])
 	}
 }
 
@@ -128,7 +128,7 @@ func metadataFragment(w http.ResponseWriter, r *http.Request, svc *service.Servi
 	if editing {
 		edit = string(field)
 	}
-	renderField(w, field, makeFieldViews(detail, edit)[field])
+	renderField(w, http.StatusOK, field, makeFieldViews(detail, edit)[field])
 }
 
 // metadataError re-renders field as an open editor holding the rejected
@@ -148,17 +148,12 @@ func metadataError(w http.ResponseWriter, r *http.Request, svc *service.Service,
 	}
 
 	if fragment {
-		// 200, not 422: the page configures htmx not to swap a 4xx (noSwap
-		// in document-head), so an honest status here would leave the editor untouched
-		// and make Save look like it did nothing. The alternative — opting
-		// 422 in from the client — buys the status code at the cost of the
-		// whole interaction depending on one listener still being loaded
-		// and still matching. The full-page path below keeps the 422,
-		// where nothing silently swallows it.
+		// The editor form carries hx-status:422, which is what lets htmx
+		// swap this past noSwap's 4xx
 		view := makeFieldViews(detail, string(field))[field]
 		view.Value = value
 		view.Error = message
-		renderField(w, field, view)
+		renderField(w, http.StatusUnprocessableEntity, field, view)
 		return
 	}
 
@@ -178,9 +173,8 @@ func metadataError(w http.ResponseWriter, r *http.Request, svc *service.Service,
 // renderField writes one field's fragment. Each of the three individually
 // placed fields has its own template because each sits in different markup
 // — a heading, a byline, a body paragraph — while every definition-list row
-// shares one. Always 200: a fragment is only ever rendered for an htmx
-// caller, and see metadataError for why a rejected value is not a 4xx here.
-func renderField(w http.ResponseWriter, field storage.MetadataField, view editableFieldView) {
+// shares one
+func renderField(w http.ResponseWriter, status int, field storage.MetadataField, view editableFieldView) {
 	name := "book-field-meta"
 	switch field {
 	case storage.FieldTitle:
@@ -190,7 +184,7 @@ func renderField(w http.ResponseWriter, field storage.MetadataField, view editab
 	case storage.FieldDescription:
 		name = "book-field-description"
 	}
-	if err := render(w, name, view); err != nil {
+	if err := renderStatus(w, status, name, view); err != nil {
 		slog.Error("render template failed", "field", field, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}

@@ -105,8 +105,9 @@ buffer starts writing, the response is committed, and a write failure
 there (almost always the client disconnecting) is logged inside `render`;
 a handler answering it with `http.Error` would double-write onto a
 committed response. `renderStatus` is the same with an explicit status,
-for the one case that needs a body and a non-200 together: a rejected edit
-answering 422 with the editor and its message.
+for a body and a non-200 together: a rejected edit, send address or import
+answering 422 with its form and message, and a refused request answering
+403 with the line saying so.
 
 Handlers map service types onto small per-page view models so templates
 hold no logic. Every label is composed in the handler: the results line,
@@ -154,14 +155,21 @@ sets no `Vary` at all.
 
 The page configures htmx through the `htmx-config` meta tag in
 `document-head`. Its `noSwap` lists `4xx` and `5xx` beside `204` and
-`304`, so no error response is swapped: a plain-text `internal error` or
-`404 page not found` never replaces the control that asked. Two places
-answer 200 where the status would honestly be 4xx, because a refusal must
-be visible: a rejected inline edit on the fragment path (below) and a
-refused fetch-metadata request from an htmx form (further below). Do not
-answer those 422 and opt them into swapping from the client, through
-`hx-status` or a listener: a 200 swaps under any configuration, and a
-silent no-op Save is the worst failure the page has.
+`304`, so an error response swaps only when the element that asked opts
+its status in with `hx-status`, which htmx checks before `noSwap`'s
+wildcard. A plain-text `internal error` or `404 page not found` therefore
+never replaces a control, while a rejection that carries something to show
+answers its honest status and is swapped in:
+
+- a rejected inline edit, send address, upload or confirm answers 422, and
+  each of those forms carries `hx-status:422="swap:outerHTML"`;
+- a refused fetch-metadata request answers 403, and every page's `<body>`
+  carries `hx-status:403:inherited="swap:afterbegin"` (further below).
+
+The status and the opt-in are a pair. A route answering a 4xx body without
+the matching attribute on its form swaps nothing, and Save looks like it
+did nothing, the worst failure the page has; the handler tests assert the
+attribute in the rejected response for that reason.
 
 The same tag sets `defaultTimeout` to `0`, so htmx never abandons a
 request of its own accord and the server's deadlines are the only bound.
@@ -319,11 +327,10 @@ name would make `POST /books/{id}/metadata/cover` reach storage, come back
 with an error that is not `service.ErrInvalidMetadata`, and answer 500,
 where a name nobody may edit should simply 404.
 
-**A rejected fragment answers 200; the rejected full page answers 422.**
-htmx is configured not to swap a 4xx, so an honest status on the fragment would leave
-the editor untouched and make Save look like it did nothing. The
-navigation path keeps the 422, where nothing swallows it. This is the one
-place the UI trades an accurate status for a working interaction.
+**A rejected edit answers 422 on both paths.** The fragment is the editor
+holding the value and its message, and the form's
+`hx-status:422="swap:outerHTML"` is what lets htmx swap it in past
+`noSwap`; the navigation path answers the whole page with that field open.
 
 **The body cap is derived, not chosen.** `maxMetadataFormBody` is
 `3 × service.MaxMetadataValueBytes + 1024`: the service limits decoded
@@ -454,13 +461,13 @@ handler, make a violated requirement visible. `RequireFetchMetadata`
 non-GET/HEAD/OPTIONS request with no `Sec-Fetch-Site` at all, logging each
 refusal at Warn: every current browser sends the header over HTTPS, so a
 mutation without it is a script or an exposed plain listener, and the
-person whose edit was refused needs the log to say so. The refusal has two
-shapes, for the reason a rejected edit answers 200: an htmx fragment
-request gets a 200 carrying the `fetch-metadata-refused` partial with
-`HX-Reswap: afterbegin`, which inserts one line as the first child of
-whatever the posting form's `hx-target` names, so the control survives
-beneath it and the wrapper never learns which control posted. Every other
-client gets the 403. `next` is not called in either shape.
+person whose edit was refused needs the log to say so. The refusal is a
+403 in two shapes: an htmx fragment request's carries the
+`fetch-metadata-refused` partial, which every page's `<body>` swaps in
+through `hx-status:403:inherited="swap:afterbegin"`, inserting one line as
+the first child of whatever the posting form's `hx-target` names, so the
+control survives beneath it and the wrapper never learns which control
+posted. Every other client gets it as plain text. `next` is not called in either shape.
 `WarnMissingFetchMetadata` (`REQUIRE_FETCH_METADATA=false`) admits
 everything and logs one Warn per process, a tripwire rather than a guard.
 `cmd/server` picks between them through a pure function with a table test
