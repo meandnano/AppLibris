@@ -533,6 +533,66 @@ func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) 
 	}
 }
 
+// Without JavaScript there is no fragment to swap in, so a redirect would
+// land on a page that has forgotten both the message and what was typed.
+// The rejection comes back as the whole page at 422, keeping the result
+// already on screen, and queues nothing.
+func TestSendHandlerNonHXInvalidAddressRendersWholePage422(t *testing.T) {
+	db := newSendTestDB(t)
+	id := createSendTestBook(t, db)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
+	ctx := context.Background()
+
+	sendID, _, err := db.EnqueueSend(ctx, id, "Piranesi", "reader@kindle.com", time.Now())
+	if err != nil {
+		t.Fatalf("EnqueueSend: %v", err)
+	}
+	if _, err := db.ClaimNextSend(ctx, time.Now()); err != nil {
+		t.Fatalf("ClaimNextSend: %v", err)
+	}
+	if err := db.MarkSendDelivered(ctx, sendID, "msg-1", time.Now()); err != nil {
+		t.Fatalf("MarkSendDelivered: %v", err)
+	}
+
+	rec := postSendForm(handler, id, url.Values{
+		"new_address": {"not-an-address"},
+		"new_label":   {"Spare Kindle"},
+	}, false)
+	body := rec.Body.String()
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST send (no HX-Request) with an invalid address = %d, want 422; body = %s", rec.Code, body)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("rejected address answered with Location %q, want no redirect", loc)
+	}
+	if !strings.Contains(body, "<html") || !strings.Contains(body, `class="page page--detail"`) {
+		t.Errorf("response is not the whole book page; body = %q", body)
+	}
+	if !strings.Contains(body, `class="send__error"`) {
+		t.Errorf("whole page missing the send field error; body = %q", body)
+	}
+	// A correction resubmitted from this page, once htmx has loaded, gets
+	// the fragment's 422 and must still swap
+	if !strings.Contains(body, `hx-status:422="swap:outerHTML"`) {
+		t.Errorf("the send form on the rejected page does not opt its 422 into swapping; body = %q", body)
+	}
+	if !strings.Contains(body, `value="not-an-address"`) || !strings.Contains(body, `value="Spare Kindle"`) {
+		t.Errorf("the typed address and label were not carried back; body = %q", body)
+	}
+	if !strings.Contains(body, "Delivered") {
+		t.Errorf("a rejected address retracted the delivered result; body = %q", body)
+	}
+
+	var count int
+	if err := db.Read().QueryRow(`SELECT count(*) FROM send_log WHERE book_id = ?`, id).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("send_log rows after a rejected address = %d, want the one delivered send", count)
+	}
+}
+
 // Amazon drops an FB2 attachment silently, so for a book in that format the
 // control offers no button at all and says why, on the full page and on
 // every fragment route alike; an EPUB's control is untouched.
