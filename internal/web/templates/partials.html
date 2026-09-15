@@ -2,6 +2,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{/* noSwap keeps every error response out of the page: a refusal worth
+       showing answers 200, and a plain-text internal error must never
+       replace the control it came from. defaultTimeout 0 leaves the bound
+       to the server, whose upload and confirm windows outlast htmx's own
+       sixty-second default */}}
+  <meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"defaultTimeout":0}'>
   <title>{{.Title}} · AppLibris</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -435,8 +441,9 @@
 {{/* What RequireFetchMetadata hands an htmx caller it has refused. It
      arrives with HX-Reswap: afterbegin, so it lands as the first child of
      whatever the posting form targets and the control below it survives.
-     A 200 rather than the 403 every other client gets, because htmx does
-     not swap a 4xx and a refusal nobody can see is a broken button. */}}
+     A 200 rather than the 403 every other client gets, because htmx is
+     configured not to swap a 4xx and a refusal nobody can see is a broken
+     button */}}
 {{define "fetch-metadata-refused"}}
 <p class="refused" role="alert">Refused: this page must be reached through the service&rsquo;s HTTPS address &mdash; see the server log.</p>
 {{end}}

@@ -148,8 +148,8 @@ func metadataError(w http.ResponseWriter, r *http.Request, svc *service.Service,
 	}
 
 	if fragment {
-		// 200, not 422: htmx 2.0.10's default response policy does not swap
-		// a 4xx, so an honest status here would leave the editor untouched
+		// 200, not 422: the page configures htmx not to swap a 4xx (noSwap
+		// in document-head), so an honest status here would leave the editor untouched
 		// and make Save look like it did nothing. The alternative — opting
 		// 422 in from the client — buys the status code at the cost of the
 		// whole interaction depending on one listener still being loaded

@@ -128,7 +128,7 @@ The UI is translated from mockups kept on the `init` branch.
 
 ## htmx contract and progressive enhancement
 
-htmx is vendored at `internal/web/static/js/htmx.min.js`, version 2.0.10,
+htmx is vendored at `internal/web/static/js/htmx.min.js`, version 4.0.0,
 pinned in a comment at the top of the file. It is used only where
 dynamism is needed: search-as-you-type, the send and enrichment controls
 polling their job, inline editing, and the grid appending its next page.
@@ -141,22 +141,34 @@ the htmx response is a fragment. There is no separate no-JS path to drift.
 
 Whether a request gets a fragment is decided by `isHTMXFragment`:
 `HX-Request` present **and** `HX-History-Restore-Request` absent. htmx
-sets both on the request it issues when Back lands on a URL that has
-fallen out of its history cache (ten entries, and `hx-push-url` pushes one
-per keystroke), and swaps that response into the whole document body.
-Answering it with a fragment replaces the masthead, search bar and scripts
-with a bare grid that can no longer search. Every route serving two bodies
+keeps no copy of the pages it pushes, so Back onto any entry it pushed
+(and `hx-push-url` pushes one per keystroke) issues a GET marked
+`HX-History-Restore-Request` and swaps the response into the whole
+document body. Answering it with a fragment replaces the masthead, search
+bar and scripts with a bare grid that can no longer search. The check
+names both halves so the answer never rests on which other headers a
+restore happens to carry. Every route serving two bodies
 names both headers in `Vary: HX-Request, HX-History-Restore-Request`; a
 route serving one body to every caller, such as the send status poll,
 sets no `Vary` at all.
 
-The vendored htmx does not swap a 4xx response. Two places depend on that
-fact and answer 200 where the status would honestly be 4xx: a rejected
-inline edit on the fragment path (below) and a refused fetch-metadata
-request from an htmx form (further below). Do not opt 4xx swapping in from
-the client through `htmx:beforeSwap`: it makes the whole interaction
-depend on one listener still being loaded and still matching, and a
+The page configures htmx through the `htmx-config` meta tag in
+`document-head`. Its `noSwap` lists `4xx` and `5xx` beside `204` and
+`304`, so no error response is swapped: a plain-text `internal error` or
+`404 page not found` never replaces the control that asked. Two places
+answer 200 where the status would honestly be 4xx, because a refusal must
+be visible: a rejected inline edit on the fragment path (below) and a
+refused fetch-metadata request from an htmx form (further below). Do not
+answer those 422 and opt them into swapping from the client, through
+`hx-status` or a listener: a 200 swaps under any configuration, and a
 silent no-op Save is the worst failure the page has.
+
+The same tag sets `defaultTimeout` to `0`, so htmx never abandons a
+request of its own accord and the server's deadlines are the only bound.
+An upload's window scales with `MAX_IMPORT_SIZE` and a confirm's is at
+least `importer.IndexTimeout`, both past htmx's own sixty-second default,
+and a request abandoned in the browser would hide an import that still
+lands.
 
 ## Search
 
@@ -308,7 +320,7 @@ with an error that is not `service.ErrInvalidMetadata`, and answer 500,
 where a name nobody may edit should simply 404.
 
 **A rejected fragment answers 200; the rejected full page answers 422.**
-htmx does not swap a 4xx, so an honest status on the fragment would leave
+htmx is configured not to swap a 4xx, so an honest status on the fragment would leave
 the editor untouched and make Save look like it did nothing. The
 navigation path keeps the 422, where nothing swallows it. This is the one
 place the UI trades an accurate status for a working interaction.

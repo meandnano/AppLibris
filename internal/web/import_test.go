@@ -276,7 +276,7 @@ func TestImportUploadRefusalsSayWhy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handler, _, _ := newImportHandler(t, 1024)
 
-			// htmx does not swap a 4xx, so a refusal it has to show is a
+			// htmx is configured not to swap a 4xx, so a refusal it has to show is a
 			// 200 carrying the sentence.
 			fragment := upload(t, handler, tt.filename, tt.content, true)
 			if fragment.Code != http.StatusOK {

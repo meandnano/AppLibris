@@ -411,7 +411,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - A fragment is answered when `HX-Request` is present **and**
   `HX-History-Restore-Request` is absent. `Vary` names both.
 - **A rejected edit fragment answers 200; the rejected full page answers
-  422.** htmx 2.0.10 does not swap a 4xx. Do not opt 422 in from the client.
+  422.** The `htmx-config` meta tag in `document-head` lists `4xx` and `5xx`
+  in `noSwap`, so no error response is swapped. Do not opt 422 in from the
+  client.
+- That tag's `defaultTimeout` stays `0`: htmx 4 otherwise abandons a request
+  after 60s, and an upload or confirm outlasts that while the import lands.
 - Every import route that can answer a fragment names both htmx headers in
   `Vary`, `GET /import` included. Every refused upload drains what is left of
   the body first.

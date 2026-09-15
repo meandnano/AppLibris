@@ -367,6 +367,23 @@ func TestSearchBarHTMXWiringContract(t *testing.T) {
 	}
 }
 
+// The page, not htmx's defaults, decides that no error response is swapped
+// and that no request is abandoned in the browser. Deleting the meta tag
+// leaves every handler test green while a plain-text 500 replaces a control
+// and a slow import loses its answer
+func TestHTMXConfigContract(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	want := `<meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"defaultTimeout":0}'>`
+	if body := rec.Body.String(); !strings.Contains(body, want) {
+		t.Errorf("page missing %s; body = %q", want, body)
+	}
+}
+
 func TestSearchNoResultsIsDistinctFromEmptyLibrary(t *testing.T) {
 	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
 
@@ -531,8 +548,8 @@ func TestClippedMultibyteQueryRendersAsValidUTF8(t *testing.T) {
 // bare grid that can no longer search — recoverable only by a manual
 // reload. htmx marks that request HX-History-Restore-Request; this pins
 // that the handler tells the two apart. Reachable by ordinary Back-button
-// use: hx-push-url pushes a URL per keystroke and htmx's history cache
-// holds ten.
+// use: hx-push-url pushes a URL per keystroke and htmx restores every one of
+// them from the server
 func TestHistoryRestoreRequestGetsFullPageNotFragment(t *testing.T) {
 	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
 

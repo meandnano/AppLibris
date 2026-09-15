@@ -102,7 +102,7 @@ func TestMetadataRejectedValueComesBackAsAnEditor(t *testing.T) {
 
 	rec := postField(handler, id, "title", url.Values{"value": {"   "}}, htmx)
 	body := rec.Body.String()
-	// 200 on purpose: htmx 2.0.10 does not swap a 4xx, so a rejected
+	// 200 on purpose: the page configures htmx not to swap a 4xx, so a rejected
 	// fragment answered with 422 would leave the editor untouched and make
 	// Save look like it did nothing. See metadataError.
 	if rec.Code != http.StatusOK {

@@ -118,8 +118,8 @@ func importHandler(svc *service.Service) http.HandlerFunc {
 // second temporary copy before this handler saw a byte of it.
 //
 // A rejected upload answers 200 to an htmx caller and 422 to everyone else,
-// the split the metadata editors already make: htmx 2.0.10 does not swap a
-// 4xx, so a refusal nobody can see is a broken button, while a full-page
+// the split the metadata editors already make: the page configures htmx not
+// to swap a 4xx, so a refusal nobody can see is a broken button, while a full-page
 // rejection is a real one and says so.
 func importUploadHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -347,7 +347,7 @@ func renderImport(w http.ResponseWriter, r *http.Request, status int, page impor
 }
 
 // renderImportRejection answers a refused upload or confirm: 200 with the
-// panel for htmx, which does not swap a 4xx, and 422 with the whole page
+// panel for htmx, which the page configures not to swap a 4xx, and 422 with the whole page
 // for everyone else.
 //
 // It drains first, so the connection is never left with a request body
