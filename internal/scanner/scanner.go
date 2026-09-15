@@ -49,9 +49,11 @@ type Result struct {
 // would only ever see the last one (".zip").
 var supportedSuffixes = []string{".epub", ".fb2.zip", ".fb2"}
 
-// matchedSuffix returns whichever of supportedSuffixes name ends with,
-// case-insensitively, or "" if none matches.
-func matchedSuffix(name string) string {
+// MatchedSuffix returns whichever of supportedSuffixes name ends with,
+// case-insensitively, or "" if none matches. Exported because it is the
+// one place that decides whether a name is a book this app indexes, and
+// internal/importer has to agree with it about a file it is staging.
+func MatchedSuffix(name string) string {
 	lower := strings.ToLower(name)
 	for _, s := range supportedSuffixes {
 		if strings.HasSuffix(lower, s) {
@@ -61,11 +63,12 @@ func matchedSuffix(name string) string {
 	return ""
 }
 
-// bookFormat maps a matched suffix to the value stored in books.format.
+// BookFormat maps a matched suffix to the value stored in books.format.
 // How a book is packaged on disk (.fb2 vs. a .fb2.zip archive) isn't
 // something the format badge in the UI should surface, so both map to
-// "fb2".
-func bookFormat(suffix string) string {
+// "fb2". Exported for internal/importer's preview, which shows the badge
+// before the book is stored and must name it the same way.
+func BookFormat(suffix string) string {
 	switch suffix {
 	case ".fb2", ".fb2.zip":
 		return "fb2"
@@ -184,7 +187,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 			}
 			// resolving to nothing or to a file takes the ordinary route
 		}
-		if d.IsDir() || matchedSuffix(d.Name()) == "" {
+		if d.IsDir() || MatchedSuffix(d.Name()) == "" {
 			return nil
 		}
 
@@ -192,7 +195,7 @@ func Scan(ctx context.Context, db *storage.DB, libraryDir, coversDir string, mis
 		if rel := relSlash(libraryDir, walkPath); rel != "" {
 			seen[rel] = true
 		}
-		if err := scanFile(ctx, db, libraryDir, walkPath, coversDir, &result); err != nil {
+		if _, err := scanFile(ctx, db, libraryDir, walkPath, coversDir, &result); err != nil {
 			slog.Warn("scan file failed", "path", walkPath, "error", err)
 			result.Errors++
 		}
@@ -430,7 +433,7 @@ func TopLevelDirHasBooks(libraryDir, relPath string) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && matchedSuffix(d.Name()) != "" {
+		if !d.IsDir() && MatchedSuffix(d.Name()) != "" {
 			found = true
 			// The answer is "at least one", so the first match ends the
 			// walk: on a populated directory this costs a handful of stats
@@ -477,27 +480,31 @@ func matchingPrefix(relPath string, prefixes []string) string {
 	return ""
 }
 
-func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) error {
+// scanFile indexes one file and reports which book the path now belongs
+// to. The id is returned rather than looked up again by the caller,
+// because every branch below already holds it and IndexFile's whole
+// purpose is to answer that question for a path it has just written.
+func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string, result *Result) (int64, error) {
 	// stored relative to libraryDir (slash-separated) so the index survives
 	// the library being mounted at a different absolute path — dev's
 	// ./library versus the container's /library, say; anything that needs
 	// to touch the filesystem below still uses the absolute path
 	rel, err := filepath.Rel(libraryDir, path)
 	if err != nil {
-		return fmt.Errorf("relativize: %w", err)
+		return 0, fmt.Errorf("relativize: %w", err)
 	}
 	rel = filepath.ToSlash(rel)
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("stat: %w", err)
+		return 0, fmt.Errorf("stat: %w", err)
 	}
 	size := info.Size()
 	mtime := info.ModTime()
 
 	bf, err := db.FindFileByPath(ctx, rel)
 	if err != nil {
-		return fmt.Errorf("find file by path: %w", err)
+		return 0, fmt.Errorf("find file by path: %w", err)
 	}
 	if bf != nil && bf.FileSize == size && bf.ModifiedAt.Equal(mtime) {
 		book := &storage.Book{
@@ -508,37 +515,54 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 		}
 		maybeRegenerateCover(ctx, db, book, path, coversDir, result)
 		result.Unchanged++
-		return nil
+		return bf.BookID, nil
 	}
 
 	hash, err := hashFile(path)
 	if err != nil {
-		return fmt.Errorf("hash: %w", err)
+		return 0, fmt.Errorf("hash: %w", err)
 	}
 
 	book, err := db.FindBookByContentHash(ctx, hash)
 	if err != nil {
-		return fmt.Errorf("find book by content hash: %w", err)
+		return 0, fmt.Errorf("find book by content hash: %w", err)
 	}
 
 	if book != nil && bf != nil && bf.BookID == book.ID {
 		// same book, same path: content unchanged, only size/mtime drifted (e.g. touched)
 		if err := db.UpdateBookFileStat(ctx, bf.ID, size, mtime); err != nil {
-			return fmt.Errorf("update file stat: %w", err)
+			return 0, fmt.Errorf("update file stat: %w", err)
 		}
 		maybeRegenerateCover(ctx, db, book, path, coversDir, result)
 		result.Unchanged++
-		return nil
+		return book.ID, nil
 	}
 
 	if book == nil {
-		orphanedID, orphanedTitle, inherited, err := createBook(ctx, db, path, rel, hash, coversDir, size, mtime)
-		if err != nil {
-			return fmt.Errorf("create book: %w", err)
+		bookID, orphanedID, orphanedTitle, inherited, err := createBook(ctx, db, path, rel, hash, coversDir, size, mtime)
+		switch {
+		case err == nil:
+			logOrphan(path, orphanedID, orphanedTitle, inherited, result)
+			result.New++
+			return bookID, nil
+		default:
+			// The read above and the insert inside createBook are not one
+			// transaction, and the gap between them is wide: a whole parse
+			// and a cover resize. A sweep and an IndexFile that both find
+			// no book for this hash therefore both try to insert it, and
+			// books.content_hash is UNIQUE, so the loser arrives here with
+			// a book that now exists. Re-reading turns that into the
+			// ordinary case below — known content at a path the index does
+			// not have — which is what the whole path was converging on
+			// anyway. Only a failure that is still a failure after the
+			// re-read is reported.
+			raced, findErr := db.FindBookByContentHash(ctx, hash)
+			if findErr != nil || raced == nil {
+				return 0, fmt.Errorf("create book: %w", err)
+			}
+			slog.Debug("book created concurrently, attaching this path to it", "path", path, "book_id", raced.ID)
+			book = raced
 		}
-		logOrphan(path, orphanedID, orphanedTitle, inherited, result)
-		result.New++
-		return nil
 	}
 
 	maybeRegenerateCover(ctx, db, book, path, coversDir, result)
@@ -550,11 +574,39 @@ func scanFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir s
 	// bytes, so there is nothing of its owner's to carry across.
 	_, orphanedID, orphanedTitle, err := db.ReassignFileAndPruneOrphan(ctx, book.ID, rel, size, mtime)
 	if err != nil {
-		return fmt.Errorf("attach file location: %w", err)
+		return 0, fmt.Errorf("attach file location: %w", err)
 	}
 	logOrphan(path, orphanedID, orphanedTitle, nil, result)
 	result.Moved++
-	return nil
+	return book.ID, nil
+}
+
+// IndexFile indexes the single file at path — an absolute path under
+// libraryDir — and reports the book it now belongs to. It is the importer's
+// way into the index: a file the app has just written into the library is
+// indexed in the request that wrote it, so the response can send the reader
+// to the book rather than to a wait for the next sweep.
+//
+// It is deliberately the same per-file path a sweep takes, so an import
+// gets capMetadata, the cover store's ErrUnsupportedCover split and the
+// orphan logging without a second way into the index existing to drift
+// from the first. A sweep that reaches the same path afterwards sees a
+// matching path, size and mtime and does nothing; one that races this call
+// keys on the same content hash and converges on one book with one
+// location.
+//
+// created reports whether the path produced a new book rather than joining
+// one the index already had — a move, an extra location for byte-identical
+// content, or a path a sweep had already seen. The caller is importing, and
+// landing on an existing book is a correct outcome that is worth saying out
+// loud; a sweep says the same thing through Result's own counters.
+//
+// The rest of the Result a sweep accumulates has no reader here, so it is
+// made and discarded: the counts belong to a sweep's summary line.
+func IndexFile(ctx context.Context, db *storage.DB, libraryDir, path, coversDir string) (bookID int64, created bool, err error) {
+	var result Result
+	bookID, err = scanFile(ctx, db, libraryDir, path, coversDir, &result)
+	return bookID, result.New > 0, err
 }
 
 // coverFileDefinitelyGone reports whether the stored thumbnail is known to
@@ -685,7 +737,7 @@ func maybeRegenerateCover(ctx context.Context, db *storage.DB, book *storage.Boo
 		}
 	}
 
-	coverBytes, err := readEmbeddedCover(sourcePath, matchedSuffix(sourcePath))
+	coverBytes, err := readEmbeddedCover(sourcePath, MatchedSuffix(sourcePath))
 	if err != nil || len(coverBytes) == 0 {
 		// Re-extraction produced nothing usable, by one of two routes the
 		// callee separates: the file holds no cover (len == 0), or the
@@ -764,11 +816,11 @@ func recordUnusableCover(ctx context.Context, db *storage.DB, book *storage.Book
 }
 
 // readEmbeddedCover returns just the embedded cover bytes for path,
-// dispatching by suffix the same way extractMetadata does. This used to be
-// an unconditional epub.ReadMetadata call regardless of format, which meant
-// an FB2 book's cover could never actually be regenerated once its stored
-// file went missing or empty — it would try to parse the FB2 document as
-// an EPUB zip and fail every time.
+// dispatching by suffix the same way ExtractMetadata does. The dispatch is
+// what makes an FB2 book's cover regenerable at all: parsing an FB2
+// document as an EPUB zip fails every time, so a single-format call would
+// leave those books without a cover for good once the stored file went
+// missing or empty.
 func readEmbeddedCover(path, suffix string) ([]byte, error) {
 	switch suffix {
 	case ".epub":
@@ -809,9 +861,13 @@ func logOrphan(path string, orphanedID int64, orphanedTitle string, inherited []
 
 // createBook reads metadata from the file at the absolute path and stores
 // the book under rel, its path relative to the library root.
-func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir string, size int64, mtime time.Time) (orphanedID int64, orphanedTitle string, inherited []storage.MetadataField, err error) {
-	suffix := matchedSuffix(path)
-	meta := capMetadata(path, extractMetadata(path, suffix))
+func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir string, size int64, mtime time.Time) (bookID int64, orphanedID int64, orphanedTitle string, inherited []storage.MetadataField, err error) {
+	suffix := MatchedSuffix(path)
+	meta, err := ExtractMetadata(path, suffix, filenameTitle(path, suffix))
+	if err != nil {
+		slog.Warn("read embedded metadata failed", "path", path, "error", err)
+	}
+	meta = capMetadata(path, meta)
 
 	var coverPath string
 	var coverRetry bool
@@ -845,10 +901,10 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 		Description:   meta.Description,
 		CoverPath:     coverPath,
 		CoverRetry:    coverRetry,
-		Format:        bookFormat(suffix),
+		Format:        BookFormat(suffix),
 	}
-	_, orphanedID, orphanedTitle, inherited, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
-	return orphanedID, orphanedTitle, inherited, err
+	bookID, orphanedID, orphanedTitle, inherited, err = db.CreateBookWithFile(ctx, book, meta.Authors, rel, size, mtime)
+	return bookID, orphanedID, orphanedTitle, inherited, err
 }
 
 // capMetadata bounds what a file had embedded in it to the same rules a
@@ -861,16 +917,16 @@ func createBook(ctx context.Context, db *storage.DB, path, rel, hash, coversDir 
 // a book, and a filename title beside a dropped one is worse than prose cut
 // at 64 KiB. A cut field is still `embedded` in field_sources too:
 // provenance says where a value came from, not whether it arrived whole
-func capMetadata(path string, m bookMeta) bookMeta {
-	m.Title = capValue(path, storage.FieldTitle, m.Title, storage.MaxTitleBytes)
-	m.Language = capValue(path, storage.FieldLanguage, m.Language, storage.MaxScalarBytes)
-	m.ISBN = capValue(path, storage.FieldISBN, m.ISBN, storage.MaxScalarBytes)
-	m.Publisher = capValue(path, storage.FieldPublisher, m.Publisher, storage.MaxScalarBytes)
-	m.PublishedDate = capValue(path, storage.FieldPublishedDate, m.PublishedDate, storage.MaxScalarBytes)
-	m.Description = capValue(path, storage.FieldDescription, m.Description, storage.MaxDescriptionBytes)
+func capMetadata(path string, m EmbeddedMetadata) EmbeddedMetadata {
+	m.Title = capValue(path, storage.FieldTitle, m.Title)
+	m.Language = capValue(path, storage.FieldLanguage, m.Language)
+	m.ISBN = capValue(path, storage.FieldISBN, m.ISBN)
+	m.Publisher = capValue(path, storage.FieldPublisher, m.Publisher)
+	m.PublishedDate = capValue(path, storage.FieldPublishedDate, m.PublishedDate)
+	m.Description = capValue(path, storage.FieldDescription, m.Description)
 
 	for i, name := range m.Authors {
-		m.Authors[i] = capValue(path, storage.FieldAuthors, name, storage.MaxAuthorNameBytes)
+		m.Authors[i] = capValue(path, storage.FieldAuthors, name)
 	}
 	if len(m.Authors) > storage.MaxAuthors {
 		slog.Info("embedded metadata truncated", "path", path, "field", storage.FieldAuthors,
@@ -880,47 +936,42 @@ func capMetadata(path string, m bookMeta) bookMeta {
 	return m
 }
 
-// capValue bounds one embedded value to what internal/service's
-// normalizeField hands back unchanged, exactly as internal/enrich's
-// sanitizeValue bounds a provider's answer: every field but description is
-// collapsed onto one line, then truncated to limit bytes on a rune boundary
-// with what the cut exposed trimmed off.
+// capValue is storage.CapField with this package's log line on it.
 //
-// Length is not the only thing normalizeField refuses. It rejects a line
-// break in every field but description, and neither parser prevents one: a
-// metadata element whose text is wrapped across two lines in the source XML
-// keeps the break, since TrimSpace only removes what sits at either end. A
-// stored break never reaches that validation error — it reaches the editor,
-// where an <input type="text"> drops it on submit and rewrites the field
-// behind the person's back, and where a wrapped author name in the
-// <textarea> is split into two authors by normalizeAuthors.
+// The bound itself is shared, because a value one writer stores and another
+// would refuse is a field the app can no longer edit. What is local is what
+// a sweep says about it: Info rather than Warn, because a verbose file is
+// worth knowing about and is not an error, and naming the path because a
+// sweep's reader has no other way to tell which of several thousand files
+// this was.
 //
-// The collapse runs before the length cut, since it can only shorten the
-// value and cutting first would let a truncation boundary decide whether a
-// break survives. Description takes the trim alone, which is the rest of what
-// normalizeField would hand back: its line breaks are the point, and each
-// parser has already capped its blank lines through storage.CapBlankLines —
-// internal/epub inside PlainDescription, internal/fb2 at the end of
-// annotationText. Doing it again here would cap a run neither of them can
-// produce.
+// A collapsed line break is not worth a line at all. Length is not the only
+// thing internal/service's normalizeField refuses — it rejects a break in
+// every field but description, and neither parser prevents one, since a
+// metadata element wrapped across two lines in the source XML keeps the
+// break that TrimSpace leaves in the middle. A stored break never reaches
+// that validation error: it reaches the editor, where an <input
+// type="text"> drops it on submit and rewrites the field behind the
+// person's back, and where a wrapped author name is split into two authors
+// by normalizeAuthors.
 //
-// Info rather than Warn on truncation: a verbose file is worth knowing about
-// and is not an error. A collapsed break is not worth a line at all
-func capValue(path string, field storage.MetadataField, value string, limit int) string {
-	if field != storage.FieldDescription {
-		value = strings.Join(strings.Fields(value), " ")
-	} else {
-		value = strings.TrimSpace(value)
+// A cut field is still `embedded` in field_sources: provenance says where a
+// value came from, not whether it arrived whole
+func capValue(path string, field storage.MetadataField, value string) string {
+	capped, truncated := storage.CapField(field, value)
+	if truncated {
+		slog.Info("embedded metadata truncated", "path", path, "field", field,
+			"bytes", len(value), "limit", storage.FieldLimit(field))
 	}
-	if len(value) <= limit {
-		return value
-	}
-	slog.Info("embedded metadata truncated", "path", path, "field", field,
-		"bytes", len(value), "limit", limit)
-	return strings.TrimSpace(strings.ToValidUTF8(value[:limit], ""))
+	return capped
 }
 
-type bookMeta struct {
+// EmbeddedMetadata is what a format package had in a file, in the one
+// shape this app reads it. epub.Metadata and fb2.Metadata are structurally
+// identical but deliberately distinct types (no shared interface): there
+// are exactly two implementations, neither is chosen at runtime, and an
+// interface would buy nothing a switch does not already give.
+type EmbeddedMetadata struct {
 	Title         string
 	Authors       []string
 	Language      string
@@ -931,63 +982,58 @@ type bookMeta struct {
 	Cover         []byte
 }
 
-// extractMetadata pulls embedded metadata for supported formats and falls
-// back to a filename-derived title whenever embedded metadata is
-// unavailable, unparseable, or missing a title. epub.Metadata and
-// fb2.Metadata are structurally identical but deliberately distinct types
-// (no shared interface): there are exactly two implementations, neither is
-// chosen at runtime, and an interface here would buy nothing a switch
-// doesn't already give.
-func extractMetadata(path, suffix string) bookMeta {
-	fallbackTitle := filenameTitle(path, suffix)
+// ExtractMetadata reads what a file has embedded in it, falling back to
+// fallbackTitle whenever the file is unparseable or carries no title.
+//
+// The fallback is the caller's because the two callers disagree about it
+// for a reason: a sweep has the file's own name to fall back on, and
+// internal/importer has only an opaque staging id and falls back to the
+// name the person's browser offered instead.
+//
+// A parse failure comes back rather than being logged here, for the same
+// reason: a sweep names the path it was walking, and a preview names the
+// upload. The metadata returned in that case is the fallback one, so a
+// caller that only wants something to show can ignore the error.
+func ExtractMetadata(path, suffix, fallbackTitle string) (EmbeddedMetadata, error) {
+	fallback := EmbeddedMetadata{Title: fallbackTitle}
 
 	switch suffix {
 	case ".epub":
 		m, err := epub.ReadMetadata(path)
 		if err != nil {
-			slog.Warn("read embedded metadata failed", "path", path, "error", err)
-			return bookMeta{Title: fallbackTitle}
+			return fallback, err
 		}
-		title := m.Title
-		if title == "" {
-			title = fallbackTitle
-		}
-		return bookMeta{
-			Title:         title,
-			Authors:       m.Authors,
-			Language:      m.Language,
-			ISBN:          m.ISBN,
-			Description:   m.Description,
-			Publisher:     m.Publisher,
-			PublishedDate: m.PublishedDate,
-			Cover:         m.Cover,
-		}
+		return embeddedFrom(m.Title, fallbackTitle, m.Authors, m.Language, m.ISBN, m.Description, m.Publisher, m.PublishedDate, m.Cover), nil
 	case ".fb2", ".fb2.zip":
 		m, err := fb2.ReadMetadata(path)
 		if err != nil {
-			slog.Warn("read embedded metadata failed", "path", path, "error", err)
-			return bookMeta{Title: fallbackTitle}
+			return fallback, err
 		}
-		title := m.Title
-		if title == "" {
-			title = fallbackTitle
-		}
-		return bookMeta{
-			Title:         title,
-			Authors:       m.Authors,
-			Language:      m.Language,
-			ISBN:          m.ISBN,
-			Description:   m.Description,
-			Publisher:     m.Publisher,
-			PublishedDate: m.PublishedDate,
-			Cover:         m.Cover,
-		}
+		return embeddedFrom(m.Title, fallbackTitle, m.Authors, m.Language, m.ISBN, m.Description, m.Publisher, m.PublishedDate, m.Cover), nil
 	default:
-		return bookMeta{Title: fallbackTitle}
+		return fallback, nil
 	}
 }
 
-// filenameTitle strips suffix (the matched suffix from matchedSuffix, e.g.
+// embeddedFrom shapes one format package's answer, substituting the
+// fallback for a file that parsed but named no title.
+func embeddedFrom(title, fallbackTitle string, authors []string, language, isbn, description, publisher, publishedDate string, cover []byte) EmbeddedMetadata {
+	if title == "" {
+		title = fallbackTitle
+	}
+	return EmbeddedMetadata{
+		Title:         title,
+		Authors:       authors,
+		Language:      language,
+		ISBN:          isbn,
+		Description:   description,
+		Publisher:     publisher,
+		PublishedDate: publishedDate,
+		Cover:         cover,
+	}
+}
+
+// filenameTitle strips suffix (the matched suffix from MatchedSuffix, e.g.
 // ".fb2.zip") from path's base name, case-insensitively — filepath.Ext
 // would only strip ".zip" from "book.fb2.zip", leaving the fallback title
 // "book.fb2", extension and all. Case-insensitive because suffix is always

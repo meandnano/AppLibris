@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"library/internal/importer"
 	"library/internal/storage"
 )
 
@@ -38,11 +39,35 @@ type Service struct {
 	// its own poll tick. nil in tests and whenever no provider is
 	// configured.
 	NotifyEnrichment func()
+
+	// importer stages and lands an uploaded book. nil in tests and
+	// whenever cmd/server built none, which every import method answers
+	// with ErrImportDisabled. A concrete type rather than an interface,
+	// the same call Notify makes: there is one implementation, it is not
+	// chosen at runtime, and internal/importer depends on storage and the
+	// scanner while this package depends on neither of those through it.
+	importer *importer.Stager
+}
+
+// Option configures a Service at construction. Functional options rather
+// than more parameters: everything past the database is optional wiring
+// cmd/server supplies and a test usually does not, and a second positional
+// argument nobody passes reads as a required one.
+type Option func(*Service)
+
+// WithImporter gives the Service the stager that imports uploaded books.
+// Without it every import method answers ErrImportDisabled.
+func WithImporter(stager *importer.Stager) Option {
+	return func(s *Service) { s.importer = stager }
 }
 
 // New returns a Service backed by db.
-func New(db *storage.DB) *Service {
-	return &Service{db: db, now: time.Now}
+func New(db *storage.DB, opts ...Option) *Service {
+	s := &Service{db: db, now: time.Now}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // BookSummary is what a library-browse entry needs.

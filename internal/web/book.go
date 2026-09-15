@@ -160,7 +160,7 @@ func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.B
 
 	page := bookDetailPage{
 		Title:             detail.Title,
-		Nav:               navFor("library"),
+		Nav:               navFor("library", svc.ImportEnabled()),
 		HeaderNote:        headerBookCount(count),
 		CoverURL:          coverURL(detail.CoverPath),
 		Format:            detail.Format,

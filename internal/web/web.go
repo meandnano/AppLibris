@@ -42,6 +42,15 @@ func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled b
 	mux.HandleFunc("POST /books/{id}/enrich", sameSiteOnly(enrichHandler(svc, enrichEnabled)))
 	mux.HandleFunc("GET /books/{id}/enrichment/{jobID}", enrichStatusHandler(svc, enrichEnabled))
 	mux.HandleFunc("POST /recipients/remove", sameSiteOnly(removeRecipientHandler(svc, sendEnabled)))
+	// Registered whether or not import is available, so a stale tab gets
+	// the page's own explanation rather than a 404. The nav link is what
+	// the flag actually withholds.
+	mux.HandleFunc("GET /import", importHandler(svc))
+	mux.HandleFunc("POST /import/file", sameSiteOnly(importUploadHandler(svc)))
+	mux.HandleFunc("GET /import/{id}", importPreviewHandler(svc))
+	mux.HandleFunc("GET /import/{id}/cover", importCoverHandler(svc))
+	mux.HandleFunc("POST /import/{id}/confirm", sameSiteOnly(importConfirmHandler(svc)))
+	mux.HandleFunc("POST /import/{id}/discard", sameSiteOnly(importDiscardHandler(svc)))
 	mux.Handle("GET /static/", staticHandler())
 	mux.Handle("GET /covers/", coversHandler(coversDir))
 	return mux
@@ -197,17 +206,29 @@ type navItem struct {
 	Current bool
 }
 
-// navFor builds the masthead's nav for the page named current ("library"
-// or "history"), so every page composes it the same way and the two links
-// can't drift out of sync with each other. The book detail page passes
-// "library": it has no nav entry of its own, and highlighting Library
-// there matches what the single hardcoded nav item did for every page
-// before History existed.
-func navFor(current string) []navItem {
-	return []navItem{
+// navFor builds the masthead's nav for the page named current ("library",
+// "history" or "import"), so every page composes it the same way and the
+// links can't drift out of sync with each other. The book detail page
+// passes "library": it has no nav entry of its own, and highlighting
+// Library there matches what the single hardcoded nav item did for every
+// page before History existed.
+//
+// Whether Import is offered comes from the service rather than from a flag
+// the caller threads down, unlike sendEnabled and enrichEnabled beside it.
+// The difference is real: those two are configuration cmd/server read and
+// the service never sees, where the importer is the service's own and it
+// can simply be asked. The route stays registered either way — someone on a
+// page from before a restart still gets an explanation — but a link to a
+// page that can only say no is not worth the space in a masthead.
+func navFor(current string, importEnabled bool) []navItem {
+	nav := []navItem{
 		{Label: "Library", URL: "/", Current: current == "library"},
 		{Label: "History", URL: "/history", Current: current == "history"},
 	}
+	if importEnabled {
+		nav = append(nav, navItem{Label: "Import", URL: "/import", Current: current == "import"})
+	}
+	return nav
 }
 
 // headerBookCount composes the masthead's book-count note ("1,284 books"),
@@ -375,7 +396,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 		view := libraryPage{
 			Title:      "Library",
 			AtCursor:   (page.AfterTitle != "" || page.AfterID != 0) && !result.Searched,
-			Nav:        navFor("library"),
+			Nav:        navFor("library", svc.ImportEnabled()),
 			HeaderNote: headerBookCount(total),
 			Books:      cards,
 			Query:      query,

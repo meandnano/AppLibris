@@ -1435,3 +1435,34 @@ func TestMetadataValuesTakeTheRowsFreeSpace(t *testing.T) {
 	}
 	t.Error("no .detail__meta-row dd rule, so every metadata value falls back to the row's space-between")
 }
+
+// No route in this app lets a browser re-decide a media type the server has
+// named. It matters most on the staged-cover route, whose bytes an upload
+// chose, but it is a rule about every route that serves bytes rather than a
+// rendered template — one rule is easier to hold than a per-route judgment
+// about which bytes are trusted.
+func TestEveryFileRouteRefusesContentTypeSniffing(t *testing.T) {
+	coversDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(coversDir, "abc.jpg"), []byte{0xff, 0xd8, 0xff, 0xdb}, 0o644); err != nil {
+		t.Fatalf("write a cover: %v", err)
+	}
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	handler := Routes(service.New(db), coversDir, false, false)
+
+	for _, path := range []string{"/static/css/app.css", "/covers/abc.jpg"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", path, rec.Code)
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("GET %s X-Content-Type-Options = %q, want nosniff", path, got)
+		}
+	}
+}

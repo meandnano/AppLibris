@@ -1,4 +1,4 @@
-package scanner
+package scanner_test
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"library/internal/scanner"
 	"library/internal/service"
 	"library/internal/storage"
 )
@@ -55,18 +56,18 @@ func overlongEPUB(t *testing.T, path string) {
 		straddling(storage.MaxDescriptionBytes*2),
 		straddling(storage.MaxScalarBytes+500))
 
-	writeTestEPUBWithOPF(t, path, opfXML)
+	scanner.WriteTestEPUBWithOPF(t, path, opfXML)
 }
 
 func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := scanner.OpenTestDB(t)
 	ctx := context.Background()
 
 	overlongEPUB(t, filepath.Join(libDir, "verbose.epub"))
 
-	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+	if _, err := scanner.Scan(ctx, db, libDir, coversDir, scanner.TestMissingGrace); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 
@@ -121,8 +122,8 @@ func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 	// The per-name cap is a separate rule from the list cap, and the
 	// over-long name sits past the list cut, so it has to be checked on
 	// its own rather than through the stored list
-	longName := capValue("verbose.epub", storage.FieldAuthors,
-		straddling(storage.MaxAuthorNameBytes+500), storage.MaxAuthorNameBytes)
+	longName := scanner.CapValue("verbose.epub", storage.FieldAuthors,
+		straddling(storage.MaxAuthorNameBytes+500))
 	if len(longName) != storage.MaxAuthorNameBytes-2 {
 		t.Errorf("a capped author name is %d bytes, want %d", len(longName), storage.MaxAuthorNameBytes-2)
 	}
@@ -150,12 +151,12 @@ func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 func TestCreateBookCappedValuesAreEditable(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := scanner.OpenTestDB(t)
 	ctx := context.Background()
 
 	overlongEPUB(t, filepath.Join(libDir, "verbose.epub"))
 
-	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+	if _, err := scanner.Scan(ctx, db, libDir, coversDir, scanner.TestMissingGrace); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 
@@ -240,7 +241,7 @@ Another paragraph.</dc:description>
   <manifest></manifest>
 </package>`
 
-	writeTestEPUBWithOPF(t, path, opfXML)
+	scanner.WriteTestEPUBWithOPF(t, path, opfXML)
 }
 
 // The other half of the property above: a value the editor refuses is never
@@ -252,12 +253,12 @@ Another paragraph.</dc:description>
 func TestCreateBookWrappedValuesAreEditable(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := scanner.OpenTestDB(t)
 	ctx := context.Background()
 
 	wrappedEPUB(t, filepath.Join(libDir, "wrapped.epub"))
 
-	if _, err := Scan(ctx, db, libDir, coversDir, testMissingGrace); err != nil {
+	if _, err := scanner.Scan(ctx, db, libDir, coversDir, scanner.TestMissingGrace); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 
@@ -343,12 +344,8 @@ func TestCapValueShapesEveryFieldTheEditorAccepts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			limit := storage.MaxScalarBytes
-			if tt.field == storage.FieldDescription {
-				limit = storage.MaxDescriptionBytes
-			}
-			if got := capValue("t.epub", tt.field, tt.value, limit); got != tt.want {
-				t.Errorf("capValue(%s, %q) = %q, want %q", tt.field, tt.value, got, tt.want)
+			if got := scanner.CapValue("t.epub", tt.field, tt.value); got != tt.want {
+				t.Errorf("scanner.CapValue(%s, %q) = %q, want %q", tt.field, tt.value, got, tt.want)
 			}
 		})
 	}

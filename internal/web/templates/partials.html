@@ -440,3 +440,99 @@
 {{define "fetch-metadata-refused"}}
 <p class="refused" role="alert">Refused: this page must be reached through the service&rsquo;s HTTPS address &mdash; see the server log.</p>
 {{end}}
+
+{{/* import-panel is the import page's one swap target: the file input
+     before anything is staged, the preview after, and whichever of the two
+     a refusal, a discard or an expiry puts back. One region because the
+     states replace each other rather than coexisting, the same arrangement
+     send-control makes of the send form and its status box. */}}
+{{define "import-panel"}}
+<div class="import" id="import">
+  {{if not .Enabled}}
+  <p class="import__disabled">Importing is disabled. At startup the server could not write to the library directory &mdash; a read-only mount &mdash; or could not create its staging directory; the log says which. Fix that and restart.</p>
+  {{else}}
+  {{if .Failure}}<p class="import__error" role="alert">{{.Failure}}</p>{{end}}
+  {{if .Note}}<p class="import__note" role="status">{{.Note}}</p>{{end}}
+  {{if .Preview}}{{template "import-preview" .Preview}}{{else}}{{template "import-form" .}}{{end}}
+  {{end}}
+</div>
+{{end}}
+
+{{/* Both an action and an hx-post, the one markup path every other control
+     here uses: with htmx loaded the panel swaps in place, and without it
+     the same handler answers a redirect to the preview's own URL.
+     hx-encoding is what makes htmx send the file rather than a urlencoded
+     field name. The indicator is driven by .htmx-request on the form, so
+     the button and the status line need no script of their own. */}}
+{{define "import-form"}}
+<form class="import__form" method="post" action="/import/file" enctype="multipart/form-data"
+      hx-post="/import/file" hx-encoding="multipart/form-data"
+      hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form">
+  <label class="import__label" for="import-file">EPUB or FB2 file</label>
+  <input class="import__file" id="import-file" type="file" name="file" accept=".epub,.fb2,.fb2.zip,.zip" required>
+  <p class="import__hint">Up to {{.MaxSizeLabel}}. The file is copied into the library directory under its own name.</p>
+  <div class="import__actions">
+    <button class="button button--lg button--primary import__submit" type="submit">Upload</button>
+    <span class="import__indicator" role="status">Uploading &hellip;</span>
+  </div>
+</form>
+{{end}}
+
+{{/* The three verdicts differ only in the warning above the buttons and in
+     whether Import is offered at all, so they are one card and not three.
+     Importable false is byte-identical content the library already holds:
+     there is nothing to import, so the block links to the book instead. */}}
+{{define "import-preview"}}
+<div class="import__preview">
+  <div class="import__rail">
+    {{if .CoverURL}}
+    <img class="import__cover" src="{{.CoverURL}}" alt="" decoding="async">
+    {{else}}
+    <div class="import__cover import__cover--missing"><span>no cover</span></div>
+    {{end}}
+  </div>
+
+  <div class="import__body">
+    <h2 class="import__title">{{.Title}}</h2>
+    {{if .AuthorLine}}
+    <p class="import__author">{{.AuthorLine}}</p>
+    {{else}}
+    <p class="import__author import__author--unknown">Author unknown</p>
+    {{end}}
+
+    <p class="import__facts">
+      <span class="badge">{{.Format}}</span>
+      <span class="import__size">{{.SizeHuman}}</span>
+      <span class="import__name">{{.LibraryName}}</span>
+    </p>
+    {{if .RenameNote}}<p class="import__rename">{{.RenameNote}}</p>{{end}}
+
+    {{if not .Importable}}
+    <p class="import__verdict import__verdict--exists">
+      This file is already in the library, byte for byte, as
+      <a href="{{.ExistingURL}}">{{.ExistingTitle}}</a>. Importing it again would only add a second copy of the same book.
+    </p>
+    {{else if .Warning}}
+    <p class="import__verdict import__verdict--warn">
+      {{.Warning}} <a href="{{.ExistingURL}}">See {{.ExistingTitle}}</a>.
+    </p>
+    {{end}}
+
+    {{if .Description}}<p class="import__description">{{.Description}}</p>{{end}}
+
+    <div class="import__actions">
+      {{if .Importable}}
+      <form class="import__confirm-form" method="post" action="{{.ConfirmURL}}"
+            hx-post="{{.ConfirmURL}}" hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form">
+        <button class="button button--lg button--primary import__submit" type="submit">Import</button>
+        <span class="import__indicator" role="status">Importing &hellip;</span>
+      </form>
+      {{end}}
+      <form class="import__discard-form" method="post" action="{{.DiscardURL}}"
+            hx-post="{{.DiscardURL}}" hx-target="#import" hx-swap="outerHTML">
+        <button class="button button--lg button--secondary" type="submit">Discard</button>
+      </form>
+    </div>
+  </div>
+</div>
+{{end}}

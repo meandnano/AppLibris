@@ -18,6 +18,29 @@ import (
 	"library/internal/storage"
 )
 
+// TestMain points TMPDIR at one directory for the whole package.
+//
+// run() derives its import staging directory from os.TempDir(), and
+// importer.New wipes that directory — so without this, `go test
+// ./cmd/server` deletes the staged uploads of a `make run` server on the
+// same machine. It is here rather than in each of the nine tests that call
+// run() because the failure is silent, lands outside the repository, and
+// the tenth such test is exactly the one that would be written without the
+// line. t.TempDir resolves through TMPDIR too, so every test's own
+// directory lands underneath this one and goes with it.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "applibris-cmd-server-tests")
+	if err != nil {
+		panic("create the test temporary directory: " + err.Error())
+	}
+	os.Setenv("TMPDIR", dir)
+
+	code := m.Run()
+
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // A serving failure (an occupied address, here) must still cancel and wait
 // for the background scan before closing the database — not race ahead of
 // it. There's no way to directly observe "no goroutine leaked" without
@@ -766,4 +789,195 @@ func TestRunScanKeepsTheReportedSetWhenNothingWasReconciled(t *testing.T) {
 			t.Errorf("runScan over an empty library = %v, want the previous set kept", got)
 		}
 	})
+}
+
+// The probe is what decides whether importing is offered for the run, and
+// a read-only mount is the deployment the README documents — so it warns
+// and carries on rather than failing startup.
+func TestProbeWritableDisablesImportOnAReadOnlyLibrary(t *testing.T) {
+	requireModeEnforced(t)
+
+	libDir := t.TempDir()
+	if err := os.Chmod(libDir, 0o555); err != nil {
+		t.Fatalf("chmod the library read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(libDir, 0o755) })
+
+	var logs strings.Builder
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if probeWritable(libDir) {
+		t.Fatal("probeWritable reported a read-only directory writable")
+	}
+	if !strings.Contains(logs.String(), "running as uid") || !strings.Contains(logs.String(), "owned by uid") {
+		t.Errorf("the warning names neither side of the mismatch:\n%s", logs.String())
+	}
+}
+
+// A probe left by a crash between the create and the remove must not
+// disable importing for every later start: the open refuses a name that is
+// already taken, so the probe has to clear the name before claiming it.
+func TestProbeWritableSurvivesAStaleProbeFile(t *testing.T) {
+	libDir := t.TempDir()
+	stale := filepath.Join(libDir, writeProbeName)
+	if err := os.WriteFile(stale, []byte("from a run that crashed"), 0o600); err != nil {
+		t.Fatalf("write the stale probe: %v", err)
+	}
+
+	if !probeWritable(libDir) {
+		t.Fatal("probeWritable reported a writable directory unwritable because of a stale probe")
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the stale probe is still there: %v", err)
+	}
+}
+
+// The probe never writes through a link left at its name. os.Remove unlinks
+// the link itself, and O_EXCL would refuse to follow one anyway, so the far
+// end is untouched either way.
+func TestProbeWritableNeverWritesThroughASymlink(t *testing.T) {
+	libDir := t.TempDir()
+
+	target := filepath.Join(t.TempDir(), "precious")
+	if err := os.WriteFile(target, []byte("do not touch"), 0o600); err != nil {
+		t.Fatalf("write the target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(libDir, writeProbeName)); err != nil {
+		t.Fatalf("symlink the probe name: %v", err)
+	}
+
+	if !probeWritable(libDir) {
+		t.Fatal("probeWritable reported a writable directory unwritable")
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read the target: %v", err)
+	}
+	if string(content) != "do not touch" {
+		t.Errorf("the link's target reads %q, want it untouched", content)
+	}
+}
+
+func TestProbeWritableLeavesNothingBehind(t *testing.T) {
+	libDir := t.TempDir()
+
+	if !probeWritable(libDir) {
+		t.Fatal("probeWritable reported a writable directory unwritable")
+	}
+	entries, err := os.ReadDir(libDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", libDir, err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the probe left %v behind", entries)
+	}
+}
+
+// A hardened container — run --read-only with no tmpfs at /tmp — has a
+// library worth serving and no staging directory to create. That disables
+// importing the way an unwritable library does, and must not end the run:
+// the same warning, naming the directory so TMPDIR is the obvious remedy.
+func TestNewStagerDisablesImportWhenStagingCannotBeCreated(t *testing.T) {
+	requireModeEnforced(t)
+
+	db := openServerTestDB(t)
+	libDir := t.TempDir()
+
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatalf("chmod the staging parent read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o755) })
+	importDir := filepath.Join(parent, "applibris-imports")
+
+	var logs strings.Builder
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if stager := newStager(db, libDir, t.TempDir(), importDir, 1<<20); stager != nil {
+		t.Fatal("newStager built an importer with no staging directory to put files in")
+	}
+	if !strings.Contains(logs.String(), "importing disabled") || !strings.Contains(logs.String(), importDir) {
+		t.Errorf("the warning does not name the staging directory:\n%s", logs.String())
+	}
+}
+
+func TestNewStagerBuildsAnImporterWhenBothDirectoriesAreWritable(t *testing.T) {
+	db := openServerTestDB(t)
+	importDir := filepath.Join(t.TempDir(), "applibris-imports")
+
+	if stager := newStager(db, t.TempDir(), t.TempDir(), importDir, 1<<20); stager == nil {
+		t.Fatal("newStager built no importer for a writable library and staging directory")
+	}
+	if _, err := os.Stat(importDir); err != nil {
+		t.Errorf("the staging directory was not created: %v", err)
+	}
+}
+
+func openServerTestDB(t *testing.T) *storage.DB {
+	t.Helper()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func TestParseByteSize(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{raw: "64MiB", want: 64 << 20},
+		{raw: "64Mi", want: 64 << 20},
+		{raw: "100M", want: 100 * 1000 * 1000},
+		{raw: "100MB", want: 100 * 1000 * 1000},
+		{raw: "512KiB", want: 512 << 10},
+		{raw: "2GiB", want: 2 << 30},
+		{raw: " 1024 ", want: 1024},
+		{raw: "1024B", want: 1024},
+		{raw: "64mib", want: 64 << 20},
+		{raw: "0", wantErr: true},
+		{raw: "-1", wantErr: true},
+		{raw: "abc", wantErr: true},
+		{raw: "", wantErr: true},
+		{raw: "MiB", wantErr: true},
+		{raw: "9223372036854775807GiB", wantErr: true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := parseByteSize(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseByteSize(%q) = %d, want an error", tt.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseByteSize(%q): %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseByteSize(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsABadImportSize(t *testing.T) {
+	t.Setenv("ADDR", freeAddr(t))
+	t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "library.db"))
+	t.Setenv("LIBRARY_DIR", t.TempDir())
+	t.Setenv("COVERS_DIR", t.TempDir())
+	t.Setenv("METADATA_PROVIDERS", "")
+	t.Setenv("MAX_IMPORT_SIZE", "0")
+
+	err := run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "MAX_IMPORT_SIZE") {
+		t.Fatalf("run = %v, want a MAX_IMPORT_SIZE failure", err)
+	}
 }

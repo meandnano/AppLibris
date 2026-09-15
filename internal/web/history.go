@@ -68,7 +68,7 @@ func historyHandler(svc *service.Service) http.HandlerFunc {
 
 		page := historyPage{
 			Title:      "History",
-			Nav:        navFor("history"),
+			Nav:        navFor("history", svc.ImportEnabled()),
 			HeaderNote: historyScopeLine(truncated),
 			Rows:       rows,
 			Empty:      len(rows) == 0,

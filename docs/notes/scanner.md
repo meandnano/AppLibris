@@ -362,6 +362,44 @@ its own emptiness and re-Warning about everything next time.
 rule, for a caller with no walk of its own; `internal/sender` is its second
 caller (`sending.md`).
 
+## Indexing one path
+
+`IndexFile` indexes a single file and reports the book it belongs to and
+whether it made one. It is `scanFile` with a fresh `Result`, so a caller
+gets every guard a sweep applies — `capMetadata`, the cover store's split
+between a decode failure and an I/O one, the orphan logging — without a
+second way into the index existing to drift from this one.
+
+`internal/importer` is the caller: a book uploaded through the web UI is
+indexed in the request that copied it into the library, so the response can
+send the reader to the book rather than to a wait. That is safe because
+`scanFile` is idempotent. A sweep reaching the same path afterwards sees a
+matching path, size and mtime and does nothing; one racing the call keys on
+the same content hash and converges on one book with one location.
+
+Three helpers are exported for the same caller — `MatchedSuffix`,
+`BookFormat` and `ExtractMetadata`. A preview has to say what a file is,
+what its format will be called and what it holds, and every one of those
+answers has to be the answer a sweep would give, or the page is describing
+a book the import will not produce. `MatchedSuffix` earns its export twice:
+it is what strips the extension a person's filename carried, and it is why
+the `.part` an import writes mid-copy is inert to a sweep.
+
+`ExtractMetadata` takes its fallback
+title as a parameter and hands its parse error back, because those are the
+two things the callers genuinely differ on: a sweep falls back to the
+file's own name and logs the path it was walking, while an import falls
+back to the name the browser offered and logs that, its staged path being
+an opaque id.
+
+A file mid-copy and the startup write probe are both invisible here, and
+both by suffix. `MatchedSuffix` answers "" for a name ending `.part`, which
+is what an import writes before it publishes, and for
+`.applibris-write-probe`, which `cmd/server` creates and removes to find
+out whether the library may be written at all. Nothing else may take a
+supported suffix before it is whole. See `docs/notes/import.md` for what
+the importer does with all of this.
+
 ## Watcher
 
 `internal/scanner/watcher.go` is a *trigger*, not a second index path. It

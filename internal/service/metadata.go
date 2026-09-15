@@ -99,10 +99,12 @@ func normalizeField(field storage.MetadataField, value string) (string, error) {
 		}
 		return value, nil
 	}
-	limit := storage.MaxScalarBytes
-	if field == storage.FieldDescription {
-		limit = MaxDescriptionBytes
-	}
+	// The same lookup every writer of these columns uses. This one refuses
+	// rather than truncating — a person's value is theirs and is not
+	// rewritten behind them — but it has to refuse at exactly the byte the
+	// others cut at, or a value the scanner stored is one this cannot save
+	// back unchanged.
+	limit := storage.FieldLimit(field)
 	if len(value) > limit {
 		return "", metadataValidationError{message: fmt.Sprintf("Value is too long (maximum %d bytes)", limit)}
 	}

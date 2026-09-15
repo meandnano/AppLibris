@@ -359,7 +359,7 @@ func (w *Watcher) qualifies(event fsnotify.Event) bool {
 		// The probe must not be able to trigger the work it is testing.
 		return false
 	}
-	if matchedSuffix(name) != "" {
+	if MatchedSuffix(name) != "" {
 		return true
 	}
 	// A removal or a rename names something that may already be gone, so

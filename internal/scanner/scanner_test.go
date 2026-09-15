@@ -15,7 +15,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1053,7 +1055,7 @@ func TestFilenameTitleStripsWholeMatchedSuffix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			suffix := matchedSuffix(tt.path)
+			suffix := MatchedSuffix(tt.path)
 			if got := filenameTitle(tt.path, suffix); got != tt.want {
 				t.Errorf("filenameTitle(%q, %q) = %q, want %q", tt.path, suffix, got, tt.want)
 			}
@@ -3609,5 +3611,156 @@ func TestScanCaseOnlyRenameMarksOldSpelling(t *testing.T) {
 	fresh, err := db.FindFileByPath(ctx, "books/book.epub")
 	if err != nil || fresh == nil || fresh.MissingSince.Valid {
 		t.Errorf("FindFileByPath(books/book.epub) = %+v, %v; want a live row", fresh, err)
+	}
+}
+
+// IndexFile is what internal/importer puts a file it has just written into
+// the library through, so a confirm can redirect to the book rather than to
+// a wait for the next sweep.
+func TestIndexFileIndexesOnePathAndNamesItsBook(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	libraryDir, coversDir := t.TempDir(), t.TempDir()
+
+	path := filepath.Join(libraryDir, "Dune.epub")
+	writeTestEPUB(t, path, "Dune", "Frank Herbert", nil)
+
+	bookID, created, err := IndexFile(ctx, db, libraryDir, path, coversDir)
+	if err != nil {
+		t.Fatalf("IndexFile: %v", err)
+	}
+	if bookID == 0 {
+		t.Fatal("IndexFile named no book")
+	}
+	if !created {
+		t.Error("created is false for a path that produced a new book")
+	}
+
+	book, err := db.FindBookByID(ctx, bookID)
+	if err != nil {
+		t.Fatalf("FindBookByID: %v", err)
+	}
+	if book == nil || book.Title != "Dune" {
+		t.Fatalf("the indexed book is %+v, want one titled Dune", book)
+	}
+
+	// The sweep that follows sees a matching path, size and mtime and does
+	// nothing — which is what makes indexing in the request safe.
+	result, err := Scan(ctx, db, libraryDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.New != 0 || result.Unchanged != 1 {
+		t.Errorf("the sweep after an import reported new=%d unchanged=%d, want 0 and 1", result.New, result.Unchanged)
+	}
+
+	// And re-indexing the same path answers the same book rather than a
+	// second one, which is what a repeated confirm relies on.
+	again, createdAgain, err := IndexFile(ctx, db, libraryDir, path, coversDir)
+	if err != nil {
+		t.Fatalf("IndexFile again: %v", err)
+	}
+	if again != bookID {
+		t.Errorf("IndexFile named book %d the second time, want %d", again, bookID)
+	}
+	// The importer logs on this, since landing on a book that already
+	// existed is a correct outcome the person has to be told about.
+	if createdAgain {
+		t.Error("created is true for a path the index already had")
+	}
+}
+
+// The copy an import is mid-way through, and the probe cmd/server writes to
+// find out whether the library may be written at all, are both invisible to
+// a sweep — one by its suffix, the other by both its suffix and its leading
+// dot.
+func TestScanIgnoresAPartFileAndTheWriteProbe(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	libraryDir, coversDir := t.TempDir(), t.TempDir()
+
+	writeTestEPUB(t, filepath.Join(libraryDir, "Dune.epub.part"), "Half Written", "Nobody", nil)
+	if err := os.WriteFile(filepath.Join(libraryDir, ".applibris-write-probe"), nil, 0o600); err != nil {
+		t.Fatalf("write probe: %v", err)
+	}
+	writeTestEPUB(t, filepath.Join(libraryDir, "Dune.epub"), "Dune", "Frank Herbert", nil)
+
+	result, err := Scan(ctx, db, libraryDir, coversDir, testMissingGrace)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.Scanned != 1 || result.New != 1 {
+		t.Errorf("Scan reported scanned=%d new=%d, want 1 and 1", result.Scanned, result.New)
+	}
+	if count, err := db.CountBooks(ctx); err != nil || count != 1 {
+		t.Errorf("CountBooks = %d, %v; want 1", count, err)
+	}
+}
+
+// A sweep and an import can both reach the same content at the same moment:
+// scanFile reads by hash and only inserts after parsing the file and storing
+// a cover, so two callers that both read nil both try to insert, and
+// books.content_hash is UNIQUE. The loser must attach its path to the book
+// the winner made, which is what IndexFile's own comment promises — "one
+// book with one location" — rather than failing the import.
+func TestConcurrentIndexFileOfIdenticalContentConvergesOnOneBook(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	libraryDir, coversDir := t.TempDir(), t.TempDir()
+
+	// One book's bytes under several names, so every goroutine hashes to
+	// the same value and only one insert can win.
+	const copies = 6
+	paths := make([]string, copies)
+	writeTestEPUB(t, filepath.Join(libraryDir, "source.epub"), "Dune", "Frank Herbert", testCoverImage(t))
+	content, err := os.ReadFile(filepath.Join(libraryDir, "source.epub"))
+	if err != nil {
+		t.Fatalf("read the source: %v", err)
+	}
+	for i := range copies {
+		paths[i] = filepath.Join(libraryDir, "copy-"+strconv.Itoa(i)+".epub")
+		if err := os.WriteFile(paths[i], content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", paths[i], err)
+		}
+	}
+	os.Remove(filepath.Join(libraryDir, "source.epub"))
+
+	var start, wg sync.WaitGroup
+	start.Add(1)
+	ids := make([]int64, copies)
+	errs := make([]error, copies)
+	for i := range copies {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start.Wait()
+			ids[i], _, errs[i] = IndexFile(ctx, db, libraryDir, paths[i], coversDir)
+		}()
+	}
+	start.Done()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("IndexFile %d: %v", i, err)
+		}
+		if ids[i] != ids[0] {
+			t.Errorf("IndexFile %d answered book %d, want %d — identical content is one book", i, ids[i], ids[0])
+		}
+	}
+
+	count, err := db.CountBooks(ctx)
+	if err != nil {
+		t.Fatalf("CountBooks: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("CountBooks = %d, want 1: %d copies of one book", count, copies)
+	}
+	files, err := db.ListBookFiles(ctx, ids[0])
+	if err != nil {
+		t.Fatalf("ListBookFiles: %v", err)
+	}
+	if len(files) != copies {
+		t.Errorf("the book has %d locations, want %d", len(files), copies)
 	}
 }

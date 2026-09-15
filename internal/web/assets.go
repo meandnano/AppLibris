@@ -61,7 +61,11 @@ func buildStaticETags() map[string]string {
 
 // staticHandler serves the embedded static assets with directory listings
 // suppressed and a content-derived ETag so browsers can revalidate rather
-// than re-fetching in full. max-age is deliberately short: asset filenames
+// than re-fetching in full. nosniff here and on the two other routes that
+// serve bytes rather than a rendered template, so no route in this app
+// lets a browser re-decide a media type the server has named — a rule that
+// is easier to hold than a per-route judgment about which bytes are
+// trusted. max-age is deliberately short: asset filenames
 // are stable across releases, so a long max-age would serve a stale file
 // after a deploy with no way to bust it — the ETag is what makes repeat
 // loads within that window cheap, not the max-age.
@@ -72,6 +76,7 @@ func staticHandler() http.Handler {
 		if etag, ok := etags[strings.TrimPrefix(r.URL.Path, "/")]; ok {
 			w.Header().Set("ETag", etag)
 		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		fileServer.ServeHTTP(w, r)
 	})
@@ -95,6 +100,7 @@ func staticHandler() http.Handler {
 func coversHandler(coversDir string) http.Handler {
 	fileServer := http.FileServer(noDirFS{http.Dir(coversDir)})
 	return http.StripPrefix("/covers/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		fileServer.ServeHTTP(w, r)
 	}))

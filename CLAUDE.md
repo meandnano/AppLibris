@@ -15,10 +15,17 @@ here. See Documentation below for what these files may and may not say.
   and database directories through `resolveDir` (create, then
   `EvalSymlinks`); a dangling link in any component fails startup naming
   link and target, and a refused `MkdirAll` names both uids. Opens the
-  database, serves immediately, and runs the scan loop, the sender worker and the
-  enrichment worker on one cancellable `scanCtx`. Shutdown order: HTTP
-  server, then `waitForBackground` (10s), then the database. Notes:
-  `docs/notes/scanner.md`, `docs/notes/design.md`.
+  database, serves immediately, and runs the scan loop, the sender worker,
+  the enrichment worker and the import janitor on one cancellable
+  `scanCtx`; the janitor exists only when the importer does. Shutdown
+  order: HTTP server, then `waitForBackground` (10s) over each of them,
+  then the database. Builds an `importer.Stager` through `newStager` only
+  if both the writability probe on `LIBRARY_DIR` (`probeWritable`) and the
+  staging directory under `os.TempDir()` succeed, which is the whole of
+  what "importing is offered" means; either failing disables import at
+  Warn and never fails startup. Parses `MAX_IMPORT_SIZE` through
+  `parseByteSize`. Notes: `docs/notes/scanner.md`,
+  `docs/notes/design.md`, `docs/notes/import.md`.
 - `internal/storage` — SQLite (`modernc.org/sqlite`, WAL, foreign keys,
   5s busy timeout). Bounded read pool, single-connection write pool
   (`DB.Write`). Embedded migrations under `migrations/`, one statement per
@@ -32,11 +39,14 @@ here. See Documentation below for what these files may and may not say.
   Note: `docs/notes/storage.md`.
 - `internal/epub`, `internal/fb2` — embedded metadata and cover bytes from
   each format, same `Metadata` shape so the scanner treats them alike.
+  Neither decides that what a file calls a cover is an image.
   `internal/cover` — resize to ~400px, JPEG, atomic write into
-  `COVERS_DIR` keyed by content hash. All three cap what they read from an
-  untrusted file. Note: `docs/notes/formats.md`.
+  `COVERS_DIR` keyed by content hash; `ContentType` is the header read
+  `Store` makes, for a caller that serves raw cover bytes. All three cap
+  what they read from an untrusted file. Note: `docs/notes/formats.md`.
 - `internal/scanner` — walks `LIBRARY_DIR`, syncs it into storage
-  (`Scan`), reconciles missing files in two phases, regenerates covers, and
+  (`Scan`), indexes one path on demand (`IndexFile`, the importer's way
+  in), reconciles missing files in two phases, regenerates covers, and
   hosts the fsnotify watcher (`watcher.go`) plus the startup mount and
   delivery checks. Note: `docs/notes/scanner.md`.
 - `internal/resend` — one-attachment `Client.Send` against Resend's API.
@@ -50,12 +60,19 @@ here. See Documentation below for what these files may and may not say.
   `internal/openlibrary`, `internal/googlebooks` — the two providers.
   `internal/providers` — the name → constructor registry
   (`METADATA_PROVIDERS`). Note: `docs/notes/enrichment.md`.
+- `internal/importer` — staging, previewing and landing a book uploaded
+  through the web UI: `Stager`, the three `Verdict`s, `detectSuffix`
+  (`sniff.go`) and the library-name derivation and collision loop
+  (`name.go`). Calls `scanner.IndexFile` to index what it wrote. Note:
+  `docs/notes/import.md`.
 - `internal/service` — the layer beneath the HTTP handlers, so a future
   `/api/v1` is a second thin transport. Owns validation and normalisation
   (`UpdateBookMetadata`, `QueueSend`), page assembly (`BookSummary`,
-  `BookDetail`, `SearchResult`), and the `Notify`/`NotifyEnrichment`
-  function fields `cmd/server` wires to the workers. Note:
-  `docs/notes/web.md`.
+  `BookDetail`, `SearchResult`; `ImportPreview` is an alias for
+  `importer.Staged`), and the
+  `Notify`/`NotifyEnrichment` function fields `cmd/server` wires to the
+  workers. `New` takes functional options; `WithImporter` is the only one.
+  Note: `docs/notes/web.md`.
 - `internal/web` — `html/template` pages and htmx fragments, CSS and the
   vendored htmx under `static/`, all `go:embed`ded. Routes: `GET /{$}`
   (grid, search, paging), `GET /books/{id}`, `GET`/`POST
@@ -63,11 +80,15 @@ here. See Documentation below for what these files may and may not say.
   `POST /books/{id}/send`, `GET
   /books/{id}/sends/{sendID}`, `POST /books/{id}/enrich`, `GET
   /books/{id}/enrichment/{jobID}`, `POST /recipients/remove`,
-  `GET /history`, `/static/`, `/covers/`. The UI is translated from mockups
+  `GET /history`, `GET /import`, `POST /import/file`, `GET /import/{id}`,
+  `GET /import/{id}/cover`, `POST /import/{id}/confirm`, `POST
+  /import/{id}/discard`, `/static/`, `/covers/`. The UI is translated from mockups
   kept as `UI.md` and `ui-handoff/` on the `init` branch. Note:
   `docs/notes/web.md`.
 - `docs/notes/design.md` — purpose, constraints, the library-directory
   rules, the conversion model behind `derived_from`, and the deferred list.
+- `docs/notes/import.md` — where an import lands, the staging model, the
+  three verdicts and the order confirm writes in.
 - `docs/plans/`, `docs/backlog/` — see Planning and Backlog below.
 
 Logging is `log/slog` on stderr through the package-level functions,
@@ -101,6 +122,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
   *cleared*, not *exists*. Their `DELETE` is scoped to `(book_id, field)`.
 - `ApplyEnrichedFields` re-checks `fieldIsStillMissingTx` per field inside
   its own transaction and records only what it actually wrote.
+- `FieldLimit` is the one lookup from a metadata field to its byte limit,
+  and `CapField` the one truncating derivation over it — shared by
+  `internal/scanner`, `internal/enrich` and `internal/importer`.
+  `internal/service` shares `FieldLimit` only: a person's edit is refused,
+  never rewritten, and a line break they typed is an error rather than
+  something to collapse behind them.
 - `SearchBooks` and `ListBooks` order by `(sort_title, id)`; the cursor
   comparison stays in row-value form with **no** explicit `COLLATE NOCASE`,
   or the index seek becomes a scan.
@@ -135,6 +162,9 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - `cover.Store` wraps `ErrUnsupportedCover` for anything the bytes decide
   and leaves filesystem errors unwrapped; the scanner's retry logic depends
   on that split.
+- `cover.ContentType` and `Store` share one header read (`inspect`), so
+  what this app calls an image is decided once. Neither format reader
+  decides it, so any caller serving raw cover bytes must ask.
 - Publication date is the edition's: never `creation`/`modification` in
   EPUB, never `title-info/date` over `publish-info/year` in FB2.
 - Every reader of an ISBN calls `storage.NormalizeISBN` — `internal/epub`'s
@@ -168,6 +198,24 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - `LIBRARY_DIR` is stat'd, never created, so a read-only mount works and an
   absent one fails startup. `COVERS_DIR` and `DB_PATH`'s directory are
   created.
+- `IndexFile` is `scanFile` with a fresh `Result`, and returns the book id
+  the path now belongs to along with whether it created one. There is no
+  second way into the index; every guard a new book needs lives in
+  `createBook`.
+- `scanFile` reads by content hash on the read pool and inserts later, so
+  two callers can both find nothing and both insert against the UNIQUE
+  `books.content_hash`. The loser re-reads and attaches its path to the
+  winner's book rather than failing — that is what makes the promise that a
+  sweep and an import "converge on one book" true. Every other unique column
+  is either `ON CONFLICT` or read and written inside the single-connection
+  write pool.
+- `MatchedSuffix`, `BookFormat` and `ExtractMetadata` are exported because
+  `internal/importer` must agree with a sweep about what a file is, what
+  its format is called and what it holds. `ExtractMetadata` takes the
+  fallback title and returns the parse error, since a sweep names a path
+  and a preview names an upload.
+- A `.part` file and `.applibris-write-probe` are invisible to a sweep by
+  suffix. Nothing else must acquire a supported suffix before it is whole.
 - The watcher never reads, hashes or parses a file. It pokes the one scan
   goroutine, so two sweeps can never overlap and correctness never depends
   on an event arriving.
@@ -243,13 +291,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Both workers `recover` inside `process` and write the row terminal with
   `crashedReason`. A panicking enrichment job left `running` is requeued
   into a crash loop; the panic value goes to the log, never the status box.
-- All three writers of the metadata columns — `internal/service`,
-  `sanitizeValue` here and `internal/scanner`'s `capMetadata` — cap through
-  `storage.Max*`; never restate a number, or a value one writes becomes
-  uneditable. A description that arrives on its own is also capped at two
-  consecutive newlines, through `storage.CapBlankLines`: `sanitizeValue`
-  here, `internal/epub` through `PlainDescription`, `internal/fb2` at the
-  end of `annotationText`. A person's edit is deliberately not capped —
+- Every writer of the metadata columns caps through `storage.CapField` or,
+  where it refuses rather than truncates, `storage.FieldLimit`; never
+  restate a number, or a value one writes becomes uneditable. A description
+  is capped at two consecutive newlines by `CapField` itself, and again on
+  the way in: `internal/epub` through `PlainDescription`, `internal/fb2` at
+  the end of `annotationText`. A person's edit is deliberately not capped —
   `normalizeField` trims and bounds a description and shapes it no further,
   since the blank lines someone typed are their own.
 - `sanitizeValue` does not flatten markup. Google's description is HTML and
@@ -286,12 +333,88 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `search_*.json`; each test file says which. Never hand-edit a fixture to
   make a test pass.
 
+### Import (`docs/notes/import.md`)
+
+- Format is decided by content in `detectSuffix`; the client's filename and
+  `Content-Type` never choose the parser or the suffix written. An XML
+  opening alone is not enough: `<FictionBook` must appear in the sniff
+  window, or any XML document is written into the library as a `.fb2`.
+- The preview is capped through `storage.CapField` before it is built, so it
+  shows what would be stored — and so the title-match verdict compares a
+  capped title against the capped `sort_title` the scanner derived.
+- Staging is bounded in total bytes, not in stages. The reservation is taken
+  at the cap before the copy and corrected after to everything the stage
+  retains — the file, the cover held for the preview, the metadata — never
+  the file alone, or a small upload holds megabytes of cover against a small
+  charge. It is given back by every path that drops a staged file: discard,
+  expiry, confirm, and the duplicate verdict, which releases the file's
+  share and keeps charging the cover its page still renders.
+- Confirm does not re-check a `new` or `title-match` verdict: it copies,
+  and `IndexFile`'s answer is the truth, so landing on a book the index
+  already had is a second location and not an error. `exists` is the one
+  verdict that decides anything at confirm, because reaching it deleted the
+  staged file — there is nothing left to copy and the existing book id is
+  the answer.
+- A failed `IndexFile` leaves the library file in place. Never delete a
+  file the library already holds over an index error.
+- The index write runs on `context.WithoutCancel`, because the library owns
+  the bytes before it starts — the same rule `internal/sender` applies once
+  Resend has accepted a message. A cancelled write would report a failure
+  that did not happen to every later confirm.
+- A swept staged file reads as `ErrExpired`, never as a raw `fs.ErrNotExist`:
+  expiry is checked under the lock and the file opened after it is dropped.
+- The library is written only as `<name>.part` then published with
+  `os.Link`; nothing creates a supported suffix in the library directly.
+  The link is what refuses to replace an existing name, which `os.Rename`
+  would do silently — never swap it back. A filesystem with no hard links
+  falls back to `Lstat` then `Rename`, logged once, and the window stays
+  open there.
+- A staged cover is served with the media type `cover.ContentType` decided
+  from its header, never `http.DetectContentType` over the bytes: no format
+  reader checks that what a file calls a cover is an image, so sniffing lets
+  an upload choose the type. `HasCover` therefore means "a cover this app
+  would keep", not "the file named one".
+- Every route serving bytes rather than a rendered template sets
+  `X-Content-Type-Options: nosniff` — `/import/{id}/cover`, `/covers/` and
+  `/static/`.
+- The write probe is removed before it is created. `O_EXCL` refuses a name
+  already taken, so a probe left by a crash would otherwise disable
+  importing for good; `O_EXCL` stays, so the create never follows a symlink
+  left at that name.
+- Staged state is in memory and on `os.TempDir()`. Nothing about a stage is
+  written to the database, and `importer.New` wipes the staging directory.
+- A `Stager` exists exactly when importing is available; there is no
+  disabled `Stager`. `cmd/server` builds one only when the probe succeeds
+  and the staging directory can be created; either failing is a Warn, never
+  a startup failure, since a library that can be read is still worth
+  serving. `internal/service` answers a nil one with `ErrImportDisabled`,
+  the convention `Notify` follows. Never add a second disabled state inside
+  the importer.
+- Whether the nav offers Import comes from `svc.ImportEnabled()`, not from
+  a flag threaded down beside `sendEnabled` and `enrichEnabled`: those two
+  are configuration the service never sees, where the importer is its own.
+- The write probe runs once at startup. A per-request check would answer
+  differently only when confirm is about to report its own error.
+- A repeated confirm answers the first call's book id rather than copying
+  the file in again, which is why the record outlives the confirm.
+- `internal/importer` imports `internal/scanner`, so `internal/scanner`'s
+  in-package tests cannot import `internal/service`. `capmetadata_test.go`
+  is `package scanner_test` over `export_test.go` for that reason; it may
+  not live in `package scanner`.
+- `cmd/server`'s `TestMain` points `TMPDIR` at a directory of its own,
+  because `run()` derives the staging directory from `os.TempDir()` and
+  `importer.New` wipes it — without that, the package's tests delete a
+  development server's staged uploads.
+
 ### Web and service (`docs/notes/web.md`)
 
 - A fragment is answered when `HX-Request` is present **and**
   `HX-History-Restore-Request` is absent. `Vary` names both.
 - **A rejected edit fragment answers 200; the rejected full page answers
   422.** htmx 2.0.10 does not swap a 4xx. Do not opt 422 in from the client.
+- Every import route that can answer a fragment names both htmx headers in
+  `Vary`, `GET /import` included. Every refused upload drains what is left of
+  the body first.
 - `maxMetadataFormBody` is `3 × service.MaxMetadataValueBytes + 1024`,
   sized off the author list, not the description.
 - `libraryPage.SearchMaxLength` must carry `storage.MaxSearchBytes`; the
@@ -309,6 +432,15 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `Sec-Fetch-Site` through on purpose; the opt-out mode depends on that.
 - Every route that renders the send control copies `SendableNote`, so a
   fragment can never offer a button the full page withholds.
+- The upload and confirm routes extend their own deadlines through
+  `http.NewResponseController`, **both halves**; `cmd/server`'s timeouts are
+  never loosened for the other routes. Go installs the write deadline once,
+  when the request headers are read, so a read window widened for a large
+  body sits inside a write deadline that expired while it was arriving — the
+  import lands and its answer never reaches the browser. `confirmWindow` is
+  derived from `importer.IndexTimeout` rather than restating it.
+  `http.MaxBytesReader` bounds the body, `importer`'s own count bounds the
+  file, and only the second is the number a refusal names.
 - `providerSourceNote` renders a marker for a provider's name and nothing
   for `embedded`, `manual` or absent. Editing clears the marker because the
   POST handler reloads the book rather than echoing the input.

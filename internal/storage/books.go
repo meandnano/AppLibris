@@ -110,6 +110,23 @@ func (db *DB) FindBookByContentHash(ctx context.Context, hash string) (*Book, er
 	return scanBook(row)
 }
 
+// FindBookBySortTitle returns one book filed under sortTitle, or nil if
+// none is. The importer's title-match verdict: a staged file whose title
+// files under the same string as a book already indexed is worth flagging
+// before it is copied in.
+//
+// sort_title is already case-folded and article-stripped by SortTitle, so
+// the comparison is a plain equality on the derived column rather than a
+// collation the index would not be able to seek. Lowest id wins when
+// several books share a title, so the verdict a preview shows is stable
+// across the reloads of one page; which of several editions is named
+// matters less than the fact that one exists, and the person is the only
+// one who can tell them apart anyway.
+func (db *DB) FindBookBySortTitle(ctx context.Context, sortTitle string) (*Book, error) {
+	row := db.read.QueryRowContext(ctx, `SELECT `+bookColumns+` FROM books WHERE sort_title = ? ORDER BY id LIMIT 1`, sortTitle)
+	return scanBook(row)
+}
+
 // FindBookByID returns the book with the given id, or nil if none exists —
 // the book detail page's lookup, and an unknown id turning up nil rather
 // than an error is what lets the handler turn it into a plain 404.

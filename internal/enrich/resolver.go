@@ -101,28 +101,8 @@ func missingFields(book storage.Book, authors []string, sources map[storage.Meta
 // from the one an edit is checked against, and a value this package writes
 // but normalizeField would reject is a field the app can no longer edit
 func sanitizeValue(field storage.MetadataField, value string) string {
-	if field != storage.FieldDescription {
-		value = strings.Join(strings.Fields(value), " ")
-	} else {
-		value = storage.CapBlankLines(value)
-	}
-	value = strings.TrimSpace(value)
-
-	limit := storage.MaxScalarBytes
-	switch field {
-	case storage.FieldDescription:
-		limit = storage.MaxDescriptionBytes
-	case storage.FieldTitle:
-		limit = storage.MaxTitleBytes
-	case storage.FieldAuthors:
-		// One name at a time — metadataValues sanitises the list element
-		// by element, so this is the per-name limit, not the list's.
-		limit = storage.MaxAuthorNameBytes
-	}
-	if len(value) > limit {
-		value = strings.ToValidUTF8(value[:limit], "")
-	}
-	return value
+	capped, _ := storage.CapField(field, value)
+	return capped
 }
 
 // metadataValues converts a provider's answer into the same
