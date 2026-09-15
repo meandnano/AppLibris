@@ -86,7 +86,7 @@ services:
       - GOOGLE_BOOKS_API_KEY=${GOOGLE_BOOKS_API_KEY}
       - TZ=${TZ} # zoneinfo ships in the image, so this is all local time needs
     volumes:
-      - ${LIBRARY_LOCATION}:/library:ro
+      - ${LIBRARY_LOCATION}:/library
       - ${DATA_LOCATION}:/data
     depends_on:
       tailscale:
