@@ -268,8 +268,8 @@ func TestSendHandlerInvalidAddressRendersFieldError(t *testing.T) {
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postSendForm(handler, id, url.Values{"recipient": {"not-an-address"}}, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST send with an invalid address status = %d, want 200 (a field error, not a 500)", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST send with an invalid address status = %d, want 422 (a field error, not a 500)", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "send__error") {
 		t.Errorf("invalid-address response missing a field error; body = %q", rec.Body.String())
@@ -514,8 +514,13 @@ func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) 
 	}, true)
 	body := rec.Body.String()
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST send with an invalid address = %d, want 200; body = %s", rec.Code, body)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST send with an invalid address = %d, want 422; body = %s", rec.Code, body)
+	}
+	// noSwap keeps 4xx out of the page, so the form has to opt its 422 in
+	// or the rejection never shows
+	if !strings.Contains(body, `hx-status:422="swap:outerHTML"`) {
+		t.Errorf("the re-rendered send form does not opt its 422 into swapping; body = %q", body)
 	}
 	if !strings.Contains(body, "send__error") {
 		t.Errorf("response missing the field error; body = %q", body)

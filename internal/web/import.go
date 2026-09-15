@@ -117,10 +117,9 @@ func importHandler(svc *service.Service) http.HandlerFunc {
 // than through ParseMultipartForm, which would spool the whole file to a
 // second temporary copy before this handler saw a byte of it.
 //
-// A rejected upload answers 200 to an htmx caller and 422 to everyone else,
-// the split the metadata editors already make: htmx 2.0.10 does not swap a
-// 4xx, so a refusal nobody can see is a broken button, while a full-page
-// rejection is a real one and says so.
+// A rejected upload answers 422 on both paths, as a rejected edit does: the
+// upload form carries hx-status:422, which is what lets htmx swap the panel
+// and its refusal in past noSwap's 4xx
 func importUploadHandler(svc *service.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
@@ -346,9 +345,8 @@ func renderImport(w http.ResponseWriter, r *http.Request, status int, page impor
 	}
 }
 
-// renderImportRejection answers a refused upload or confirm: 200 with the
-// panel for htmx, which does not swap a 4xx, and 422 with the whole page
-// for everyone else.
+// renderImportRejection answers a refused upload or confirm at 422, with the
+// panel for htmx and the whole page for everyone else
 //
 // It drains first, so the connection is never left with a request body
 // nobody consumed — the condition under which Go's server stops reading and
@@ -367,11 +365,6 @@ func renderImport(w http.ResponseWriter, r *http.Request, status int, page impor
 // here can improve on the lingering close.
 func renderImportRejection(w http.ResponseWriter, r *http.Request, page importPage) {
 	io.Copy(io.Discard, r.Body)
-
-	if isHTMXFragment(r) {
-		renderImport(w, r, http.StatusOK, page)
-		return
-	}
 	renderImport(w, r, http.StatusUnprocessableEntity, page)
 }
 

@@ -276,11 +276,14 @@ func TestImportUploadRefusalsSayWhy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			handler, _, _ := newImportHandler(t, 1024)
 
-			// htmx does not swap a 4xx, so a refusal it has to show is a
-			// 200 carrying the sentence.
+			// The panel comes back carrying the upload form's hx-status:422,
+			// which is what lets htmx swap the refusal in past noSwap's 4xx
 			fragment := upload(t, handler, tt.filename, tt.content, true)
-			if fragment.Code != http.StatusOK {
-				t.Errorf("htmx status = %d, want 200", fragment.Code)
+			if fragment.Code != http.StatusUnprocessableEntity {
+				t.Errorf("htmx status = %d, want 422", fragment.Code)
+			}
+			if !strings.Contains(fragment.Body.String(), `hx-status:422="swap:outerHTML"`) {
+				t.Errorf("the refused panel's form does not opt its 422 into swapping:\n%s", fragment.Body.String())
 			}
 			if !strings.Contains(fragment.Body.String(), tt.want) {
 				t.Errorf("the refusal does not say %q:\n%s", tt.want, fragment.Body.String())
@@ -343,6 +346,11 @@ func TestImportPreviewShowsEachVerdictAndOnlyItsButtons(t *testing.T) {
 	first := upload(t, handler, "Dune.epub", book, true).Body.String()
 	if !strings.Contains(first, "/confirm") {
 		t.Errorf("a new book was not offered an Import button:\n%s", first)
+	}
+	// A refused confirm answers 422, which noSwap drops unless the confirm
+	// form itself opts it in
+	if !strings.Contains(first, `hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form" hx-status:422="swap:outerHTML"`) {
+		t.Errorf("the confirm form does not opt its 422 into swapping:\n%s", first)
 	}
 	if strings.Contains(first, "already in the library") {
 		t.Errorf("a new book was flagged as a duplicate:\n%s", first)
@@ -412,8 +420,8 @@ func TestImportConfirmOfAnExpiredStageSaysSo(t *testing.T) {
 	handler, _, _ := newImportHandler(t, 1<<20)
 
 	rec := post(handler, "/import/nosuchstage/confirm", true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "expired") {
 		t.Errorf("the refusal does not say the stage expired:\n%s", rec.Body.String())
@@ -605,8 +613,8 @@ func TestAnOverCapUploadStillReadsItsRefusalBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the refusal was cut short: %v", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422", resp.StatusCode)
 	}
 	if !strings.Contains(string(body), "larger than") {
 		t.Errorf("the response does not name the cap:\n%s", body)

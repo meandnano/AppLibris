@@ -57,12 +57,13 @@ func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled b
 }
 
 // isHTMXFragment reports whether r wants a fragment rather than a whole
-// page. htmx sets HX-Request on every request it issues, including the one
-// it makes restoring a history entry that has fallen out of its cache —
-// but that response it swaps into the whole document body, so answering it
-// with a fragment strips the page down to it. HX-History-Restore-Request
-// is what separates the two, which is why both headers name themselves in
-// every Vary set alongside this call.
+// page. htmx sets HX-Request on the requests an element issues, and the GET
+// it makes restoring a history entry it swaps into the whole document body,
+// so answering that one with a fragment strips the page down to it.
+// HX-History-Restore-Request is what marks the restore, and the check names
+// both halves so the answer never rests on which other headers a restore
+// happens to carry, which is why both headers name themselves in every Vary
+// set alongside this call
 func isHTMXFragment(r *http.Request) bool {
 	return r.Header.Get("HX-Request") != "" && r.Header.Get("HX-History-Restore-Request") == ""
 }
@@ -109,15 +110,15 @@ func sameSiteOnly(next http.HandlerFunc) http.HandlerFunc {
 // or send was refused needs the log to say why, and a flood here is the
 // symptom of exactly the exposure the wrapper exists to surface.
 //
-// The refusal has two shapes, because the person pressing the button has
-// to see it and the vendored htmx does not swap a 4xx — the same fact that
-// makes metadataError answer a rejected fragment with 200. An htmx
-// request gets a 200 carrying a one-line message and HX-Reswap: afterbegin,
-// which inserts that line as the first child of whatever the form's own
-// hx-target names (#send, #enrich, an editable field's wrapper), so the
-// control stays on the page with the refusal above it and this wrapper
-// never has to know which control posted. Everything else gets the honest
-// 403. The security property is identical in both: next is never called.
+// The refusal is a 403 in two shapes, because the person pressing the
+// button has to see it. An htmx request gets a one-line message that every
+// page's <body> opts into swapping with
+// hx-status:403:inherited="swap:afterbegin", which inserts it as the first
+// child of whatever the form's own hx-target names (#send, #enrich, an
+// editable field's wrapper), so the control stays on the page with the
+// refusal above it and this wrapper never has to know which control
+// posted. Everything else gets plain text. The security property is
+// identical in both: next is never called.
 //
 // REQUIRE_FETCH_METADATA=false in cmd/server swaps this for
 // WarnMissingFetchMetadata. Reads pass through both untouched.
@@ -127,8 +128,7 @@ func RequireFetchMetadata(next http.Handler) http.Handler {
 			slog.Warn("refused a state-changing request carrying no fetch metadata: the service is being reached over plain HTTP or by a script, and cross-site protection needs an HTTPS gateway in front — REQUIRE_FETCH_METADATA=false admits such requests anyway",
 				"method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
 			if isHTMXFragment(r) {
-				w.Header().Set("HX-Reswap", "afterbegin")
-				if err := render(w, "fetch-metadata-refused", nil); err != nil {
+				if err := renderStatus(w, http.StatusForbidden, "fetch-metadata-refused", nil); err != nil {
 					slog.Error("render template failed", "template", "fetch-metadata-refused", "error", err)
 					http.Error(w, "internal error", http.StatusInternalServerError)
 				}
@@ -314,15 +314,14 @@ const appendParam = "append"
 // only in how much of the page comes back. GET /?q=... narrows the grid to
 // a search; a blank or missing q is the unfiltered list.
 //
-// HX-Request alone does not mean "send the fragment". htmx sets it on a
-// history-restore request too — the GET it issues when the user goes Back
-// to a URL that has fallen out of its history cache (ten entries, and
-// hx-push-url pushes one per keystroke, so this is ordinary Back-button
-// use, not an edge case) — and there it swaps the response into the whole
-// body. Answering that with the fragment would replace the masthead, the
-// search bar and the scripts with a bare grid, leaving no way back but a
-// manual reload. htmx marks that request HX-History-Restore-Request, so
-// the fragment is for a request carrying HX-Request without it.
+// HX-Request alone does not mean "send the fragment". Going Back to any
+// entry htmx pushed — and hx-push-url pushes one per keystroke, so this is
+// ordinary Back-button use, not an edge case — issues a history-restore
+// GET whose response htmx swaps into the whole body. Answering that with
+// the fragment would replace the masthead, the search bar and the scripts
+// with a bare grid, leaving no way back but a manual reload. htmx marks
+// that request HX-History-Restore-Request, so the fragment is for a
+// request carrying HX-Request without it.
 //
 // Both headers are named in Vary because both change the body at this one
 // URL: without it a shared cache or the browser's back-forward cache could
