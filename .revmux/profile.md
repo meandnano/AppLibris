@@ -139,9 +139,11 @@ Flagging any of these as a problem is a false positive.
 
 **Web**
 
-- A rejected edit fragment answers **200**; the rejected full page answers
-  **422**. The vendored htmx does not swap a 4xx, so a refusal nobody can see
-  is a broken button.
+- A rejection answers **422** wherever it has a body to show, and the form
+  that posted opts that status in with `hx-status:422="swap:outerHTML"`. The
+  `htmx-config` meta tag keeps every other `4xx` and `5xx` in `noSwap`, so a
+  route that gains a 4xx body without the matching `hx-status` on its form
+  is a refusal nobody can see.
 - A fragment is answered when `HX-Request` is present and
   `HX-History-Restore-Request` is absent, and `Vary` names both.
 - Every read affordance carries both `href` and `hx-get`, every editor both

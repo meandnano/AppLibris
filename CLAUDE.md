@@ -410,12 +410,14 @@ tidy-up would break. The note named in the heading carries the reasoning.
 
 - A fragment is answered when `HX-Request` is present **and**
   `HX-History-Restore-Request` is absent. `Vary` names both.
-- **A rejection answers 422 on both paths** — an edit, a send address, an
-  import upload or confirm. The `htmx-config` meta tag in `document-head`
-  keeps `4xx` and `5xx` in `noSwap`, so an error swaps only when the element
-  that asked names it: every form whose route answers 422 carries
-  `hx-status:422="swap:outerHTML"`. A route that gains a 4xx body gains the
-  matching `hx-status` on its form, or the rejection never shows.
+- **A rejection answers 422 wherever it has a body to show** — an edit, an
+  import upload and confirm on both paths, a send address on the htmx path
+  (the plain path is a `303` back to the book). The `htmx-config` meta tag
+  in `document-head` keeps `4xx` and `5xx` in `noSwap`, so an error swaps
+  only when the element that asked names it: every form whose route answers
+  422 carries `hx-status:422="swap:outerHTML"`. A route that gains a 4xx
+  body gains the matching `hx-status` on its form, or the rejection never
+  shows.
 - That tag's `defaultTimeout` stays `0`: htmx 4 otherwise abandons a request
   after 60s, and an upload or confirm outlasts that while the import lands.
 - Every import route that can answer a fragment names both htmx headers in

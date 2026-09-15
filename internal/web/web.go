@@ -57,13 +57,13 @@ func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled b
 }
 
 // isHTMXFragment reports whether r wants a fragment rather than a whole
-// page. htmx sets HX-Request on the requests an element issues, and the GET
-// it makes restoring a history entry it swaps into the whole document body,
-// so answering that one with a fragment strips the page down to it.
-// HX-History-Restore-Request is what marks the restore, and the check names
-// both halves so the answer never rests on which other headers a restore
-// happens to carry, which is why both headers name themselves in every Vary
-// set alongside this call
+// page. htmx sets HX-Request on the requests an element issues. The GET it
+// makes restoring a history entry is swapped into the whole document body,
+// so answering that one with a fragment strips the page down to it; htmx 4
+// marks it HX-History-Restore-Request and sends no HX-Request with it. The
+// check still names both halves so the answer never rests on which other
+// headers a restore happens to carry, which is why both headers name
+// themselves in every Vary set alongside this call
 func isHTMXFragment(r *http.Request) bool {
 	return r.Header.Get("HX-Request") != "" && r.Header.Get("HX-History-Restore-Request") == ""
 }
@@ -314,14 +314,15 @@ const appendParam = "append"
 // only in how much of the page comes back. GET /?q=... narrows the grid to
 // a search; a blank or missing q is the unfiltered list.
 //
-// HX-Request alone does not mean "send the fragment". Going Back to any
-// entry htmx pushed — and hx-push-url pushes one per keystroke, so this is
-// ordinary Back-button use, not an edge case — issues a history-restore
-// GET whose response htmx swaps into the whole body. Answering that with
-// the fragment would replace the masthead, the search bar and the scripts
-// with a bare grid, leaving no way back but a manual reload. htmx marks
-// that request HX-History-Restore-Request, so the fragment is for a
-// request carrying HX-Request without it.
+// The fragment is for a request carrying HX-Request and not
+// HX-History-Restore-Request. Going Back to any entry htmx pushed — and
+// hx-push-url pushes one per keystroke, so this is ordinary Back-button
+// use, not an edge case — issues a history-restore GET whose response htmx
+// swaps into the whole body. Answering that with the fragment would
+// replace the masthead, the search bar and the scripts with a bare grid,
+// leaving no way back but a manual reload. htmx 4 marks that request with
+// HX-History-Restore-Request alone, and the check reads both headers so
+// the answer never rests on which others a restore happens to carry.
 //
 // Both headers are named in Vary because both change the body at this one
 // URL: without it a shared cache or the browser's back-forward cache could

@@ -1289,7 +1289,6 @@ func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
 		wantCode int
 		wantNext bool
 		wantBody string
-		wantSwap string
 	}{
 		{name: "POST with no header", method: http.MethodPost, wantCode: http.StatusForbidden, wantBody: "HTTPS address"},
 		// An htmx caller gets the refusal line as a 403 body, swapped in by
@@ -1334,8 +1333,10 @@ func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
 			if tc.wantBody != "" && !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Errorf("body = %q, want it to contain %q", rec.Body.String(), tc.wantBody)
 			}
-			if got := rec.Header().Get("HX-Reswap"); got != tc.wantSwap {
-				t.Errorf("HX-Reswap = %q, want %q", got, tc.wantSwap)
+			// The page's inherited hx-status:403 decides where the refusal
+			// lands, so the wrapper must not steer the swap itself
+			if got := rec.Header().Get("HX-Reswap"); got != "" {
+				t.Errorf("HX-Reswap = %q, want it unset", got)
 			}
 		})
 	}
