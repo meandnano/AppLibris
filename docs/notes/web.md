@@ -391,7 +391,14 @@ over a typo would make the page contradict itself.
 
 `POST /books/{id}/send` answers a fragment request with the fragment and
 everyone else with a `303` back to the book, whose initial render picks
-the job up through `LatestSend`. With sending unconfigured it 503s with
+the job up through `LatestSend`. A rejected address answers 422 on both
+paths, the way a rejected edit does: the fragment with the control holding
+the error, and the plain POST with the whole book page around the same
+control, built through `makeBookDetailPage`, rather than a `303`. A
+redirect there would land on a page that has forgotten both the message
+and what was typed, having queued nothing to show instead; both shapes set
+the error through `setPageSendError`, so they cannot word it differently.
+With sending unconfigured it 503s with
 the disabled fragment rather than 404ing, so a stale open tab gets an
 explanation. `GET /books/{id}/sends/{sendID}` is scoped under the book id
 so a mismatched pairing 404s instead of leaking one book's send under
