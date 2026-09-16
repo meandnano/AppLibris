@@ -30,8 +30,8 @@
     }
   });
 
-  document.addEventListener("htmx:afterSwap", function (event) {
-    var target = event.detail.target;
+  document.addEventListener("htmx:after:swap", function (event) {
+    var target = event.detail.ctx.target;
     var field = target.id ? document.getElementById(target.id) : target.closest("[data-editable-field]");
     if (!field) return;
 

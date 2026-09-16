@@ -33,9 +33,10 @@ func render(w http.ResponseWriter, name string, data any) error {
 }
 
 // renderStatus is render with an explicit status code, for a response that
-// carries a rendered body and a non-200 code together — a rejected edit
-// answering 422 with the form and its error message, rather than a bare
-// http.Error that would swap away the editor.
+// carries a rendered body and a non-200 code together — a rejected edit,
+// send address or import answering 422 with the form and its message, or a
+// refused request answering 403 with the line saying so, rather than a bare
+// http.Error with nothing to show
 func renderStatus(w http.ResponseWriter, status int, name string, data any) error {
 	var buf bytes.Buffer
 	if err := templates.ExecuteTemplate(&buf, name, data); err != nil {

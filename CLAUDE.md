@@ -410,8 +410,21 @@ tidy-up would break. The note named in the heading carries the reasoning.
 
 - A fragment is answered when `HX-Request` is present **and**
   `HX-History-Restore-Request` is absent. `Vary` names both.
-- **A rejected edit fragment answers 200; the rejected full page answers
-  422.** htmx 2.0.10 does not swap a 4xx. Do not opt 422 in from the client.
+- **A rejection answers 422 wherever it has a body to show** — an edit, an
+  import upload and confirm on both paths, a send address on the htmx path
+  (the plain path is a `303` back to the book). The `htmx-config` meta tag
+  in `document-head` keeps `4xx` and `5xx` in `noSwap`, so an error swaps
+  only when the element that asked names it: every form whose route answers
+  422 carries `hx-status:422="swap:outerHTML"`, `send__form` and
+  `enrich__form` also carry `hx-status:503="swap:outerHTML"` for the
+  disabled control their route answers with, and every page's `<body>`
+  carries the 403 one. A route that gains an error body, 4xx or 5xx, gains
+  the matching `hx-status` on the element that asked, or the rejection
+  never shows. The opt-in names the exact status, never a wildcard:
+  `noSwap` is consulted before the element at each of the three steps, so
+  an opt-in on a wildcard `noSwap` itself lists is unreachable.
+- That tag's `defaultTimeout` stays `0`: htmx 4 otherwise abandons a request
+  after 60s, and an upload or confirm outlasts that while the import lands.
 - Every import route that can answer a fragment names both htmx headers in
   `Vary`, `GET /import` included. Every refused upload drains what is left of
   the body first.
@@ -425,10 +438,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Every read affordance carries both `href` and `hx-get`, every editor both
   `action` and `hx-post`. One markup path; no separate no-JS path.
 - Every state-changing route is wrapped in `sameSiteOnly`, and
-  `cmd/server` wraps the whole handler in `fetchMetadataGuard`. An htmx
-  fragment refusal is a 200 with the `fetch-metadata-refused` partial and
-  `HX-Reswap: afterbegin`; every other client gets 403. `next` is not
-  called in either shape. `sameSiteOnly` itself passes an *empty*
+  `cmd/server` wraps the whole handler in `fetchMetadataGuard`. A refusal is
+  a 403 for every client; an htmx fragment caller's carries the
+  `fetch-metadata-refused` partial, which every page template's `<body>`
+  swaps in through `hx-status:403:inherited="swap:afterbegin"`. `next` is
+  not called in either shape. `sameSiteOnly` itself passes an *empty*
   `Sec-Fetch-Site` through on purpose; the opt-out mode depends on that.
 - Every route that renders the send control copies `SendableNote`, so a
   fragment can never offer a button the full page withholds.

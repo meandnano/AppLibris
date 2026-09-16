@@ -367,6 +367,34 @@ func TestSearchBarHTMXWiringContract(t *testing.T) {
 	}
 }
 
+// The page, not htmx's defaults, decides that no error response is swapped
+// and that no request is abandoned in the browser. Deleting the meta tag
+// leaves every handler test green while a plain-text 500 replaces a control
+// and a slow import loses its answer
+func TestHTMXConfigContract(t *testing.T) {
+	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	want := `<meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"defaultTimeout":0}'>`
+	if body := rec.Body.String(); !strings.Contains(body, want) {
+		t.Errorf("page missing %s; body = %q", want, body)
+	}
+
+	// The fetch-metadata refusal is a 403 that noSwap would drop, and the
+	// wrapper cannot know which control posted, so every page template opts
+	// it in once on <body>
+	for _, path := range []string{"/", "/books/1", "/history", "/import"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if want := `<body hx-status:403:inherited="swap:afterbegin">`; !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("GET %s (%d) missing %s", path, rec.Code, want)
+		}
+	}
+}
+
 func TestSearchNoResultsIsDistinctFromEmptyLibrary(t *testing.T) {
 	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
 
@@ -531,8 +559,8 @@ func TestClippedMultibyteQueryRendersAsValidUTF8(t *testing.T) {
 // bare grid that can no longer search — recoverable only by a manual
 // reload. htmx marks that request HX-History-Restore-Request; this pins
 // that the handler tells the two apart. Reachable by ordinary Back-button
-// use: hx-push-url pushes a URL per keystroke and htmx's history cache
-// holds ten.
+// use: hx-push-url pushes a URL per keystroke and htmx restores every one of
+// them from the server
 func TestHistoryRestoreRequestGetsFullPageNotFragment(t *testing.T) {
 	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
 
@@ -1261,15 +1289,14 @@ func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
 		wantCode int
 		wantNext bool
 		wantBody string
-		wantSwap string
 	}{
 		{name: "POST with no header", method: http.MethodPost, wantCode: http.StatusForbidden, wantBody: "HTTPS address"},
-		// An htmx caller is refused with a 200 and a swap instruction, since
-		// the vendored htmx does not swap a 4xx and a refusal nobody can see
-		// is indistinguishable from a broken button. Same security property:
-		// next is not called either way.
+		// An htmx caller gets the refusal line as a 403 body, swapped in by
+		// the page's inherited hx-status:403 rather than a header, since the
+		// page decides where it lands. Same security property: next is not
+		// called either way.
 		{name: "htmx POST with no header", method: http.MethodPost, headers: map[string]string{"HX-Request": "true"},
-			wantCode: http.StatusOK, wantBody: "Refused", wantSwap: "afterbegin"},
+			wantCode: http.StatusForbidden, wantBody: "Refused"},
 		// A history-restore request is swapped into the whole body, so it
 		// is not a fragment caller and gets the plain 403 like everyone else.
 		{name: "htmx history-restore POST with no header", method: http.MethodPost,
@@ -1306,8 +1333,10 @@ func TestRequireFetchMetadataRefusesOnlyMetadataLessMutations(t *testing.T) {
 			if tc.wantBody != "" && !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Errorf("body = %q, want it to contain %q", rec.Body.String(), tc.wantBody)
 			}
-			if got := rec.Header().Get("HX-Reswap"); got != tc.wantSwap {
-				t.Errorf("HX-Reswap = %q, want %q", got, tc.wantSwap)
+			// The page's inherited hx-status:403 decides where the refusal
+			// lands, so the wrapper must not steer the swap itself
+			if got := rec.Header().Get("HX-Reswap"); got != "" {
+				t.Errorf("HX-Reswap = %q, want it unset", got)
 			}
 		})
 	}

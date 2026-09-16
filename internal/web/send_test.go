@@ -218,6 +218,11 @@ func TestSendControlWhenDisabled(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Sending is not configured") {
 		t.Errorf("503 body missing the explanation; body = %q", rec.Body.String())
 	}
+	// The form's hx-status:503 swaps this body over #send, so a whole page
+	// here would splice a document into the control.
+	if !strings.Contains(rec.Body.String(), `id="send"`) || strings.Contains(rec.Body.String(), "<html") {
+		t.Errorf("503 body is not the send-control fragment; body = %q", rec.Body.String())
+	}
 
 	send, err := db.LatestSendForBook(context.Background(), id)
 	if err != nil {
@@ -268,8 +273,8 @@ func TestSendHandlerInvalidAddressRendersFieldError(t *testing.T) {
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postSendForm(handler, id, url.Values{"recipient": {"not-an-address"}}, true)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST send with an invalid address status = %d, want 200 (a field error, not a 500)", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST send with an invalid address status = %d, want 422 (a field error, not a 500)", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "send__error") {
 		t.Errorf("invalid-address response missing a field error; body = %q", rec.Body.String())
@@ -514,8 +519,16 @@ func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) 
 	}, true)
 	body := rec.Body.String()
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST send with an invalid address = %d, want 200; body = %s", rec.Code, body)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST send with an invalid address = %d, want 422; body = %s", rec.Code, body)
+	}
+	// noSwap keeps 4xx out of the page, so the form has to opt its 422 in
+	// or the rejection never shows
+	if !strings.Contains(body, `hx-status:422="swap:outerHTML"`) {
+		t.Errorf("the re-rendered send form does not opt its 422 into swapping; body = %q", body)
+	}
+	if !strings.Contains(body, `hx-status:503="swap:outerHTML"`) {
+		t.Errorf("the re-rendered send form does not opt its 503 into swapping; body = %q", body)
 	}
 	if !strings.Contains(body, "send__error") {
 		t.Errorf("response missing the field error; body = %q", body)
@@ -525,6 +538,39 @@ func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) 
 	}
 	if !strings.Contains(body, `value="not-an-address"`) || !strings.Contains(body, `value="Spare Kindle"`) {
 		t.Errorf("the typed address and label were not carried back; body = %q", body)
+	}
+}
+
+// Sending unconfigured answers 503 with a fragment that explains itself,
+// and noSwap holds 5xx, so a stale tab shows that sentence only if the form
+// it still holds names the status. The opt-in therefore lives on the
+// enabled form — the one such a tab has open — and names 503 exactly,
+// since noSwap is consulted before the element at every wildcard step, so
+// an hx-status:5xx could never be reached.
+func TestEnabledSendFormOptsIts503IntoSwapping(t *testing.T) {
+	db := newSendTestDB(t)
+	id := createSendTestBook(t, db)
+	handler := Routes(service.New(db), t.TempDir(), true, false)
+
+	const want = `hx-status:503="swap:outerHTML"`
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/books/"+itoa(id), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET book page = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("the book page's send form is missing %q; body = %q", want, rec.Body.String())
+	}
+
+	// The opt-in has to survive the fragment route too, or a tab that has
+	// swapped its control in since loading holds a form without it.
+	fragment := postSendForm(handler, id, url.Values{"recipient": {"reader@kindle.com"}}, true)
+	if fragment.Code != http.StatusOK {
+		t.Fatalf("POST send = %d, want 200; body = %s", fragment.Code, fragment.Body.String())
+	}
+	if !strings.Contains(fragment.Body.String(), want) {
+		t.Errorf("the re-rendered send control is missing %q; body = %q", want, fragment.Body.String())
 	}
 }
 

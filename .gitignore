@@ -6,6 +6,9 @@
 *.db-wal
 *.db-shm
 
+.claude/settings.local.json
+.claude/launch.json
+
 # revmux review archive
 .revmux/tasks/
 
