@@ -411,11 +411,11 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - A fragment is answered when `HX-Request` is present **and**
   `HX-History-Restore-Request` is absent. `Vary` names both.
 - **A rejection answers 422 wherever it has a body to show** — an edit, an
-  import upload and confirm on both paths, a send address on the htmx path
-  (the plain path is a `303` back to the book). The `htmx-config` meta tag
-  in `document-head` keeps `4xx` and `5xx` in `noSwap`, so an error swaps
-  only when the element that asked names it: every form whose route answers
-  422 carries `hx-status:422="swap:outerHTML"`, `send__form` and
+  import upload and confirm, and a send address, on both paths. The
+  `htmx-config` meta tag in `document-head` keeps `4xx` and `5xx` in
+  `noSwap`, so an error swaps only when the element that asked names it:
+  every form whose route answers 422 carries
+  `hx-status:422="swap:outerHTML"`, `send__form` and
   `enrich__form` also carry `hx-status:503="swap:outerHTML"` for the
   disabled control their route answers with, and every page's `<body>`
   carries the 403 one. A route that gains an error body, 4xx or 5xx, gains
