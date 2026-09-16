@@ -17,14 +17,16 @@ import (
 // — the same progressive-enhancement split libraryHandler uses for search,
 // and for the same reason: a plain form POST with JS disabled must still
 // work, landing back on a page whose initial render (via LatestSend)
-// resumes the job it just queued.
+// resumes the job it just queued. A rejected address is the exception on
+// the plain path: it queued nothing and has a message to show, so it gets
+// the whole page at 422 rather than a redirect
 //
 // When sending is unconfigured, this still 503s with the disabled
 // fragment rather than 404ing: a stale open tab gets an explanation
 // instead of a dead link — send__form carries hx-status:503, without which
 // noSwap's 5xx would leave that tab's button doing nothing at all — and
 // cmd/server has already logged why at startup.
-func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
+func sendHandler(svc *service.Service, sendEnabled, enrichEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
 
@@ -69,18 +71,19 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 		}
 
 		fragment := isHTMXFragment(r)
-		if !fragment {
+		rejected := errors.Is(err, service.ErrInvalidAddress)
+		if !fragment && !rejected {
 			http.Redirect(w, r, "/books/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 			return
 		}
 
-		// The fragment needs the book's format to decide whether it may
-		// offer the button at all, which nothing above has loaded: the
-		// queue path read a title snapshot, and the rejection path never
-		// reached the book at all, since the address is parsed first. So
-		// this is also the rejection path's only existence check, and an
-		// unknown book is a 404 on both. Named dErr, not err: err is still
-		// QueueSend's, and the rejected-address branch below reads it.
+		// Both remaining shapes need the book: the fragment to decide from
+		// its format whether it may offer the button at all, the rejected
+		// full page to render everything around the control. Nothing above
+		// has loaded it — the queue path read a title snapshot, and the
+		// rejection path never reached the book, since the address is
+		// parsed first — so this is also the rejection path's only
+		// existence check, and an unknown book is a 404 on every path.
 		detail, dErr := svc.GetBook(r.Context(), id)
 		if dErr != nil {
 			slog.Error("get book failed", "id", id, "error", dErr)
@@ -92,20 +95,38 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 			return
 		}
 
+		if !fragment {
+			// A 303 would drop the message and what was typed, and a
+			// no-JavaScript caller has no fragment to swap in, so the whole
+			// page comes back at 422 with the control holding both — the
+			// metadataError arrangement. makeBookDetailPage reads LatestSend
+			// itself, which is what keeps a Delivered or Failed result on
+			// screen
+			page, pErr := makeBookDetailPage(r, svc, detail, true, enrichEnabled, "")
+			if pErr != nil {
+				slog.Error("build book detail page failed", "id", id, "error", pErr)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			setPageSendError(page, r)
+			if err := renderStatus(w, http.StatusUnprocessableEntity, "book.html", page); err != nil {
+				slog.Error("render template failed", "template", "book.html", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			}
+			return
+		}
+
 		page := bookDetailPage{ID: id, SendEnabled: true, SendableNote: detail.SendableNote}
 		status := http.StatusOK
-		if errors.Is(err, service.ErrInvalidAddress) {
+		if rejected {
 			// send__form carries hx-status:422, which is what lets htmx swap
 			// the rejection in past noSwap's 4xx
 			status = http.StatusUnprocessableEntity
 			// Nothing was queued, so the control has to come back showing
 			// the state it already had — re-reading it rather than passing
 			// nil, which would retract a Delivered or Failed result the
-			// user is looking at over a typo that changed nothing. The
-			// typed values ride along so the fix is an edit, not a retype.
-			page.SendError = "That doesn't look like an email address."
-			page.SendNewAddress = r.FormValue("new_address")
-			page.SendNewLabel = r.FormValue("new_label")
+			// user is looking at over a typo that changed nothing
+			setPageSendError(&page, r)
 			latest, lErr := svc.LatestSend(r.Context(), id)
 			if lErr != nil {
 				slog.Error("load send state failed", "id", id, "error", lErr)
@@ -128,6 +149,16 @@ func sendHandler(svc *service.Service, sendEnabled bool) http.HandlerFunc {
 			slog.Error("render template failed", "template", "send-control", "error", err)
 		}
 	}
+}
+
+// setPageSendError marks the send control as rejected, carrying the typed
+// values back so the fix is an edit rather than a retype. Shared by the
+// fragment and the whole page so the two cannot word the refusal
+// differently
+func setPageSendError(page *bookDetailPage, r *http.Request) {
+	page.SendError = "That doesn't look like an email address."
+	page.SendNewAddress = r.FormValue("new_address")
+	page.SendNewLabel = r.FormValue("new_label")
 }
 
 // removeRecipientHandler serves POST /recipients/remove: deleting one saved

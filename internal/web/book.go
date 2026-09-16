@@ -142,10 +142,10 @@ func bookDetailHandler(svc *service.Service, sendEnabled, enrichEnabled bool) ht
 
 // makeBookDetailPage assembles the whole detail page from a book already
 // loaded, with edit naming the field whose editor should be open (empty
-// for none). Takes the loaded detail rather than an id because both
-// callers have already fetched it — the handler to decide between 404 and
-// 200, the metadata error path to render the rest of the page around a
-// rejected value.
+// for none). Takes the loaded detail rather than an id because every
+// caller has already fetched it — the handler to decide between 404 and
+// 200, the metadata and send error paths to render the rest of the page
+// around a rejected value
 func makeBookDetailPage(r *http.Request, svc *service.Service, detail *service.BookDetail, sendEnabled, enrichEnabled bool, edit string) (*bookDetailPage, error) {
 	count, err := svc.CountBooks(r.Context())
 	if err != nil {
