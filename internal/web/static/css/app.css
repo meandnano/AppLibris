@@ -1440,10 +1440,12 @@ a.masthead__link:hover {
   margin-top: 6px;
 }
 
-/* The indicator and the button are driven by htmx-request on the closest
-   form, the same mechanism the search bar's spinner uses: no script binds
-   either, so the upload feedback works wherever htmx does and the plain
-   form post simply never shows it. */
+/* The indicator and the dimmed button are driven by htmx-request on the
+   closest form, the same mechanism the search bar's spinner uses: no
+   script binds either, so the upload feedback works wherever htmx does and
+   the plain form post simply never shows it. The dimming is the
+   appearance only — hx-disable on the form is what actually refuses a
+   second submit, since a focused button still answers Enter. */
 .import__indicator {
   display: none;
   font-family: var(--mono);
@@ -1458,7 +1460,6 @@ a.masthead__link:hover {
 
 .htmx-request .import__submit {
   opacity: 0.55;
-  pointer-events: none;
 }
 
 .import__preview {

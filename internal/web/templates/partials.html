@@ -7,9 +7,10 @@
        error never replaces the control it came from. An opt-in names the
        exact status: noSwap is consulted before the element at each step, so
        a wildcard listed here shadows an opt-in on the same wildcard.
-       defaultTimeout 0 leaves the bound to the server, whose upload and
-       confirm windows outlast htmx's own sixty-second default */}}
-  <meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"defaultTimeout":0}'>
+       includeIndicatorCSS is off because nothing here carries
+       htmx-indicator; every indicator is a rule of our own keyed on
+       htmx-request */}}
+  <meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"includeIndicatorCSS":false}'>
   <title>{{.Title}} · AppLibris</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -63,6 +64,15 @@
      handler serves both, so no separate no-JS path exists to fall out of
      sync.
 
+     hx-sync is what makes a stale grid hard to reach. htmx queues one
+     request per element and drops the rest, and a queued one carries the
+     query it was built with, so two overlapping requests are enough for
+     the grid to settle on an older string than the box holds — and the box
+     is never re-rendered to say so. replace abandons the request in flight
+     instead, which also cancels the query the server is running for a
+     keystroke nobody is waiting for. It narrows that window rather than
+     closing it, for the reason docs/notes/web.md gives.
+
      Plate 01 puts this row in the top chrome rather than in the page body:
      directly under the masthead, sharing its edges, closed by a
      --rule-faint hairline. Plate 02e dims it when the library is empty —
@@ -85,7 +95,7 @@
              data-search-input{{if .LibraryEmpty}} disabled{{end}}
              hx-get="/" hx-trigger="input changed delay:300ms, search"
              hx-target="#book-grid" hx-swap="outerHTML" hx-push-url="true"
-             hx-indicator="closest form">
+             hx-indicator="closest form" hx-sync="this:replace">
       {{/* A plain link, not a scripted button: clearing the search is
            navigating to the unfiltered library, which is what "/" already
            is. CSS hides it while the input is empty (:placeholder-shown),
@@ -468,14 +478,22 @@
 
 {{/* Both an action and an hx-post, the one markup path every other control
      here uses: with htmx loaded the panel swaps in place, and without it
-     the same handler answers a redirect to the preview's own URL.
-     hx-encoding is what makes htmx send the file rather than a urlencoded
-     field name. The indicator is driven by .htmx-request on the form, so
-     the button and the status line need no script of their own. */}}
+     the same handler answers a redirect to the preview's own URL. enctype
+     is what carries the file: htmx reads the form's own attribute, so
+     hx-encoding would only restate it. The indicator is driven by
+     .htmx-request on the form, so the button and the status line need no
+     script of their own.
+
+     hx-config gives this route htmx's timeout back as zero, since the
+     window an upload gets scales with MAX_IMPORT_SIZE and outlasts the
+     sixty seconds every other request keeps. hx-disable is the guard the
+     dimmed button only looks like: htmx disables it for the duration, so a
+     second Enter on a focused button cannot queue a second upload. */}}
 {{define "import-form"}}
 <form class="import__form" method="post" action="/import/file" enctype="multipart/form-data"
-      hx-post="/import/file" hx-encoding="multipart/form-data"
-      hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form" hx-status:422="swap:outerHTML">
+      hx-post="/import/file"
+      hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form" hx-status:422="swap:outerHTML"
+      hx-config="timeout:0" hx-disable="find button">
   <label class="import__label" for="import-file">EPUB or FB2 file</label>
   <input class="import__file" id="import-file" type="file" name="file" accept=".epub,.fb2,.fb2.zip,.zip" required>
   <p class="import__hint">Up to {{.MaxSizeLabel}}. The file is copied into the library directory under its own name.</p>
@@ -530,14 +548,19 @@
 
     <div class="import__actions">
       {{if .Importable}}
+      {{/* hx-config and hx-disable for the same two reasons the upload form
+           carries them: the confirm window is derived from
+           importer.IndexTimeout and outlasts htmx's default, and a repeated
+           confirm is a slip rather than a second import. */}}
       <form class="import__confirm-form" method="post" action="{{.ConfirmURL}}"
-            hx-post="{{.ConfirmURL}}" hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form" hx-status:422="swap:outerHTML">
+            hx-post="{{.ConfirmURL}}" hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form" hx-status:422="swap:outerHTML"
+            hx-config="timeout:0" hx-disable="find button">
         <button class="button button--lg button--primary import__submit" type="submit">Import</button>
         <span class="import__indicator" role="status">Importing &hellip;</span>
       </form>
       {{end}}
       <form class="import__discard-form" method="post" action="{{.DiscardURL}}"
-            hx-post="{{.DiscardURL}}" hx-target="#import" hx-swap="outerHTML">
+            hx-post="{{.DiscardURL}}" hx-target="#import" hx-swap="outerHTML" hx-disable="find button">
         <button class="button button--lg button--secondary" type="submit">Discard</button>
       </form>
     </div>

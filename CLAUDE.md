@@ -423,8 +423,21 @@ tidy-up would break. The note named in the heading carries the reasoning.
   never shows. The opt-in names the exact status, never a wildcard:
   `noSwap` is consulted before the element at each of the three steps, so
   an opt-in on a wildcard `noSwap` itself lists is unreachable.
-- That tag's `defaultTimeout` stays `0`: htmx 4 otherwise abandons a request
-  after 60s, and an upload or confirm outlasts that while the import lands.
+- That tag sets `includeIndicatorCSS` false: nothing carries
+  `htmx-indicator`, and every indicator is a rule of this app's own keyed on
+  `htmx-request`.
+- The request timeout is htmx's own 60s everywhere but the two import forms,
+  which carry `hx-config="timeout:0"` because an upload's window scales with
+  `MAX_IMPORT_SIZE` and a confirm's is derived from `importer.IndexTimeout`.
+  Never move that back to `defaultTimeout` on the meta tag: a hung search or
+  status poll would then have no bound and leave its indicator up.
+- Both import forms and the discard form carry `hx-disable="find button"`.
+  The dimmed button is appearance only — a focused one still answers Enter,
+  and htmx queues the second submit rather than dropping it.
+- The search input carries `hx-sync="this:replace"`. htmx queues one request
+  per element and drops the rest, and a queued one carries the query it was
+  built with, so without this the grid settles on an older string than the
+  box holds — and the box is never re-rendered to say so.
 - Every import route that can answer a fragment names both htmx headers in
   `Vary`, `GET /import` included. Every refused upload drains what is left of
   the body first.
