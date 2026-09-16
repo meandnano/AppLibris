@@ -352,6 +352,9 @@ func TestSearchBarHTMXWiringContract(t *testing.T) {
 		`hx-swap="outerHTML"`,
 		`hx-push-url="true"`,
 		`hx-indicator="closest form"`,
+		// Without it htmx queues one request and drops the rest, and the
+		// grid settles on an older query than the box holds
+		`hx-sync="this:replace"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("search input missing %s — body = %q", want, body)
@@ -367,10 +370,9 @@ func TestSearchBarHTMXWiringContract(t *testing.T) {
 	}
 }
 
-// The page, not htmx's defaults, decides that no error response is swapped
-// and that no request is abandoned in the browser. Deleting the meta tag
-// leaves every handler test green while a plain-text 500 replaces a control
-// and a slow import loses its answer
+// The page, not htmx's defaults, decides that no error response is swapped.
+// Deleting the meta tag leaves every handler test green while a plain-text
+// 500 replaces the control it came from
 func TestHTMXConfigContract(t *testing.T) {
 	handler := newTestHandlerWithBook(t, "Piranesi", []string{"Susanna Clarke"})
 
@@ -378,7 +380,7 @@ func TestHTMXConfigContract(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	want := `<meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"defaultTimeout":0}'>`
+	want := `<meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"],"includeIndicatorCSS":false}'>`
 	if body := rec.Body.String(); !strings.Contains(body, want) {
 		t.Errorf("page missing %s; body = %q", want, body)
 	}

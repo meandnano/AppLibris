@@ -338,6 +338,61 @@ func TestImportConfirmRedirectsWithoutHTMX(t *testing.T) {
 	}
 }
 
+// Each import form carries its own request timeout and its own double-submit
+// guard: htmx abandons a request after sixty seconds unless the element says
+// otherwise, and an upload's window scales with MAX_IMPORT_SIZE while a
+// confirm's is derived from importer.IndexTimeout. The dimmed button is
+// appearance only — it still answers Enter — so hx-disable is what actually
+// refuses the second press, and htmx queues rather than drops it.
+//
+// Every assertion is scoped to one form's opening tag. Three forms render
+// into one preview panel and two of them carry hx-disable, so a check
+// against the whole body passes on a neighbour's attribute.
+func TestImportFormsBoundTheirOwnRequests(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
+	uploadPage := rec.Body.String()
+
+	preview := upload(t, handler, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 0), true).Body.String()
+
+	for _, tt := range []struct {
+		class string
+		body  string
+		want  []string
+	}{
+		{"import__form", uploadPage, []string{`hx-config="timeout:0"`, `hx-disable="find button"`}},
+		{"import__confirm-form", preview, []string{`hx-config="timeout:0"`, `hx-disable="find button"`}},
+		// Discard writes nothing and answers at once, so it needs no window
+		// of its own — only the guard against a second press.
+		{"import__discard-form", preview, []string{`hx-disable="find button"`}},
+	} {
+		tag := openTag(t, tt.body, tt.class)
+		for _, want := range tt.want {
+			if !strings.Contains(tag, want) {
+				t.Errorf("the %s form is missing %s: %s", tt.class, want, tag)
+			}
+		}
+	}
+}
+
+// openTag returns the opening tag of the one element carrying class, so an
+// assertion about one form cannot be satisfied by another rendered beside it.
+func openTag(t *testing.T, body, class string) string {
+	t.Helper()
+
+	start := strings.Index(body, `class="`+class+`"`)
+	if start < 0 {
+		t.Fatalf("no element with class %q:\n%s", class, body)
+	}
+	end := strings.Index(body[start:], ">")
+	if end < 0 {
+		t.Fatalf("the tag carrying class %q is unterminated:\n%s", class, body)
+	}
+	return body[start : start+end]
+}
+
 func TestImportPreviewShowsEachVerdictAndOnlyItsButtons(t *testing.T) {
 	handler, _, _ := newImportHandler(t, 1<<20)
 	book := importEPUB(t, "Dune", "Frank Herbert", 0)
@@ -349,8 +404,8 @@ func TestImportPreviewShowsEachVerdictAndOnlyItsButtons(t *testing.T) {
 	}
 	// A refused confirm answers 422, which noSwap drops unless the confirm
 	// form itself opts it in
-	if !strings.Contains(first, `hx-target="#import" hx-swap="outerHTML" hx-indicator="closest form" hx-status:422="swap:outerHTML"`) {
-		t.Errorf("the confirm form does not opt its 422 into swapping:\n%s", first)
+	if tag := openTag(t, first, "import__confirm-form"); !strings.Contains(tag, `hx-status:422="swap:outerHTML"`) {
+		t.Errorf("the confirm form does not opt its 422 into swapping: %s", tag)
 	}
 	if strings.Contains(first, "already in the library") {
 		t.Errorf("a new book was flagged as a duplicate:\n%s", first)

@@ -183,12 +183,27 @@ has; the handler tests assert the attribute where the form renders — in the
 rejected response for a 422, on the enabled control for a 503, whose own
 refusal carries no form to put it on.
 
-The same tag sets `defaultTimeout` to `0`, so htmx never abandons a
-request of its own accord and the server's deadlines are the only bound.
-An upload's window scales with `MAX_IMPORT_SIZE` and a confirm's is at
-least `importer.IndexTimeout`, both past htmx's own sixty-second default,
-and a request abandoned in the browser would hide an import that still
-lands.
+The same tag turns `includeIndicatorCSS` off. htmx would otherwise adopt a
+stylesheet for `htmx-indicator`, a class nothing here carries; every
+indicator on these pages is a rule of this app's own keyed on the
+`htmx-request` class htmx puts on the element named by `hx-indicator`.
+
+The request timeout is scoped rather than global. htmx abandons a request
+after sixty seconds, which is right for a search or a status poll — a
+hung one would otherwise leave its indicator up forever — and wrong for
+the two import routes, whose windows are sized by the server: an upload's
+scales with `MAX_IMPORT_SIZE` and a confirm's is at least
+`importer.IndexTimeout`. Those two forms say so themselves with
+`hx-config="timeout:0"`, so the server's deadlines are the only bound
+where an abandoned request would hide an import that still lands.
+
+The same two forms, and the discard form beside them, carry
+`hx-disable="find button"`. The button dims while a request is in flight,
+but dimming is appearance: a focused button still answers Enter, and htmx
+queues a second submit rather than dropping it. `hx-disable` sets the
+`disabled` attribute for the duration, and htmx applies it after the
+request body has been read, so it cannot strip the file part it is
+guarding.
 
 ## Search
 
@@ -199,6 +214,27 @@ a debounced (`delay:300ms`) request swapping `#book-grid` with
 re-rendered, so a keystroke mid-request is never lost. `hx-push-url` keeps
 the URL shareable. With JavaScript off the same `<form method="get">`
 submits to the same handler.
+
+`hx-sync="this:replace"` is what makes a stale grid hard to reach rather
+than routine. The default queues at most one request per element and drops
+every keystroke after that, and a queued request carries the query string
+it was built with, so two overlapping requests are enough for the grid to
+settle on an older string than the box holds — and since the box is never
+re-rendered, nothing on the page says so until the next keystroke.
+`replace` abandons the request in flight instead, which also cancels the
+query the server is still running for a keystroke nobody is waiting for.
+The cost is a console error per superseded request, since htmx logs every
+rejected fetch including the ones it aborted itself.
+
+It narrows that window without closing it. htmx releases the element's
+sync slot from whichever request finishes, with no check that the one
+finishing still owns it, and an aborted request runs that release like any
+other — so the request that did the aborting has its own slot cleared out
+from under it, and a third keystroke a debounce period later starts
+alongside rather than replacing it. Two concurrent requests answering out
+of order leave the same stale grid. Reaching it takes three overlapping
+requests where the default took two, which is why the answer is this
+attribute and not a patched copy of the vendored htmx.
 
 Three affordances resolve in the browser because the input is never
 re-rendered: the `clear ×` link (a plain `href="/"`, hidden by CSS while
