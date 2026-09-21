@@ -94,6 +94,35 @@ type importPreviewView struct {
 	DiscardURL string
 }
 
+// importDropView is the library page's drop target: what drop.js needs to
+// refuse a drop before uploading it, and the sentences it shows when it does.
+// The refusals are composed here so the script only reveals them
+type importDropView struct {
+	MaxBytes     int64
+	TooLargeLine string
+	NotOneLine   string
+}
+
+// dropOneFileLine refuses several files or a folder, since a stage holds
+// exactly one book and its preview shows exactly one verdict
+const dropOneFileLine = "Drop one book file at a time."
+
+// importDropViewFor is nil when importing is unavailable, so the library page
+// renders no target at all rather than one whose upload is refused
+//
+// The too-large line is the server's own refusal, so a drop the script stops
+// early reads exactly as one the importer would have stopped
+func importDropViewFor(svc *service.Service) *importDropView {
+	if !svc.ImportEnabled() {
+		return nil
+	}
+	return &importDropView{
+		MaxBytes:     svc.MaxImportBytes(),
+		TooLargeLine: importFailureLine(importer.ErrTooLarge, svc.MaxImportBytes()),
+		NotOneLine:   dropOneFileLine,
+	}
+}
+
 // importHandler serves GET /import: the page holding the file input, or the
 // panel alone for an htmx caller — so it names both headers in Vary, like
 // every other route whose body depends on them.

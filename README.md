@@ -127,7 +127,8 @@ the log naming `REQUIRE_FETCH_METADATA`.
 
 ### Importing a book
 
-The Import page uploads one EPUB or FB2 at a time. The file is held in a
+The Import page uploads one EPUB or FB2 at a time; dropping a file onto
+the library page does the same and opens its preview. The file is held in a
 temporary directory (`applibris-imports` under the standard `TMPDIR`, which
 is `/tmp` in the container) while you look at the preview, and is copied
 into the root of `/library` under its own name only when you press Import.

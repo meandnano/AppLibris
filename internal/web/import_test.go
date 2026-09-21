@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"html"
 	"image"
 	"image/color"
 	"image/png"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -806,5 +808,82 @@ func TestConfirmWindowOutlastsTheImportersOwnBudget(t *testing.T) {
 	}
 	if got <= uploadWindow(64<<20)+importer.IndexTimeout {
 		t.Errorf("confirmWindow = %s, want room to render the response past the copy and the index", got)
+	}
+}
+
+func TestLibraryPageIsADropTargetWhenImportIsEnabled(t *testing.T) {
+	const maxSize = 1 << 20
+	handler, _, _ := newImportHandler(t, maxSize)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `data-max-bytes="`+strconv.Itoa(maxSize)+`"`) {
+		t.Errorf("the drop target does not carry the import cap:\n%s", body)
+	}
+	// A plain form, so the drop is the no-JS upload and htmx never takes it
+	form := openTag(t, body, "drop__form")
+	for _, want := range []string{`method="post"`, `action="/import/file"`, `enctype="multipart/form-data"`} {
+		if !strings.Contains(form, want) {
+			t.Errorf("the drop form lacks %s: %s", want, form)
+		}
+	}
+	if strings.Contains(form, "hx-") {
+		t.Errorf("the drop form carries an htmx attribute: %s", form)
+	}
+	tooLarge := importFailureLine(importer.ErrTooLarge, maxSize)
+	if !strings.Contains(body, html.EscapeString(tooLarge)) {
+		t.Errorf("the drop target does not carry the server's own too-large refusal %q:\n%s", tooLarge, body)
+	}
+	if !strings.Contains(body, dropOneFileLine) {
+		t.Errorf("the drop target does not carry the one-file refusal:\n%s", body)
+	}
+	if !strings.Contains(body, "Or drag a book file onto this page") {
+		t.Errorf("the empty library does not mention dropping a file:\n%s", body)
+	}
+	if !strings.Contains(body, `src="/static/js/drop.js"`) {
+		t.Errorf("the library page does not load drop.js:\n%s", body)
+	}
+}
+
+func TestLibraryPageIsNoDropTargetWhenImportIsDisabled(t *testing.T) {
+	handler, _, _ := newImportHandlerWritable(t, 1<<20, false)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+
+	if strings.Contains(body, "data-import-drop") {
+		t.Errorf("a read-only library renders a drop target:\n%s", body)
+	}
+	if strings.Contains(body, "Or drag a book file onto this page") {
+		t.Errorf("a read-only library offers dropping a file:\n%s", body)
+	}
+}
+
+// The grid fragment is what a search swaps in, so a target inside it would be
+// duplicated or lost on every keystroke
+func TestLibraryGridFragmentCarriesNoDropTarget(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	for _, path := range []string{"/", "/?q=dune"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("HX-Request", "true")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if body := rec.Body.String(); strings.Contains(body, "data-import-drop") {
+			t.Errorf("the %s fragment carries the drop target:\n%s", path, body)
+		}
+	}
+}
+
+func TestImportFormPointsAtTheDropTarget(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
+	if body := rec.Body.String(); !strings.Contains(body, `drop a file on the <a href="/">library page</a>`) {
+		t.Errorf("the import form does not mention dropping on the library page:\n%s", body)
 	}
 }

@@ -483,6 +483,38 @@ a.masthead__link:hover {
   text-wrap: pretty;
 }
 
+/* Above the sticky masthead, since a drop anywhere on the page counts */
+.drop__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  outline: 2px dashed var(--fg-muted);
+  outline-offset: -16px;
+  pointer-events: none;
+}
+
+.drop__overlay[hidden] {
+  display: none;
+}
+
+.drop__prompt {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 26px;
+  text-align: center;
+}
+
+.drop__error {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  color: var(--err);
+}
+
 /* ---------- book detail ---------- */
 
 /* SCREENS.md 03 gives this page its own page padding (40px 44px 48px),

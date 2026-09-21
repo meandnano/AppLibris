@@ -323,10 +323,37 @@ than read as "no limit": the cap is what bounds an upload into temporary
 space, and a deployment that means to disable importing takes away write
 access to the library, which is the thing the app actually checks.
 
+## Dropping a file on the library page
+
+A file dropped anywhere on the library page is the upload form's own post.
+`drop.js` puts it into a hidden plain form — `action="/import/file"`,
+`enctype="multipart/form-data"`, no `hx-post` — and calls `form.submit()`,
+so the route answers exactly as it answers with JavaScript off: a 303 to
+`/import/{id}` whose page shows the verdict, or a 422 carrying the Import
+page with the refusal and the file input. There is no second upload path,
+no second preview and no second response shape to keep in step with the
+first, and every bound above applies unchanged. A fetch or an htmx request
+would need its own answer for each of those; a native submit needs none.
+
+The script refuses two things before a byte is sent. Several files, or a
+folder, because a stage holds one book and its page shows one verdict. And
+a file over the cap, since a body far past the limit is the one case whose
+422 can be lost while the rest of it is still in flight (see above). The
+cap and both sentences come from the page: the too-large one is
+`importFailureLine`'s, so a drop stopped early reads exactly as one the
+importer stopped. The server's count remains the check; the script's only
+spares the upload. The filename is not examined — `detectSuffix` decides,
+and its refusal already says what the file is not.
+
+The target is the library page alone, rendered only when a `Stager`
+exists, and from `library.html` rather than the `book-grid` fragment a
+search swaps in. On a book's own page a drop would read as replacing that
+book's file, which is not what it does.
+
 ## What is deliberately absent
 
-- **Importing from a URL, and drag and drop.** Both reuse this machinery
-  unchanged and are their own steps.
+- **Importing from a URL.** It reuses this machinery unchanged and is its
+  own step.
 - **A programmatic API.** Deferred; the obstacle is in
   `docs/notes/design.md`. Every state-changing route refuses a request
   carrying no `Sec-Fetch-Site`, which a non-browser client never sends.

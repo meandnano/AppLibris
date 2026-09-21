@@ -54,6 +54,7 @@
 <script src="/static/js/htmx.min.js" defer></script>
 <script src="/static/js/search.js" defer></script>
 <script src="/static/js/edit.js" defer></script>
+<script src="/static/js/drop.js" defer></script>
 {{end}}
 
 {{/* The input is never itself re-rendered by htmx — only #book-grid below
@@ -151,6 +152,7 @@
   <div class="empty">
     <h2 class="empty__title">No books yet</h2>
     <p class="empty__body">Drop EPUB or FB2 files into your library directory. The next scan picks them up.</p>
+    {{if .ImportDrop}}<p class="empty__body">Or drag a book file onto this page to import it.</p>{{end}}
   </div>
   {{end}}
 </div>
@@ -476,6 +478,27 @@
 </div>
 {{end}}
 
+{{/* The library page's drop target. drop.js fills the hidden form with the
+     dropped file and submits it natively, so the drop is the no-JS upload
+     itself: the same route answers with the preview's 303 or the Import
+     page's 422, and every bound on the upload applies unchanged. The form
+     carries no hx-post for that reason. Included only from library.html and
+     never from book-grid, whose fragment a search swaps in. Every sentence
+     is here or composed in the handler; the script only reveals them. */}}
+{{define "import-drop"}}
+<div class="drop" data-import-drop data-max-bytes="{{.MaxBytes}}">
+  <form class="drop__form" method="post" action="/import/file" enctype="multipart/form-data" hidden>
+    <input type="file" name="file" tabindex="-1">
+  </form>
+  <div class="drop__overlay" data-drop-overlay hidden>
+    <p class="drop__prompt" data-drop-state="ready">Drop to import</p>
+    <p class="drop__prompt" data-drop-state="uploading" hidden>Uploading &hellip;</p>
+  </div>
+  <p class="drop__error" role="alert" data-drop-refusal="too-large" hidden>{{.TooLargeLine}}</p>
+  <p class="drop__error" role="alert" data-drop-refusal="not-one" hidden>{{.NotOneLine}}</p>
+</div>
+{{end}}
+
 {{/* Both an action and an hx-post, the one markup path every other control
      here uses: with htmx loaded the panel swaps in place, and without it
      the same handler answers a redirect to the preview's own URL. enctype
@@ -496,7 +519,7 @@
       hx-config="timeout:0" hx-disable="find button">
   <label class="import__label" for="import-file">EPUB or FB2 file</label>
   <input class="import__file" id="import-file" type="file" name="file" accept=".epub,.fb2,.fb2.zip,.zip" required>
-  <p class="import__hint">Up to {{.MaxSizeLabel}}. The file is copied into the library directory under its own name.</p>
+  <p class="import__hint">Up to {{.MaxSizeLabel}}. The file is copied into the library directory under its own name. You can also drop a file on the <a href="/">library page</a>.</p>
   <div class="import__actions">
     <button class="button button--lg button--primary import__submit" type="submit">Upload</button>
     <span class="import__indicator" role="status">Uploading &hellip;</span>

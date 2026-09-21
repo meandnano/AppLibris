@@ -82,7 +82,8 @@ here. See Documentation below for what these files may and may not say.
   /books/{id}/enrichment/{jobID}`, `POST /recipients/remove`,
   `GET /history`, `GET /import`, `POST /import/file`, `GET /import/{id}`,
   `GET /import/{id}/cover`, `POST /import/{id}/confirm`, `POST
-  /import/{id}/discard`, `/static/`, `/covers/`. The UI is translated from mockups
+  /import/{id}/discard`, `/static/`, `/covers/`. The library page is also
+  a drop target for import (`static/js/drop.js`). The UI is translated from mockups
   kept as `UI.md` and `ui-handoff/` on the `init` branch. Note:
   `docs/notes/web.md`.
 - `docs/notes/design.md` — purpose, constraints, the library-directory
@@ -393,6 +394,13 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Whether the nav offers Import comes from `svc.ImportEnabled()`, not from
   a flag threaded down beside `sendEnabled` and `enrichEnabled`: those two
   are configuration the service never sees, where the importer is its own.
+- A file dropped on the library page is the upload form's own post:
+  `drop.js` fills the hidden `drop__form` and calls `form.submit()`. Never a
+  fetch or an htmx request, and the form never gains `hx-post` — the
+  redirect to the preview and the 422 page are what the drop relies on.
+  `import-drop` is included only from `library.html`, never from
+  `book-grid`, whose fragment a search swaps in. Every sentence it shows is
+  composed server-side, the too-large one through `importFailureLine`.
 - The write probe runs once at startup. A per-request check would answer
   differently only when confirm is about to report its own error.
 - A repeated confirm answers the first call's book id rather than copying

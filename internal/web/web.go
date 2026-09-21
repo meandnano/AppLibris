@@ -290,6 +290,11 @@ type libraryPage struct {
 	// needs nothing: its box is non-empty, so the clear link is already
 	// showing and already means the right thing.
 	AtCursor bool
+
+	// ImportDrop is nil when importing is unavailable. It renders only in
+	// library.html, never in the book-grid fragment, so a search swap
+	// neither duplicates the target nor removes it
+	ImportDrop *importDropView
 }
 
 // pageSize is how many cards one page of the grid carries, and how many a
@@ -409,6 +414,7 @@ func libraryHandler(svc *service.Service) http.HandlerFunc {
 			SearchSummary:   searchSummary(result.MatchCount, total, result.Fields),
 			LibraryEmpty:    total == 0,
 			SearchMaxLength: storage.MaxSearchBytes,
+			ImportDrop:      importDropViewFor(svc),
 		}
 		remaining := total
 		if result.Searched {
