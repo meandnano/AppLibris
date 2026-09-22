@@ -531,7 +531,9 @@ tidy-up would break. The note named in the heading carries the reasoning.
 - Provider-client fixtures live under `testdata`. A fixture is a live
   capture or is labelled otherwise at the top of its test file.
 - `go test ./...` must pass; CI also runs `go vet` with `-race` and builds
-  the image.
+  the image. `.github/workflows/verify.yaml` runs on every pull request
+  **and** on every push to `master`, the second only so a build cache
+  exists in a scope pull requests can restore from.
 - A `v*` tag publishes: `.github/workflows/publish.yaml` runs the tests, builds
   `linux/amd64` and `linux/arm64` on a runner each, pushes both to
   `ghcr.io/meandnano/applibris` by digest, joins them into one manifest list

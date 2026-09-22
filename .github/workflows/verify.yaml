@@ -2,6 +2,12 @@ name: verify
 
 on:
   pull_request:
+  # A run can restore a cache saved on its own ref or on the base branch,
+  # never another pull request's, so without this nothing ever saves one in
+  # master's scope and every pull request's first run compiles the -race
+  # build of every dependency from nothing.
+  push:
+    branches: [master]
 
 permissions:
   contents: read
