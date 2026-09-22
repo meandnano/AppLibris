@@ -49,8 +49,32 @@ taken unless runner minutes start to matter.
 1. **Measure what a warm cache is worth first.** Re-run PR #88's `verify`
    before changing anything. Its first run saved a PR-scoped cache, so the
    re-run's Test and Vet steps show the warm figure against the cold one.
+
+   **Measured** from PR #88's existing runs — no re-run was needed, its
+   second and third runs already hit their own PR-scoped cache:
+
+   | | Vet | Test |
+   |---|---|---|
+   | first run, cold | 23 s | 2m13s |
+   | later run, warm | 0 s | 27 s |
+
+   So a warm cache is worth about 106 s on Test and the whole of Vet.
+
+   `2026092202`'s own effect, which this plan waited on, is the cold-to-cold
+   comparison: PR #89's first run took 32 s and 1m22s against those same
+   23 s and 2m13s. Test fell 38%, matching the 39% the local CPU sum
+   predicted; Vet rose, because `storagetest` is one more package to compile
+   and Vet is where the plain build gets filled.
+
+   Note the two do not simply add. Most of what a warm cache saves is the
+   dependency build, which `2026092202` never touched, and most of what
+   `2026092202` saved is test execution, which no cache removes.
 2. After merging, check that the `master` run's post-setup-go step logs
    "Cache saved with the key".
 3. Check that the next PR's first run logs "Cache restored from key".
 4. Compare that run's Vet and Test steps with the cold figures recorded in
    `2026092202` when it was completed.
+
+Steps 2 to 4 are measurable only after this merges: the first `master` run
+is what saves the cache, and the pull request after it is what restores it.
+Record those figures in the pull request rather than here.
