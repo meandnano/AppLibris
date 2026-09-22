@@ -296,12 +296,12 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 - Create: `internal/importer/fetch_test.go`
 - Create: `internal/importer/export_test.go`
 
-- [ ] implement `NewFetcher`, `Fetch`, `Download`, `StatusError` per Technical Details (transport, redirect policy, no `Referer`, no jar, `Proxy: nil`)
-- [ ] implement the name derivation: `Content-Disposition` (`filename*`, `filename`), URL path segment, empty
-- [ ] write tests on `httptest.NewTestServer` with the production client handed `server.Client().Transport`: 200 body returned unread, name cases, `HTML` flag
-- [ ] write error-case tests: redirect cap, redirect to a non-http scheme, `Content-Length` over cap refused with no body read, non-200 → `*StatusError`, no `Referer` or cookie on a redirected hop
-- [ ] write a real-socket (`Start`) test pinning that the production `Fetcher` refuses a loopback server
-- [ ] run tests - must pass before task 3
+- [x] implement `NewFetcher`, `Fetch`, `Download`, `StatusError` per Technical Details (transport, redirect policy, no `Referer`, no jar, `Proxy: nil`)
+- [x] implement the name derivation: `Content-Disposition` (`filename*`, `filename`), URL path segment, empty
+- [x] write tests on `httptest.NewTestServer` with the production client handed `server.Client().Transport`: 200 body returned unread, name cases, `HTML` flag
+- [x] write error-case tests: redirect cap, redirect to a non-http scheme, `Content-Length` over cap refused with no body read, non-200 → `*StatusError`, no `Referer` or cookie on a redirected hop
+- [x] write a real-socket (`Start`) test pinning that the production `Fetcher` refuses a loopback server
+- [x] run tests - must pass before task 3
 
 ### Task 3: Add `service.StageURL`
 
