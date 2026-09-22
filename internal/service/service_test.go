@@ -3,25 +3,15 @@ package service
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
-func openTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
-
 func TestListBooksAssemblesAuthors(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -71,7 +61,7 @@ func TestListBooksAssemblesAuthors(t *testing.T) {
 // CountFilesByBook omits a book with one location rather than mapping it to
 // zero, and ListBooks must turn that absence into 1, not 0.
 func TestListBooksReportsLocations(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
@@ -113,7 +103,7 @@ func TestListBooksReportsLocations(t *testing.T) {
 // SearchBooks off from their shared summarize helper could silently drop
 // the marker from search results only.
 func TestSearchBooksReportsLocations(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
@@ -136,7 +126,7 @@ func TestSearchBooksReportsLocations(t *testing.T) {
 }
 
 func TestSearchBooksBlankQueryReturnsFullList(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -159,7 +149,7 @@ func TestSearchBooksBlankQueryReturnsFullList(t *testing.T) {
 }
 
 func TestSearchBooksMatchReturnsSummaryWithAuthors(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -190,7 +180,7 @@ func TestSearchBooksMatchReturnsSummaryWithAuthors(t *testing.T) {
 }
 
 func TestCountBooksIsUnaffectedBySearchFilter(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -211,7 +201,7 @@ func TestCountBooksIsUnaffectedBySearchFilter(t *testing.T) {
 }
 
 func TestGetBookAssemblesFullDetail(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 	mtime := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
@@ -288,7 +278,7 @@ func TestGetBookAssemblesFullDetail(t *testing.T) {
 // thing from a size of zero — the transport renders an em dash for the
 // first and "0 B" for the second, and only HasFileSize tells them apart.
 func TestGetBookReportsNoFileSizeWithoutLocations(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -316,7 +306,7 @@ func TestGetBookReportsNoFileSizeWithoutLocations(t *testing.T) {
 
 // The counterpart: a real zero-byte file is a known size.
 func TestGetBookReportsZeroByteLocationAsAKnownSize(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -340,7 +330,7 @@ func TestGetBookReportsZeroByteLocationAsAKnownSize(t *testing.T) {
 }
 
 func TestGetBookUnknownIDReturnsNilNil(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -354,7 +344,7 @@ func TestGetBookUnknownIDReturnsNilNil(t *testing.T) {
 }
 
 func TestQueueSendInvalidAddressQueuesNothing(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -381,7 +371,7 @@ func TestQueueSendInvalidAddressQueuesNothing(t *testing.T) {
 }
 
 func TestQueueSendValidAddressCreatesRecipientAndCallsNotify(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -438,7 +428,7 @@ func TestQueueSendValidAddressCreatesRecipientAndCallsNotify(t *testing.T) {
 }
 
 func TestQueueSendTwiceForTheSamePendingSendCallsNotifyOnce(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -470,7 +460,7 @@ func TestQueueSendTwiceForTheSamePendingSendCallsNotifyOnce(t *testing.T) {
 }
 
 func TestQueueSendUnknownBookReturnsNilNil(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -484,7 +474,7 @@ func TestQueueSendUnknownBookReturnsNilNil(t *testing.T) {
 }
 
 func TestLatestSendUnsentBookReturnsNilNil(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -515,19 +505,18 @@ func enqueueSendsAt(t *testing.T, db *storage.DB, now time.Time, n int) {
 	if err != nil {
 		t.Fatalf("CreateBook: %v", err)
 	}
-	for i := 0; i < n; i++ {
-		at := now.Add(-time.Duration(n-1-i) * time.Second)
-		if _, _, err := db.EnqueueSend(ctx, id, "Book", "reader"+itoa(i)+"@kindle.com", at); err != nil {
-			t.Fatalf("EnqueueSend %d: %v", i, err)
-		}
+	at := make([]time.Time, n)
+	for i := range at {
+		at[i] = now.Add(-time.Duration(n-1-i) * time.Second)
 	}
+	storagetest.SeedSends(t, db, id, "Book", at)
 }
 
 func TestSendHistoryReportsTruncatedOnlyWhenCapBites(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 
 	t.Run("cap-1 rows", func(t *testing.T) {
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		svc := New(db)
 		svc.now = func() time.Time { return now }
 		enqueueSendsAt(t, db, now, SendHistoryLimit-1)
@@ -545,7 +534,7 @@ func TestSendHistoryReportsTruncatedOnlyWhenCapBites(t *testing.T) {
 	})
 
 	t.Run("cap+1 rows", func(t *testing.T) {
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		svc := New(db)
 		svc.now = func() time.Time { return now }
 		enqueueSendsAt(t, db, now, SendHistoryLimit+1)
@@ -564,7 +553,7 @@ func TestSendHistoryReportsTruncatedOnlyWhenCapBites(t *testing.T) {
 }
 
 func TestSendHistoryWindowIsMeasuredFromTheServiceClock(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
@@ -597,7 +586,7 @@ func TestSendHistoryWindowIsMeasuredFromTheServiceClock(t *testing.T) {
 // sendStateFrom and sendRecordFrom now share sendAt — a regression to
 // either would break only one of the two screens.
 func TestSendHistoryAtIsFinishedAtForTerminalAndQueuedAtForPending(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
@@ -649,7 +638,7 @@ func TestSendHistoryAtIsFinishedAtForTerminalAndQueuedAtForPending(t *testing.T)
 }
 
 func TestRemoveRecipient(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -683,7 +672,7 @@ func TestRemoveRecipient(t *testing.T) {
 }
 
 func TestEnrichBookQueuesAndNotifies(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 	poked := 0
@@ -719,7 +708,7 @@ func TestEnrichBookQueuesAndNotifies(t *testing.T) {
 // makes no second promise — but the caller still wants the job the book
 // actually has back, not nil.
 func TestEnrichBookTwiceReturnsTheSameQueuedJob(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -745,7 +734,7 @@ func TestEnrichBookTwiceReturnsTheSameQueuedJob(t *testing.T) {
 }
 
 func TestEnrichBookUnknownBookIsNotAnError(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	svc := New(db)
 	svc.NotifyEnrichment = func() { t.Error("notified for a book that does not exist") }
 
@@ -759,7 +748,7 @@ func TestEnrichBookUnknownBookIsNotAnError(t *testing.T) {
 }
 
 func TestEnrichmentStateSplitsUpdatedFields(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -791,7 +780,7 @@ func TestEnrichmentStateSplitsUpdatedFields(t *testing.T) {
 }
 
 func TestEnrichmentStateUnknownJobIsNotAnError(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	svc := New(db)
 	state, err := svc.EnrichmentState(context.Background(), 9999)
 	if err != nil {
@@ -803,7 +792,7 @@ func TestEnrichmentStateUnknownJobIsNotAnError(t *testing.T) {
 }
 
 func TestLatestEnrichmentNoJob(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "enr-4", Title: "Book", SortTitle: "book"}, nil)
@@ -821,7 +810,7 @@ func TestLatestEnrichmentNoJob(t *testing.T) {
 
 // The detail page needs provenance to render Decision 1's markers.
 func TestGetBookCarriesFieldSources(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 
@@ -871,7 +860,7 @@ func TestSendableFormat(t *testing.T) {
 }
 
 func TestGetBookReportsSendability(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	svc := New(db)
 

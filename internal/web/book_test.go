@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -12,14 +11,11 @@ import (
 
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 func TestBookDetailHandlerRendersFullMetadata(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	ctx := context.Background()
 	id, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{
@@ -84,11 +80,7 @@ func TestBookDetailHandlerRendersFullMetadata(t *testing.T) {
 // without one still has to hold the layout: plate 04 draws the dashed
 // "no cover" box at the same footprint as a real cover.
 func TestBookDetailHandlerRendersNoCoverBox(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	id, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: "hash-1", Title: "No Cover", SortTitle: "No Cover", Format: "fb2",
@@ -116,11 +108,7 @@ func TestBookDetailHandlerRendersNoCoverBox(t *testing.T) {
 // swapping in the grid's "and N others" helper, sorting the names, or
 // dropping the tail all have to fail.
 func TestBookDetailHandlerRendersEveryAuthorInSourceOrder(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	// Deliberately not alphabetical, so a sort is distinguishable from the
 	// source order the file credited.
@@ -152,11 +140,7 @@ func TestBookDetailHandlerRendersEveryAuthorInSourceOrder(t *testing.T) {
 }
 
 func TestBookDetailHandlerSparseMetadataShowsEmDashRows(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	id, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: "hash-1",
@@ -195,11 +179,7 @@ func TestBookDetailHandlerSparseMetadataShowsEmDashRows(t *testing.T) {
 }
 
 func TestBookDetailHandler404sOnNonNumericAndUnknownID(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -215,11 +195,7 @@ func TestBookDetailHandler404sOnNonNumericAndUnknownID(t *testing.T) {
 }
 
 func TestGridCardsLinkToBookDetail(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	id, err := db.CreateBook(context.Background(), storage.Book{
 		ContentHash: "hash-1", Title: "A Book", SortTitle: "A Book", Format: "epub",
@@ -240,11 +216,7 @@ func TestGridCardsLinkToBookDetail(t *testing.T) {
 }
 
 func TestBookDetailHandlerShowsLocationsAndMissingAnnotation(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	mtime := time.Now()
 
@@ -309,11 +281,7 @@ func TestBookDetailHandlerShowsLocationsAndMissingAnnotation(t *testing.T) {
 // documents. The size is unknown there, which is not the same as a
 // zero-byte file, and the page must not claim "0 B".
 func TestBookDetailHandlerRendersNoSizeWhenBookHasNoLocation(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	id, err := db.CreateBook(context.Background(), storage.Book{
 		ContentHash: "hash-1", Title: "No Locations", SortTitle: "No Locations", Format: "epub",
@@ -347,11 +315,7 @@ func TestBookDetailHandlerRendersNoSizeWhenBookHasNoLocation(t *testing.T) {
 
 // The counterpart: a location that really is zero bytes still reads "0 B".
 func TestBookDetailHandlerRendersZeroByteFileAsZeroBytes(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	id, _, _, _, err := db.CreateBookWithFile(context.Background(), storage.Book{
 		ContentHash: "hash-1", Title: "Empty File", SortTitle: "Empty File", Format: "epub",

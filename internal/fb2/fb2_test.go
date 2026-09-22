@@ -626,7 +626,10 @@ func TestReadMetadataKeepsCoverBinaryExactlyAtTheCap(t *testing.T) {
 // non-cover binary costs the tokeniser alone, and reading it as the cover
 // may add only the capped copy (with its own doublings), never the node
 func TestReadMetadataOverCapCoverBinaryCostsOnlyTheCappedCopy(t *testing.T) {
-	encoded := base64.StdEncoding.EncodeToString(make([]byte, 32<<20))
+	// Twice maxCoverBase64Bytes once encoded, so the regression lands at
+	// twice the bound: three copies of it is 67 MB against a limit of
+	// 33.5 MB. Do not shrink it further.
+	encoded := base64.StdEncoding.EncodeToString(make([]byte, 16<<20))
 	small := base64.StdEncoding.EncodeToString([]byte("small cover"))
 	asCover := buildTestFB2(t, fb2WithBinaries("Over Cap", [][2]string{{"cover.jpg", encoded}}))
 	skipped := buildTestFB2(t, fb2WithBinaries("Skipped", [][2]string{{"other.jpg", encoded}, {"cover.jpg", small}}))

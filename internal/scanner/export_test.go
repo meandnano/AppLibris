@@ -24,8 +24,6 @@ func CapValue(path string, field storage.MetadataField, value string) string {
 	return capValue(path, field, value)
 }
 
-func OpenTestDB(t *testing.T) *storage.DB { return openTestDB(t) }
-
 func WriteTestEPUBWithOPF(t *testing.T, path, opfXML string) {
 	writeTestEPUBWithOPF(t, path, opfXML)
 }

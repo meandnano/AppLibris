@@ -7,23 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
-
-func newPagingTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
 
 // seedBooks creates n books whose sort_titles order predictably —
 // "book 000" through "book NNN" — so a test can name which page a given
@@ -58,7 +48,7 @@ func countCards(body string) int {
 }
 
 func TestLibraryPageIsBoundedAndCarriesATrigger(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+10, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -84,7 +74,7 @@ func TestLibraryPageIsBoundedAndCarriesATrigger(t *testing.T) {
 // thing that worked here at all, so losing the href would make the no-JS
 // case strictly worse than before paging.
 func TestTriggerCarriesBothAnHrefAndHTMXAttributes(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+1, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -112,7 +102,7 @@ func TestTriggerCarriesBothAnHrefAndHTMXAttributes(t *testing.T) {
 // than simulating the swap. So the structure is asserted instead: the
 // element that replaces itself must be the <li> that is being replaced.
 func TestTriggerSwapsTheListItemNotTheLinkInsideIt(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+1, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -129,7 +119,7 @@ func TestTriggerSwapsTheListItemNotTheLinkInsideIt(t *testing.T) {
 }
 
 func TestLastPageCarriesNoTrigger(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, 3, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -146,7 +136,7 @@ func TestLastPageCarriesNoTrigger(t *testing.T) {
 // test that would catch an off-by-one at the page boundary, which is
 // invisible with a single page of books.
 func TestPagingThroughTheWholeLibrarySeesEachBookOnce(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	const total = pageSize*2 + 7
 	seedBooks(t, db, total, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
@@ -182,7 +172,7 @@ func TestPagingThroughTheWholeLibrarySeesEachBookOnce(t *testing.T) {
 // the trigger in place, so a #book-grid wrapper would nest one grid inside
 // another.
 func TestAppendResponseIsCardsOnly(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+5, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -204,7 +194,7 @@ func TestAppendResponseIsCardsOnly(t *testing.T) {
 }
 
 func TestSearchResultsPageAndCarryTheQuery(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+10, "novel")
 	seedBooks(t, db, 3, "other")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
@@ -239,7 +229,7 @@ func TestSearchResultsPageAndCarryTheQuery(t *testing.T) {
 // by construction. A stale trigger left behind would append page two of
 // the *previous* query — invisible until it breaks, hence the test.
 func TestNewSearchResetsPaging(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+10, "novel")
 	seedBooks(t, db, pageSize+10, "essay")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
@@ -270,7 +260,7 @@ func TestNewSearchResetsPaging(t *testing.T) {
 // The no-JS path: following the plain href yields a whole page whose grid
 // starts at the cursor.
 func TestPlainNavigationToTheNextPageRendersAWholePage(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+5, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -297,7 +287,7 @@ func TestPlainNavigationToTheNextPageRendersAWholePage(t *testing.T) {
 // A mangled cursor names no resource, so it shows the library rather than
 // 400ing — the same call ?edit= makes on the book page.
 func TestMalformedCursorFallsBackToTheFirstPage(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, 3, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -377,7 +367,7 @@ func cardIDs(body string) []string {
 // paging test here uses a non-multiple, which is why this one is spelled
 // out — a "<" where the code has "<=" survives all of them.
 func TestExactMultipleOfPageSizeHasNoTrigger(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -394,7 +384,7 @@ func TestExactMultipleOfPageSizeHasNoTrigger(t *testing.T) {
 // the regression CountSearchBooks was added to prevent: taking the count
 // from the rendered cards reads "48 of 61" for a search that matched 58.
 func TestSearchResultsLineCountsMatchesNotThePage(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+10, "novel")
 	seedBooks(t, db, 5, "other")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
@@ -416,7 +406,7 @@ func TestSearchResultsLineCountsMatchesNotThePage(t *testing.T) {
 // them identical, so a cursor built from the wrong field works there and
 // breaks on real data.
 func TestCursorUsesSortTitleNotTitle(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	// Titles and sort_titles diverge exactly as the scanner derives them.
 	for i := 0; i <= pageSize; i++ {
@@ -456,7 +446,7 @@ func TestCursorUsesSortTitleNotTitle(t *testing.T) {
 // while the search box shows its placeholder — which is precisely the
 // state a deep unfiltered page is in.
 func TestDeepPageKeepsALinkBackToTheStart(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+5, "x")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -478,7 +468,7 @@ func TestDeepPageKeepsALinkBackToTheStart(t *testing.T) {
 // The first page needs no such link, and a searched page already has one
 // that means the right thing.
 func TestClearLinkIsUnchangedOnTheFirstPageAndOnASearch(t *testing.T) {
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+5, "novel")
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 

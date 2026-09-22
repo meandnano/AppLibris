@@ -167,16 +167,6 @@ func writeFile(t *testing.T, path string, data []byte) string {
 	return path
 }
 
-func openTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
-
 // testStager builds a Stager over a fresh library, covers and staging
 // directory, with the given cap. The clock is a pointer the caller moves,
 // so expiry is asserted without waiting for it.

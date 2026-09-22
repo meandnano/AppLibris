@@ -14,6 +14,7 @@ import (
 
 	"library/internal/importer"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 const importContainerXML = `<?xml version="1.0"?>
@@ -61,11 +62,7 @@ func importTestEPUB(t *testing.T, title, author string) []byte {
 func newImportTestService(t *testing.T) (*Service, *storage.DB, string) {
 	t.Helper()
 
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	root := t.TempDir()
 	libraryDir := filepath.Join(root, "library")
@@ -231,11 +228,7 @@ func TestStagedImportOfAnUnknownIDIsNotAnError(t *testing.T) {
 // import method rather than panicking on a nil field.
 func TestEveryImportMethodRefusesWithoutAnImporter(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	svc := New(db)
 
@@ -266,11 +259,7 @@ func TestEveryImportMethodRefusesWithoutAnImporter(t *testing.T) {
 // A Stager exists exactly when importing is available: cmd/server builds
 // one only for a writable library, so there is no disabled Stager to ask.
 func TestImportEnabledFollowsWhetherAStagerWasGiven(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	root := t.TempDir()
 	stager, err := importer.New(db, importer.Options{

@@ -11,6 +11,7 @@ import (
 
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 // enrichRoutes builds the mux with enrichment on and sending off — the
@@ -31,7 +32,7 @@ func postEnrich(handler http.Handler, id int64, hx bool) *httptest.ResponseRecor
 }
 
 func TestEnrichHandlerEnqueuesAndReturnsPendingFragment(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 
@@ -60,7 +61,7 @@ func TestEnrichHandlerEnqueuesAndReturnsPendingFragment(t *testing.T) {
 // trigger at all, so htmx stops asking by construction rather than because
 // something counted the attempts.
 func TestEnrichTerminalFragmentCarriesNoPollTrigger(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 	ctx := context.Background()
@@ -98,7 +99,7 @@ func getEnrichmentStatus(handler http.Handler, bookID, jobID int64) *httptest.Re
 
 // The result names what moved, so nobody has to hunt the page for it.
 func TestEnrichResultNamesTheFieldsWritten(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 	ctx := context.Background()
@@ -121,7 +122,7 @@ func TestEnrichResultNamesTheFieldsWritten(t *testing.T) {
 // metadata is already complete. Rendering it as a failure would train
 // people to distrust a feature working exactly as intended.
 func TestEnrichNothingToAddRendersAsSuccess(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 	ctx := context.Background()
@@ -144,7 +145,7 @@ func TestEnrichNothingToAddRendersAsSuccess(t *testing.T) {
 }
 
 func TestEnrichFailedJobRendersItsReason(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 	ctx := context.Background()
@@ -169,7 +170,7 @@ func TestEnrichFailedJobRendersItsReason(t *testing.T) {
 // Scoped under the book id so a mismatched pairing 404s rather than
 // rendering one book's job state under another's page.
 func TestEnrichmentStatusRejectsAJobFromAnotherBook(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	owner := createSendTestBook(t, db)
 	other := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
@@ -185,7 +186,7 @@ func TestEnrichmentStatusRejectsAJobFromAnotherBook(t *testing.T) {
 }
 
 func TestEnrichmentStatusUnknownJob404s(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 
@@ -197,7 +198,7 @@ func TestEnrichmentStatusUnknownJob404s(t *testing.T) {
 // With JavaScript off the same form is an ordinary navigation, landing on
 // a page whose initial render picks the queued job up.
 func TestEnrichHandlerNonHTMXRedirectsToTheBook(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 
@@ -215,7 +216,7 @@ func TestEnrichHandlerNonHTMXRedirectsToTheBook(t *testing.T) {
 }
 
 func TestEnrichHandlerUnknownBook404s(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	handler := enrichRoutes(db)
 
 	if rec := postEnrich(handler, 4242, true); rec.Code != http.StatusNotFound {
@@ -229,7 +230,7 @@ func TestEnrichHandlerUnknownBook404s(t *testing.T) {
 // noSwap is consulted before the element at every wildcard step, so an
 // hx-status:5xx could never be reached.
 func TestEnabledEnrichFormOptsIts503IntoSwapping(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 
@@ -260,7 +261,7 @@ func TestEnabledEnrichFormOptsIts503IntoSwapping(t *testing.T) {
 // gets an explanation, the same treatment the send control gets when
 // Resend is unconfigured.
 func TestEnrichHandlerDisabledServesTheDisabledFragment(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), "", false, false)
 
@@ -286,7 +287,7 @@ func TestEnrichHandlerDisabledServesTheDisabledFragment(t *testing.T) {
 }
 
 func TestEnrichHandlerRejectsCrossSitePost(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 
@@ -311,7 +312,7 @@ func TestEnrichHandlerRejectsCrossSitePost(t *testing.T) {
 // has, so a page opened mid-run resumes polling instead of showing a bare
 // button.
 func TestBookPageResumesAPendingEnrichment(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 
@@ -386,7 +387,7 @@ func TestProviderSourceNote(t *testing.T) {
 // The same rule through the real page, since the marker has to survive
 // makeFieldViews and the template to be worth anything.
 func TestBookPageMarksOnlyProviderSourcedFields(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 	ctx := context.Background()
@@ -430,7 +431,7 @@ func TestBookPageMarksOnlyProviderSourcedFields(t *testing.T) {
 // is exactly the kind of thing a later "optimisation" removes, hence the
 // test.
 func TestEditingAProviderSourcedFieldClearsItsMarker(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := enrichRoutes(db)
 	ctx := context.Background()

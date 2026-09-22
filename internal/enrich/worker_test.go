@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 // solidPNG mirrors internal/cover's own test helper of the same name — a
@@ -40,16 +41,6 @@ func solidPNG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func openTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
-
 // newTestWorker wires a fresh, per-test covers directory — tests that don't
 // exercise the cover path never need to know it exists — and opts the
 // worker out of the address guard, since the cover servers here listen on
@@ -63,7 +54,7 @@ func newTestWorker(t *testing.T, db *storage.DB, providers []Provider) *Worker {
 }
 
 func TestWorkerAppliesResolvedFieldsAndMarksDone(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-1", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
@@ -110,7 +101,7 @@ func TestWorkerAppliesResolvedFieldsAndMarksDone(t *testing.T) {
 // half of the worker's failure rule: at zero, Failed == Asked holds
 // vacuously.
 func TestWorkerWithNoProvidersResolvesDoneAndTouchesNothing(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-2", Title: "Book", SortTitle: "book"}, nil)
@@ -144,7 +135,7 @@ func TestWorkerWithNoProvidersResolvesDoneAndTouchesNothing(t *testing.T) {
 // A job whose book vanished between enqueue and claim fails outright — the
 // job itself going wrong, not a provider having nothing to say.
 func TestWorkerBookGoneFails(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, _, _, _, err := db.CreateBookWithFile(ctx, storage.Book{ContentHash: "worker-3", Title: "Book", Format: "epub"}, nil, "a.epub", 10, time.Now())
@@ -200,7 +191,7 @@ func TestWorkerBookGoneFails(t *testing.T) {
 // match is not a failure", and the half of this the test below must not
 // break.
 func TestWorkerCleanNoMatchMarksJobDone(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-4", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
@@ -235,7 +226,7 @@ func TestWorkerCleanNoMatchMarksJobDone(t *testing.T) {
 // "Nothing to add" in the success treatment — a false statement, and the
 // one this whole step exists to stop.
 func TestWorkerAllProvidersFailedMarksJobFailed(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-4b", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
@@ -269,7 +260,7 @@ func TestWorkerAllProvidersFailedMarksJobFailed(t *testing.T) {
 
 // Pins Failed == Asked rather than Failed > 0; see process's comment for why.
 func TestWorkerOneProviderFailedOneAnsweredNothingMarksJobDone(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-4c", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
@@ -308,7 +299,7 @@ func TestWorkerOneProviderFailedOneAnsweredNothingMarksJobDone(t *testing.T) {
 // the once-a-minute pollInterval tick.
 func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -357,7 +348,7 @@ func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
 // that could turn a shutdown into a permanent failed row.
 func TestWorkerCancellationLeavesJobRunningForRecovery(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		ctx, cancel := context.WithCancel(context.Background())
 
 		id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-6", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
@@ -414,7 +405,7 @@ func TestWorkerCancellationLeavesJobRunningForRecovery(t *testing.T) {
 // ApplyEnrichedFields's single "source" argument per call doesn't
 // misattribute one provider's answer to another's.
 func TestWorkerAppliesEachProvidersFieldsUnderItsOwnSource(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-7", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
@@ -481,7 +472,7 @@ func coverServer(t *testing.T, img []byte) (url string, requests *int) {
 // (see Metadata.CoverURL's doc comment) — with provenance recorded under
 // the provider that answered it, the same as any other field.
 func TestWorkerStoresFetchedCoverUnderContentHashWithProvenance(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	coversDir := t.TempDir()
 
@@ -528,7 +519,7 @@ func TestWorkerStoresFetchedCoverUnderContentHashWithProvenance(t *testing.T) {
 // exercised end to end through the worker so a regression in Resolve's
 // cover handling (§Resolve) shows up here too.
 func TestWorkerNeverOverwritesAnExistingCover(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	coversDir := t.TempDir()
 	existingPath := filepath.Join(coversDir, "already-there.jpg")
@@ -589,7 +580,7 @@ func TestWorkerCoverFailureStillFinishesTheJob(t *testing.T) {
 		{"empty body", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := openTestDB(t)
+			db := storagetest.Open(t)
 			ctx := context.Background()
 			coversDir := t.TempDir()
 
@@ -635,7 +626,7 @@ func TestWorkerCoverFailureStillFinishesTheJob(t *testing.T) {
 // must be refused before any request is made — the URL is a third party's
 // string, not something this process chose.
 func TestWorkerRefusesANonHTTPCoverURL(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	coversDir := t.TempDir()
 
@@ -676,7 +667,7 @@ func TestWorkerRefusesANonHTTPCoverURL(t *testing.T) {
 // re-extract the embedded cover over the provider's one on the next sweep
 // while field_sources went on naming the provider.
 func TestWorkerClearsCoverRetryWhenItStoresACover(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	coversDir := t.TempDir()
 
@@ -714,7 +705,7 @@ func TestWorkerClearsCoverRetryWhenItStoresACover(t *testing.T) {
 // The job row has to carry what the run wrote, so the UI can name the
 // fields instead of just saying "done".
 func TestWorkerRecordsTheFieldsItWrote(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-fields", Title: "Book", SortTitle: "book", ISBN: "9780000000009"}, nil)
@@ -746,7 +737,7 @@ func TestWorkerRecordsTheFieldsItWrote(t *testing.T) {
 // empty field list on a done job — "nothing to add", not a failure and not
 // a phantom field.
 func TestWorkerRecordsNoFieldsWhenNothingWasMissing(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{
@@ -799,7 +790,7 @@ func TestWorkerRecordsNoFieldsWhenNothingWasMissing(t *testing.T) {
 // passes with this guard deleted.
 func TestWorkerCancellationIsNotRecordedAsAVerdict(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		ctx, cancel := context.WithCancel(context.Background())
 
 		id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-7", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
@@ -858,7 +849,7 @@ func TestWorkerCoverOnlyRunThatLosesItsCoverFails(t *testing.T) {
 		{"store rejects the image", []byte("not-an-image")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := openTestDB(t)
+			db := storagetest.Open(t)
 			ctx := context.Background()
 
 			// Everything but the cover is already present, so the cover is
@@ -903,7 +894,7 @@ func TestWorkerCoverOnlyRunThatLosesItsCoverFails(t *testing.T) {
 // cover, and the provider had no cover to offer. Nothing found, nothing
 // lost — "Nothing to add" is true.
 func TestWorkerCoverOnlyRunWithNoCoverOfferedIsDone(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{
@@ -941,7 +932,7 @@ func TestWorkerCoverOnlyRunWithNoCoverOfferedIsDone(t *testing.T) {
 // then fails. The run wrote nothing and lost a cover it found, so it fails
 // for *this* reason rather than step 01's — a provider did answer.
 func TestWorkerCoverOnlyRunFailsForTheCoverNotTheProvider(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{
@@ -990,7 +981,7 @@ func TestWorkerCoverOnlyRunFailsForTheCoverNotTheProvider(t *testing.T) {
 // cancelled, which is what puts the cancellation inside the fetch.
 func TestWorkerCoverOnlyCancellationLeavesJobRunning(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		ctx, cancel := context.WithCancel(context.Background())
 
 		id, err := db.CreateBook(context.Background(), storage.Book{
@@ -1039,7 +1030,7 @@ func TestWorkerCoverOnlyCancellationLeavesJobRunning(t *testing.T) {
 // back at the next start and Run drains immediately, which under a restart
 // policy is a loop nothing but hand-editing the row escapes.
 func TestWorkerRecoversAPanickingProviderAndFailsTheJob(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	crashID, err := db.CreateBook(ctx, storage.Book{ContentHash: "worker-panic-1", Title: "Crasher", SortTitle: "crasher"}, nil)
@@ -1108,7 +1099,7 @@ func TestWorkerRecoversAPanickingProviderAndFailsTheJob(t *testing.T) {
 // must refuse. Losing the cover must not fail a job whose text fields
 // resolved.
 func TestWorkerRefusesACoverOnALoopbackAddress(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	coversDir := t.TempDir()
 
@@ -1161,7 +1152,7 @@ func TestWorkerRefusesACoverOnALoopbackAddress(t *testing.T) {
 // Setting DialTLSContext would leave every https cover unguarded with the
 // http test above still green, and https is what a real cover URL uses.
 func TestWorkerRefusesAnHTTPSCoverOnALoopbackAddress(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{

@@ -36,7 +36,10 @@ here. See Documentation below for what these files may and may not say.
   derivations and limits every writer of a metadata column shares
   (`SortTitle`, `NormalizeISBN`, `PlainDescription`, `CapBlankLines`, the
   `Max*` constants) live here.
-  Note: `docs/notes/storage.md`.
+  `internal/storage/storagetest` — the database a test opens (`Open`), a
+  copy of a template migrated once per test binary, plus `SeedSends`. Used
+  by every package above this one but `cmd/server`.
+  Notes: `docs/notes/storage.md`, `docs/notes/testing.md`.
 - `internal/epub`, `internal/fb2` — embedded metadata and cover bytes from
   each format, same `Metadata` shape so the scanner treats them alike.
   Neither decides that what a file calls a cover is an image.
@@ -511,7 +514,12 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `(false, nil)`, for an unknown id. The transport turns that into a 404.
 - A test that waits on time runs in `synctest.Test`, and a test server is
   `httptest.NewTestServer` on its in-memory network
-  (`docs/notes/testing.md`). Inside a bubble the database is opened with
+  (`docs/notes/testing.md`). A database is `storagetest.Open(t)`, never
+  `storage.Open` on a fresh path. Three exceptions, each with its own
+  reason: a test about opening a database; `cmd/server`, which stays on
+  `storage.Open` throughout; and `storage`'s own tests, which cannot import
+  `storagetest` and so carry the same template in `books_test.go`. Inside
+  a bubble the database is opened with
   the bubble's `t`, and code a bubble runs owns no goroutine that outlives
   its caller. The server's `Client()` sends every host to it, so tests
   never read `URL` before `Client()`, name fixed hosts under `.test`, keep

@@ -5,24 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
-
-func newHistoryTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
 
 // The table plate 07's timestamp format needs: same day, previous
 // calendar day, older, and — the case a naive now.Sub(t) < 24*time.Hour
@@ -76,7 +66,7 @@ func TestRelativeTime(t *testing.T) {
 }
 
 func TestHistoryEmptyState(t *testing.T) {
-	db := newHistoryTestDB(t)
+	db := storagetest.Open(t)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
@@ -96,7 +86,7 @@ func TestHistoryEmptyState(t *testing.T) {
 }
 
 func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
-	db := newHistoryTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	now := time.Now()
 
@@ -170,7 +160,7 @@ func TestHistoryRendersDeliveredFailedAndSendingRows(t *testing.T) {
 // denormalises the title precisely so it survives — but with no link,
 // since there is nowhere for it to point.
 func TestHistoryRowForDeletedBookRendersWithoutALink(t *testing.T) {
-	db := newHistoryTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	now := time.Now()
 
@@ -210,7 +200,7 @@ func TestHistoryRowForDeletedBookRendersWithoutALink(t *testing.T) {
 }
 
 func TestHistoryScopeLineNamesTheCapOnlyWhenTruncated(t *testing.T) {
-	db := newHistoryTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	now := time.Now()
 
@@ -218,12 +208,11 @@ func TestHistoryScopeLineNamesTheCapOnlyWhenTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBookWithFile: %v", err)
 	}
-	for i := 0; i < service.SendHistoryLimit+1; i++ {
-		at := now.Add(-time.Duration(service.SendHistoryLimit-i) * time.Second)
-		if _, _, err := db.EnqueueSend(ctx, bookID, "Book", fmt.Sprintf("reader%d@kindle.com", i), at); err != nil {
-			t.Fatalf("EnqueueSend %d: %v", i, err)
-		}
+	at := make([]time.Time, service.SendHistoryLimit+1)
+	for i := range at {
+		at[i] = now.Add(-time.Duration(service.SendHistoryLimit-i) * time.Second)
 	}
+	storagetest.SeedSends(t, db, bookID, "Book", at)
 
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
@@ -238,7 +227,7 @@ func TestHistoryScopeLineNamesTheCapOnlyWhenTruncated(t *testing.T) {
 }
 
 func TestHistoryScopeLineIsPlainWhenNotTruncated(t *testing.T) {
-	db := newHistoryTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	now := time.Now()
 
@@ -267,7 +256,7 @@ func TestHistoryScopeLineIsPlainWhenNotTruncated(t *testing.T) {
 // GET /history has to work whether or not sending is configured: it is a
 // log, not an action.
 func TestHistoryRendersWithSendingDisabled(t *testing.T) {
-	db := newHistoryTestDB(t)
+	db := storagetest.Open(t)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
@@ -282,7 +271,7 @@ func TestHistoryRendersWithSendingDisabled(t *testing.T) {
 // The History page's own nav item should read current, and Library (now
 // that a second page exists) should be a real link back.
 func TestHistoryPageNavMarksHistoryCurrent(t *testing.T) {
-	db := newHistoryTestDB(t)
+	db := storagetest.Open(t)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)

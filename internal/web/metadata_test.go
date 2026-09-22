@@ -5,23 +5,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
-
-func newEditTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
 
 func createEditTestBook(t *testing.T, db *storage.DB, book storage.Book, authors []string) int64 {
 	t.Helper()
@@ -49,7 +39,7 @@ func postField(handler http.Handler, id int64, field string, form url.Values, he
 var htmx = map[string]string{"HX-Request": "true"}
 
 func TestMetadataHTMXEditThenSave(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Old Title", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -96,7 +86,7 @@ func TestMetadataHTMXEditThenSave(t *testing.T) {
 }
 
 func TestMetadataRejectedValueComesBackAsAnEditor(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Keep Me", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -122,7 +112,7 @@ func TestMetadataRejectedValueComesBackAsAnEditor(t *testing.T) {
 }
 
 func TestMetadataAcceptsFullSizeNonASCIIDescription(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Книга", Format: "fb2"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -154,7 +144,7 @@ func TestMetadataAcceptsFullSizeNonASCIIDescription(t *testing.T) {
 }
 
 func TestMetadataOverlongValueIsAFieldErrorNotABareStatus(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -171,7 +161,7 @@ func TestMetadataOverlongValueIsAFieldErrorNotABareStatus(t *testing.T) {
 }
 
 func TestMetadataAuthorsRoundTripThroughTheTextarea(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, []string{"Old Author"})
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -194,7 +184,7 @@ func TestMetadataAuthorsRoundTripThroughTheTextarea(t *testing.T) {
 }
 
 func TestMetadataNoJavaScriptPathUsesWholePages(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -226,7 +216,7 @@ func TestMetadataNoJavaScriptPathUsesWholePages(t *testing.T) {
 }
 
 func TestMetadataUnknownFieldAndBookAre404(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -255,7 +245,7 @@ func TestMetadataUnknownFieldAndBookAre404(t *testing.T) {
 }
 
 func TestMetadataUnknownEditQueryStillRendersTheBook(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -271,7 +261,7 @@ func TestMetadataUnknownEditQueryStillRendersTheBook(t *testing.T) {
 }
 
 func TestMetadataRejectsCrossSitePost(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Original", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -287,7 +277,7 @@ func TestMetadataRejectsCrossSitePost(t *testing.T) {
 }
 
 func TestMetadataEditIsSearchableImmediately(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Piranesi", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -311,7 +301,7 @@ func TestMetadataEditIsSearchableImmediately(t *testing.T) {
 }
 
 func TestMetadataFullPageErrorKeepsThe422(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Keep Me", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -328,7 +318,7 @@ func TestMetadataFullPageErrorKeepsThe422(t *testing.T) {
 }
 
 func TestMetadataUnknownBookIs404OnBothPaths(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	// The redirect must not be chosen before the book is known to exist,
@@ -356,7 +346,7 @@ func TestMetadataUnknownBookIs404OnBothPaths(t *testing.T) {
 }
 
 func TestMetadataAcceptsAFullSizeAuthorList(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Anthology", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -388,7 +378,7 @@ func TestMetadataAcceptsAFullSizeAuthorList(t *testing.T) {
 }
 
 func TestMetadataRejectsLineBreaksInSingleLineFields(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Book", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -416,7 +406,7 @@ func TestMetadataRejectsLineBreaksInSingleLineFields(t *testing.T) {
 }
 
 func TestMetadataEmptyFieldsHaveDistinctAccessibleNames(t *testing.T) {
-	db := newEditTestDB(t)
+	db := storagetest.Open(t)
 	id := createEditTestBook(t, db, storage.Book{Title: "Sparse", Format: "epub"}, nil)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
