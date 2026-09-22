@@ -350,6 +350,20 @@ exists, and from `library.html` rather than the `book-grid` fragment a
 search swaps in. On a book's own page a drop would read as replacing that
 book's file, which is not what it does.
 
+Both refusals are shown where the overlay they replace was: `drop__errors`
+is fixed to the viewport, so a refusal reaches the person whatever the grid
+has been scrolled to, and an announcement reaches a screen reader because
+the live region is that wrapper rather than the sentences inside it — one
+that appears is not reliably read, one whose contents change is. There is
+nothing else to see: the drop is stopped before a request, so no page
+arrives to carry the refusal the way the Import form's 422 does.
+
+`uploading` locks out every later drag and holds the veil up, and two
+things take it down. A bfcache `pageshow` covers Back from the preview. A
+submit the person cancels covers the rest: aborting a navigation leaves the
+document loaded and fires nothing at all, so Escape clears it, whether the
+upload was stopped with Escape or with the browser's own Stop.
+
 ## What is deliberately absent
 
 - **Importing from a URL.** It reuses this machinery unchanged and is its

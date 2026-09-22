@@ -401,6 +401,16 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `import-drop` is included only from `library.html`, never from
   `book-grid`, whose fragment a search swaps in. Every sentence it shows is
   composed server-side, the too-large one through `importFailureLine`.
+- A drop refusal is pinned to the viewport, where the overlay it replaces
+  was, and the live region is the `drop__errors` wrapper, which is never
+  hidden. In the flow at the top of `<main>` the sentence renders above
+  whatever a scrolled grid is showing, and the two client-side refusals
+  have no other feedback; a live region toggled from `hidden` is not
+  reliably announced, where a change inside a standing one is.
+- `uploading` is cleared by a bfcache `pageshow` **and** by Escape. A
+  submit the person cancels aborts the navigation without unloading the
+  document, so no `pageshow` follows it, and nothing else takes the veil
+  down or unlocks the drops that `uploading` locks out.
 - The write probe runs once at startup. A per-request check would answer
   differently only when confirm is about to report its own error.
 - A repeated confirm answers the first call's book id rather than copying

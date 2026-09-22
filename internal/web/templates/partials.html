@@ -484,7 +484,11 @@
      page's 422, and every bound on the upload applies unchanged. The form
      carries no hx-post for that reason. Included only from library.html and
      never from book-grid, whose fragment a search swaps in. Every sentence
-     is here or composed in the handler; the script only reveals them. */}}
+     is here or composed in the handler; the script only reveals them.
+     A refusal is shown where the overlay it replaces was, pinned to the
+     viewport, so it is not left above a grid the page has scrolled past;
+     the live region is the wrapper, which is never hidden, since a
+     screen reader announces a change inside one and not one appearing. */}}
 {{define "import-drop"}}
 <div class="drop" data-import-drop data-max-bytes="{{.MaxBytes}}">
   <form class="drop__form" method="post" action="/import/file" enctype="multipart/form-data" hidden>
@@ -494,8 +498,10 @@
     <p class="drop__prompt" data-drop-state="ready">Drop to import</p>
     <p class="drop__prompt" data-drop-state="uploading" hidden>Uploading &hellip;</p>
   </div>
-  <p class="drop__error" role="alert" data-drop-refusal="too-large" hidden>{{.TooLargeLine}}</p>
-  <p class="drop__error" role="alert" data-drop-refusal="not-one" hidden>{{.NotOneLine}}</p>
+  <div class="drop__errors" role="alert">
+    <p class="drop__error" data-drop-refusal="too-large" hidden>{{.TooLargeLine}}</p>
+    <p class="drop__error" data-drop-refusal="not-one" hidden>{{.NotOneLine}}</p>
+  </div>
 </div>
 {{end}}
 

@@ -509,10 +509,30 @@ a.masthead__link:hover {
   text-align: center;
 }
 
+/* The refusal stands in for the overlay it hides, so it is pinned where the
+   overlay was rather than left in the flow at the top of a page the grid has
+   been scrolled down. Same band as the overlay; the two never show at once */
+.drop__errors {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  pointer-events: none;
+}
+
 .drop__error {
-  margin: 0 0 14px;
-  font-size: 12.5px;
+  margin: 0;
+  max-width: 46ch;
+  padding: 12px 16px;
+  border: 1px solid var(--err);
+  border-radius: 3px;
+  background: var(--err-soft);
   color: var(--err);
+  font-size: 13px;
+  text-align: center;
 }
 
 /* ---------- book detail ---------- */

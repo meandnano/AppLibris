@@ -103,4 +103,13 @@
   window.addEventListener("pageshow", function (event) {
     if (event.persisted) reset();
   });
+
+  // A submit the person cancels — Escape, or Stop, while the body is still
+  // going out — aborts the navigation without unloading the document, so no
+  // pageshow follows it and the veil would stay up with every later drop
+  // locked out behind `uploading`. Escape is the way back from either, since
+  // it is a keypress on the page rather than an answer to the abort
+  document.addEventListener("keydown", function (event) {
+    if (uploading && event.key === "Escape") reset();
+  });
 })();

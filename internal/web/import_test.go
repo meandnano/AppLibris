@@ -384,9 +384,15 @@ func TestImportFormsBoundTheirOwnRequests(t *testing.T) {
 func openTag(t *testing.T, body, class string) string {
 	t.Helper()
 
-	start := strings.Index(body, `class="`+class+`"`)
-	if start < 0 {
+	at := strings.Index(body, `class="`+class+`"`)
+	if at < 0 {
 		t.Fatalf("no element with class %q:\n%s", class, body)
+	}
+	// From the tag's own `<`, so an assertion that a tag carries no attribute
+	// sees the attributes written before class as well as after it
+	start := strings.LastIndex(body[:at], "<")
+	if start < 0 {
+		t.Fatalf("the tag carrying class %q has no opening bracket:\n%s", class, body)
 	}
 	end := strings.Index(body[start:], ">")
 	if end < 0 {
@@ -838,6 +844,21 @@ func TestLibraryPageIsADropTargetWhenImportIsEnabled(t *testing.T) {
 	}
 	if !strings.Contains(body, dropOneFileLine) {
 		t.Errorf("the drop target does not carry the one-file refusal:\n%s", body)
+	}
+	// The script only ever reveals this markup, so the template's own hidden
+	// is what keeps it out of sight — and the hooks are what the script finds
+	// it by, so a missing one leaves the first drag throwing instead
+	for _, want := range []string{
+		`<div class="drop__overlay" data-drop-overlay hidden>`,
+		`<p class="drop__prompt" data-drop-state="ready">`,
+		`<p class="drop__prompt" data-drop-state="uploading" hidden>`,
+		`<div class="drop__errors" role="alert">`,
+		`<p class="drop__error" data-drop-refusal="too-large" hidden>`,
+		`<p class="drop__error" data-drop-refusal="not-one" hidden>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the drop target is missing %s:\n%s", want, body)
+		}
 	}
 	if !strings.Contains(body, "Or drag a book file onto this page") {
 		t.Errorf("the empty library does not mention dropping a file:\n%s", body)
