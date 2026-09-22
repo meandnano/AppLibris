@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 // testMissingGrace is used by every test that doesn't itself exercise
@@ -217,16 +218,6 @@ func testCoverImage(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func openTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
-
 // bookByPath resolves a scanned file's path — relative to the library
 // root, the form it's stored under — all the way to its book row, via the
 // book_files -> books join the storage package doesn't expose as a single
@@ -255,7 +246,7 @@ func bookByPath(t *testing.T, ctx context.Context, db *storage.DB, relPath strin
 func TestScanBasic(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A", nil)
@@ -311,7 +302,7 @@ const testOPFWithPublisherAndDate = `<?xml version="1.0"?>
 func TestScanExtractsPublisherAndPublishedDate(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUBWithOPF(t, filepath.Join(libDir, "book.epub"), testOPFWithPublisherAndDate)
@@ -345,7 +336,7 @@ const testOPFWithTwoCreators = `<?xml version="1.0"?>
 func TestScanPreservesAuthorOrderFromOPF(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUBWithOPF(t, filepath.Join(libDir, "book.epub"), testOPFWithTwoCreators)
@@ -368,7 +359,7 @@ func TestScanPreservesAuthorOrderFromOPF(t *testing.T) {
 func TestScanExtractsCover(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A", testCoverImage(t))
@@ -402,7 +393,7 @@ func TestScanExtractsCover(t *testing.T) {
 func TestScanRegeneratesMissingCoverDirectory(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", testCoverImage(t))
@@ -436,7 +427,7 @@ func TestScanRegeneratesMissingCoverDirectory(t *testing.T) {
 func TestScanRegeneratesZeroByteCover(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", testCoverImage(t))
@@ -463,7 +454,7 @@ func TestScanRegeneratesZeroByteCover(t *testing.T) {
 func TestScanDoesNotRetryCoverlessBook(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -493,7 +484,7 @@ func TestScanDoesNotRetryCoverlessBook(t *testing.T) {
 func TestScanRetriesInitialCoverStoreFailure(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := filepath.Join(t.TempDir(), "covers")
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	if err := os.WriteFile(coversDir, []byte("blocks directory creation"), 0o644); err != nil {
@@ -532,7 +523,7 @@ func TestScanRetriesInitialCoverStoreFailure(t *testing.T) {
 func TestScanDoesNotRegenerateCoverOnNonNotExistStatError(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", testCoverImage(t))
@@ -588,7 +579,7 @@ func decodedJPEGSize(t *testing.T, path string) (width, height int) {
 func TestScanIsIdempotent(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A", nil)
@@ -613,7 +604,7 @@ func TestScanIsIdempotent(t *testing.T) {
 func TestScanDetectsMove(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	oldRel := "book1.epub"
@@ -672,7 +663,7 @@ func TestScanDetectsMove(t *testing.T) {
 func TestScanTracksMultipleLocations(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	sourcePath := filepath.Join(t.TempDir(), "source.epub")
@@ -750,7 +741,7 @@ func TestScanTracksMultipleLocations(t *testing.T) {
 func TestScanPrunesOrphanWhenPathContentReplaced(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	rel := "book.epub"
@@ -802,7 +793,7 @@ func TestScanPrunesOrphanWhenPathContentReplaced(t *testing.T) {
 func TestScanPrunesOrphanWhenPathReassignedToKnownContent(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	relA := "a.epub"
@@ -867,7 +858,7 @@ func TestScanSkipsUnreadableDirectory(t *testing.T) {
 
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author A", nil)
@@ -905,7 +896,7 @@ func TestScanSkipsUnreadableDirectory(t *testing.T) {
 // it must not look like an empty, successful sweep.
 func TestScanMissingLibraryDirReturnsError(t *testing.T) {
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
@@ -931,7 +922,7 @@ func TestScanUnreadableLibraryRootReturnsError(t *testing.T) {
 
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -957,7 +948,7 @@ func TestScanUnreadableLibraryRootReturnsError(t *testing.T) {
 func TestScanStoresRelativePaths(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	nestedDir := filepath.Join(libDir, "sub", "dir")
@@ -999,7 +990,7 @@ func TestScanSameLibraryThroughDifferentRootsYieldsOneLocation(t *testing.T) {
 	rootA := t.TempDir()
 	rootB := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(rootA, "book.epub"), "Book One", "Author A", nil)
@@ -1098,7 +1089,7 @@ func TestSortTitle(t *testing.T) {
 func TestScanDerivesSortTitle(t *testing.T) {
 	libraryDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libraryDir, "hobbit.epub"), "The Hobbit", "J.R.R. Tolkien", nil)
@@ -1129,7 +1120,7 @@ func TestScanDerivesSortTitle(t *testing.T) {
 func TestScanMarksMissingFileWithoutDeleting(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	rel := "book.epub"
@@ -1182,7 +1173,7 @@ func TestScanMarksMissingFileWithoutDeleting(t *testing.T) {
 func TestScanClearsMissingWhenFileReappears(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	rel := "book.epub"
@@ -1236,7 +1227,7 @@ func TestScanClearsMissingWhenFileReappears(t *testing.T) {
 func TestScanPrunesMissingFileAfterGracePeriod(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	rel := "book.epub"
@@ -1301,7 +1292,7 @@ func TestScanPrunesMissingFileAfterGracePeriod(t *testing.T) {
 func TestScanOfEmptyDirectoryPrunesNothing(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book1.epub"), "Book One", "Author A", nil)
@@ -1357,7 +1348,7 @@ func TestScanUnreadableSubdirectoryPrunesNothingUnderIt(t *testing.T) {
 
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	// A readable sibling keeps Scanned > 0 on the second scan, so this test
@@ -1460,7 +1451,7 @@ func TestScanSubdirectoryWithNoFilesPrunesNothingUnderIt(t *testing.T) {
 			libDir := t.TempDir()
 			coversDir := t.TempDir()
 			stash := t.TempDir()
-			db := openTestDB(t)
+			db := storagetest.Open(t)
 			ctx := context.Background()
 
 			for _, dir := range []string{"a", "b"} {
@@ -1550,7 +1541,7 @@ func TestScanSubdirectoryWithNoFilesPrunesNothingUnderIt(t *testing.T) {
 func TestScanPrunesFileRemovedFromDirectoryThatKeepsAnother(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	for _, dir := range []string{"a", "b"} {
@@ -1609,7 +1600,7 @@ func TestScanPrunesFileRemovedFromDirectoryThatKeepsAnother(t *testing.T) {
 func TestScanMarksMissingWhenFileMovedOutOfNowEmptyNestedDirectory(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	if err := os.MkdirAll(filepath.Join(libDir, "a", "novels"), 0o755); err != nil {
@@ -1654,7 +1645,7 @@ func TestScanMarksMissingWhenFileMovedOutOfNowEmptyNestedDirectory(t *testing.T)
 func TestScanOfLibraryWhoseOnlyFileWasDeletedPrunesNothing(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	path := filepath.Join(libDir, "book.epub")
@@ -1695,7 +1686,7 @@ func TestScanOfLibraryWhoseOnlyFileWasDeletedPrunesNothing(t *testing.T) {
 func TestScanDoesNotMarkMissingOnNonNotExistLstatError(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	subDir := filepath.Join(libDir, "top", "sub")
@@ -1759,7 +1750,7 @@ func TestScanDoesNotMarkMissingOnNonNotExistLstatError(t *testing.T) {
 func TestScanDoesNotPruneWhenCurrentSweepCannotReconfirmAbsence(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	subDir := filepath.Join(libDir, "top", "sub")
@@ -1842,7 +1833,7 @@ func TestScanDoesNotPruneOverdueRowAtExactlyAnUnreadableDirectorysPath(t *testin
 
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	targetPath := filepath.Join(libDir, "target.epub")
@@ -1911,7 +1902,7 @@ func TestScanDoesNotPruneOverdueRowAtExactlyAnUnreadableDirectorysPath(t *testin
 func TestScanReturnsErrorOnPreCancelledContext(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
 
@@ -1934,7 +1925,7 @@ func TestScanReturnsErrorOnPreCancelledContext(t *testing.T) {
 func TestScanStopsOnCancellationMidSweep(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	const total = 20
@@ -1972,7 +1963,7 @@ func TestScanStopsOnCancellationMidSweep(t *testing.T) {
 func TestScanExtractsFB2Metadata(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestFB2(t, filepath.Join(libDir, "kniga.fb2"), "Real Title", "Real Author", testCoverImage(t))
@@ -2013,7 +2004,7 @@ func TestScanExtractsFB2Metadata(t *testing.T) {
 func TestScanIndexesFB2Zip(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestFB2Zip(t, filepath.Join(libDir, "kniga.fb2.zip"), "Zipped Title", "Zipped Author", nil)
@@ -2049,7 +2040,7 @@ func TestScanIndexesFB2Zip(t *testing.T) {
 func TestScanFallsBackToFilenameTitleOnUnparseableFB2(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	path := filepath.Join(libDir, "broken.fb2")
@@ -2108,7 +2099,7 @@ func giveProviderCover(t *testing.T, ctx context.Context, db *storage.DB, bookID
 func TestScanForgetsAProviderCoverWhoseFileIsGone(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	// No embedded cover: this book's only cover ever came from a provider.
@@ -2185,7 +2176,7 @@ func TestScanForgetsAProviderCoverWhoseFileIsGone(t *testing.T) {
 func TestScanForgetsAZeroByteProviderCover(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -2218,7 +2209,7 @@ func TestScanForgetsAZeroByteProviderCover(t *testing.T) {
 func TestScanForgetsAProviderCoverMarkedForRetry(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -2259,7 +2250,7 @@ func TestScanForgetsAProviderCoverMarkedForRetry(t *testing.T) {
 func TestScanLeavesTheCoverAloneWhenProvenanceIsUnreadable(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -2335,7 +2326,7 @@ func TestScanLeavesTheCoverAloneWhenProvenanceIsUnreadable(t *testing.T) {
 func TestScanKeepsAHealthyProviderCover(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -2401,7 +2392,7 @@ func TestScanKeepsAHealthyProviderCover(t *testing.T) {
 func TestScanKeepsAPresentProviderCoverMarkedForRetry(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -2454,7 +2445,7 @@ func TestScanKeepsAPresentProviderCoverMarkedForRetry(t *testing.T) {
 func TestScanRegeneratesAnEmbeddedCoverDespiteProviderProvenance(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	// The fixture carries a real embedded cover, so the first sweep stores
@@ -2534,7 +2525,7 @@ func TestScanRegeneratesAnEmbeddedCoverDespiteProviderProvenance(t *testing.T) {
 func TestScanKeepsAProviderCoverWhenTheBookCannotBeRead(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	bookPath := filepath.Join(libDir, "book.epub")
@@ -2604,7 +2595,7 @@ func TestScanKeepsAProviderCoverWhenTheCoverStatIsAmbiguous(t *testing.T) {
 	}
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -2662,7 +2653,7 @@ func TestScanKeepsAProviderCoverWhenTheCoverStatIsAmbiguous(t *testing.T) {
 func TestScanForgetsOrphanedProviderProvenance(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", nil)
@@ -2711,7 +2702,7 @@ func TestScanForgetsOrphanedProviderProvenance(t *testing.T) {
 func TestScanNeverForgetsAScannerCover(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	bookPath := filepath.Join(libDir, "book.epub")
@@ -2781,7 +2772,7 @@ func bmpCover() []byte {
 func TestScanRecordsUndecodableCoverWithoutRetry(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", bmpCover())
@@ -2821,7 +2812,7 @@ func TestScanRecordsUndecodableCoverWithoutRetry(t *testing.T) {
 func TestScanClearsLegacyRetryMarkerForUndecodableCover(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", bmpCover())
@@ -2872,7 +2863,7 @@ func TestScanClearsLegacyRetryMarkerForUndecodableCover(t *testing.T) {
 func TestScanForgetsProviderCoverWhenEmbeddedCoverIsUndecodable(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", bmpCover())
@@ -2912,7 +2903,7 @@ func TestScanForgetsProviderCoverWhenEmbeddedCoverIsUndecodable(t *testing.T) {
 func TestScanKeepsAPresentProviderCoverWhenEmbeddedCoverIsUndecodable(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "book.epub"), "Book One", "Author A", bmpCover())
@@ -2967,7 +2958,7 @@ func TestScanKeepsAPresentProviderCoverWhenEmbeddedCoverIsUndecodable(t *testing
 func TestScanOfAnUnresolvedSymlinkedRootIndexesNothing(t *testing.T) {
 	target := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(target, "book.epub"), "Book One", "Author A", nil)
@@ -3021,7 +3012,7 @@ func TestScanOfAnUnresolvedSymlinkedRootIndexesNothing(t *testing.T) {
 func TestScanDoesNotFollowASymlinkedSubdirectory(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author A", nil)
@@ -3057,7 +3048,7 @@ func TestScanDoesNotFollowASymlinkedSubdirectory(t *testing.T) {
 func TestScanIndexesASymlinkedFile(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	outside := filepath.Join(t.TempDir(), "elsewhere.epub")
@@ -3088,7 +3079,7 @@ func TestScanIndexesASymlinkedFile(t *testing.T) {
 func TestScanTreatsADanglingSymlinkAsAFile(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	gone := filepath.Join(t.TempDir(), "gone")
@@ -3122,7 +3113,7 @@ func TestScanTreatsADanglingSymlinkAsAFile(t *testing.T) {
 func TestScanReportsASymlinkItCannotResolve(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "sibling.epub"), "Sibling Book", "Author A", nil)
@@ -3230,7 +3221,7 @@ func TestTopLevelDirHasBooks(t *testing.T) {
 func TestReconcileMissingReportsUnconfirmedDirs(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	for _, dir := range []string{"fiction", "keep"} {
@@ -3285,7 +3276,7 @@ func mustScanResult(t *testing.T, ctx context.Context, db *storage.DB, libDir, c
 func TestScanInPlaceRewriteKeepsManualEdits(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	path := filepath.Join(libDir, "book.epub")
@@ -3345,7 +3336,7 @@ func TestReconcileMarksUnseenRowWhoseLstatSucceeds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			libDir := t.TempDir()
 			coversDir := t.TempDir()
-			db := openTestDB(t)
+			db := storagetest.Open(t)
 			ctx := context.Background()
 
 			// A file elsewhere, so the sweep is never the empty-library case.
@@ -3426,7 +3417,7 @@ func TestReconcileMarksUnseenRowWhoseLstatSucceeds(t *testing.T) {
 func TestReconcileLstatErrorStillLeavesRowAlone(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	// top/ keeps a file throughout, so the row reaches Lstat rather than
@@ -3489,7 +3480,7 @@ func TestReconcileLstatErrorStillLeavesRowAlone(t *testing.T) {
 func TestReconcileNeverPrunesUnderAnUnfollowedSymlinkedDirectory(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	shelf := filepath.Join(libDir, "top", "shelf")
@@ -3565,7 +3556,7 @@ func TestReconcileNeverPrunesUnderAnUnfollowedSymlinkedDirectory(t *testing.T) {
 func TestScanCaseOnlyRenameMarksOldSpelling(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	if err := os.MkdirAll(filepath.Join(libDir, "Books"), 0o755); err != nil {
@@ -3619,7 +3610,7 @@ func TestScanCaseOnlyRenameMarksOldSpelling(t *testing.T) {
 // a wait for the next sweep.
 func TestIndexFileIndexesOnePathAndNamesItsBook(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	libraryDir, coversDir := t.TempDir(), t.TempDir()
 
 	path := filepath.Join(libraryDir, "Dune.epub")
@@ -3676,7 +3667,7 @@ func TestIndexFileIndexesOnePathAndNamesItsBook(t *testing.T) {
 // dot.
 func TestScanIgnoresAPartFileAndTheWriteProbe(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	libraryDir, coversDir := t.TempDir(), t.TempDir()
 
 	writeTestEPUB(t, filepath.Join(libraryDir, "Dune.epub.part"), "Half Written", "Nobody", nil)
@@ -3705,7 +3696,7 @@ func TestScanIgnoresAPartFileAndTheWriteProbe(t *testing.T) {
 // book with one location" — rather than failing the import.
 func TestConcurrentIndexFileOfIdenticalContentConvergesOnOneBook(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	libraryDir, coversDir := t.TempDir(), t.TempDir()
 
 	// One book's bytes under several names, so every goroutine hashes to

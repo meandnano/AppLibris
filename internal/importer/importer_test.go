@@ -16,11 +16,12 @@ import (
 
 	"library/internal/scanner"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 func TestStageReadsTheFileAndOffersIt(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
@@ -52,7 +53,7 @@ func TestStageReadsTheFileAndOffersIt(t *testing.T) {
 // of the content, and the preview says which name the library will use.
 func TestStageNamesTheFileByWhatItIsAndNotByWhatItWasCalled(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	staged, err := stager.Stage(ctx, "book.epub", bytes.NewReader(fb2Bytes("Dune", "Frank")))
@@ -69,7 +70,7 @@ func TestStageNamesTheFileByWhatItIsAndNotByWhatItWasCalled(t *testing.T) {
 
 func TestStageRefusesAFileOverTheCapAndKeepsNothing(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 
 	// Sized from a real EPUB so the cap is exercised against the bytes an
 	// import actually carries rather than against filler.
@@ -91,7 +92,7 @@ func TestStageRefusesAFileOverTheCapAndKeepsNothing(t *testing.T) {
 
 func TestStageRefusesSomethingThatIsNotABook(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	if _, err := stager.Stage(ctx, "notes.txt", strings.NewReader("just some text")); !errors.Is(err, ErrUnsupportedFormat) {
@@ -106,7 +107,7 @@ func TestStageRefusesSomethingThatIsNotABook(t *testing.T) {
 // so the staged file goes at once and only the record survives.
 func TestStageReportsContentTheLibraryAlreadyHolds(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	book := epubBytes(t, "Dune", "Frank Herbert", 0)
@@ -135,7 +136,7 @@ func TestStageReportsContentTheLibraryAlreadyHolds(t *testing.T) {
 
 func TestStageWarnsAboutATitleTheLibraryAlreadyHolds(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	first, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
@@ -162,7 +163,7 @@ func TestStageWarnsAboutATitleTheLibraryAlreadyHolds(t *testing.T) {
 
 func TestConfirmWritesTheLibraryAndIndexesIt(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, libraryDir := testStager(t, db, 1<<20)
 
 	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
@@ -213,7 +214,7 @@ func TestConfirmWritesTheLibraryAndIndexesIt(t *testing.T) {
 
 func TestConfirmSidestepsANameTheLibraryAlreadyUses(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, libraryDir := testStager(t, db, 1<<20)
 
 	writeFile(t, filepath.Join(libraryDir, "Dune.epub"), epubBytes(t, "Dune", "Someone", 128))
@@ -236,7 +237,7 @@ func TestConfirmSidestepsANameTheLibraryAlreadyUses(t *testing.T) {
 // Two confirms of different books offered under one name get two files.
 func TestConcurrentConfirmsOfOneNameGetTwoFiles(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, libraryDir := testStager(t, db, 1<<20)
 
 	first, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
@@ -276,7 +277,7 @@ func TestConcurrentConfirmsOfOneNameGetTwoFiles(t *testing.T) {
 // test that confirmed before sweeping would pass with sweep's body deleted.
 func TestTheJanitorReclaimsAnExpiredStage(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 
 	now := time.Now()
 	stager, libraryDir := testStagerAt(t, db, 1<<20, func() time.Time { return now })
@@ -329,7 +330,7 @@ func TestTheJanitorReclaimsAnExpiredStage(t *testing.T) {
 // without depending on whether the janitor has run yet.
 func TestConfirmRechecksExpiryWithoutTheJanitor(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 
 	now := time.Now()
 	stager, libraryDir := testStagerAt(t, db, 1<<20, func() time.Time { return now })
@@ -353,7 +354,7 @@ func TestConfirmRechecksExpiryWithoutTheJanitor(t *testing.T) {
 }
 
 func TestConfirmOnAnUnknownIDIsExpired(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	if _, err := stager.Confirm(context.Background(), "nosuchstage"); !errors.Is(err, ErrExpired) {
@@ -363,7 +364,7 @@ func TestConfirmOnAnUnknownIDIsExpired(t *testing.T) {
 
 func TestDiscardDropsTheStagedFile(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, libraryDir := testStager(t, db, 1<<20)
 
 	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
@@ -396,7 +397,7 @@ func TestDiscardDropsTheStagedFile(t *testing.T) {
 // throw a book away over a database error.
 func TestConfirmLeavesTheLibraryFileWhenIndexingFails(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, libraryDir := testStager(t, db, 1<<20)
 
 	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
@@ -423,7 +424,7 @@ func TestConfirmLeavesTheLibraryFileWhenIndexingFails(t *testing.T) {
 // Nothing about a stage is in the database, so a restart has nothing to
 // recover and the wipe is the whole story.
 func TestNewEmptiesTheStagingDirectory(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	root := t.TempDir()
 	tempDir := filepath.Join(root, "staging")
 	if err := os.MkdirAll(tempDir, 0o700); err != nil {
@@ -447,7 +448,7 @@ func TestNewEmptiesTheStagingDirectory(t *testing.T) {
 // this is the test that fails if it goes.
 func TestConcurrentConfirmsOfOneStageImportOnce(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, libraryDir := testStager(t, db, 1<<20)
 
 	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
@@ -496,7 +497,7 @@ func TestConcurrentConfirmsOfOneStageImportOnce(t *testing.T) {
 
 func TestStageKeepsACoverItCanIdentify(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	art := solidPNG(t)
@@ -526,7 +527,7 @@ func TestStageKeepsACoverItCanIdentify(t *testing.T) {
 // from this app's own origin is the thing sameSiteOnly admits.
 func TestStageDropsACoverThatIsNotAnImage(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	html := []byte(`<!doctype html><script>fetch("/recipients/remove",{method:"POST"})</script>`)
@@ -550,7 +551,7 @@ func TestStageDropsACoverThatIsNotAnImage(t *testing.T) {
 // derived from a capped one.
 func TestStageCapsWhatThePreviewShows(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 8<<20)
 
 	longTitle := strings.Repeat("Dune ", storage.MaxTitleBytes)
@@ -579,7 +580,7 @@ func TestStageCapsWhatThePreviewShows(t *testing.T) {
 // already has.
 func TestATitleOverTheCapStillMatches(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 8<<20)
 
 	longTitle := strings.Repeat("Dune ", storage.MaxTitleBytes)
@@ -605,7 +606,7 @@ func TestATitleOverTheCapStillMatches(t *testing.T) {
 // a container — so what forgotten tabs hold for half an hour is RAM.
 func TestStagingIsBounded(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 
 	// A cap small enough that the budget is a handful of fixtures.
 	const size = 4 << 10
@@ -641,7 +642,7 @@ func TestStagingIsBounded(t *testing.T) {
 // — the record outlives the confirm only to answer a double click.
 func TestConfirmingGivesTheBudgetBack(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 
 	const size = 4 << 10
 	stager, _ := testStager(t, db, size)
@@ -670,7 +671,7 @@ func TestConfirmingGivesTheBudgetBack(t *testing.T) {
 // Charging only the file is what lets a small upload hold megabytes.
 func TestADuplicateReleasesItsFileButKeepsHoldingItsCover(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	art := solidPNG(t)
@@ -708,7 +709,7 @@ func TestADuplicateReleasesItsFileButKeepsHoldingItsCover(t *testing.T) {
 // the book's own page — so nothing of it stays charged.
 func TestConfirmingDropsTheCoverAndReleasesEverything(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(
@@ -740,7 +741,7 @@ func TestConfirmingDropsTheCoverAndReleasesEverything(t *testing.T) {
 // filesystem error nobody can name.
 func TestAFileSweptMidConfirmReadsAsExpired(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, _ := testStager(t, db, 1<<20)
 
 	staged, err := stager.Stage(ctx, "Dune.epub", bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
@@ -766,7 +767,7 @@ func TestAFileSweptMidConfirmReadsAsExpired(t *testing.T) {
 // stage done with no book and make every later confirm report a failure
 // that did not happen.
 func TestConfirmIndexesEvenIfTheRequestIsCancelled(t *testing.T) {
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, libraryDir := testStager(t, db, 1<<20)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -799,7 +800,7 @@ func TestConfirmIndexesEvenIfTheRequestIsCancelled(t *testing.T) {
 // than a new one.
 func TestConfirmJoinsABookIndexedSinceThePreview(t *testing.T) {
 	ctx := context.Background()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	stager, libraryDir := testStager(t, db, 1<<20)
 
 	book := epubBytes(t, "Dune", "Frank Herbert", 0)

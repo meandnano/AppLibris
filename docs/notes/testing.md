@@ -70,6 +70,39 @@ answer survives a real socket while the body is still arriving. The
 server for all of them is cheaper than a second one on the in-memory
 network.
 
+## The database
+
+A test's database is `storagetest.Open(t)`: a copy of a template the test
+binary migrated once, opened from `t.TempDir()`. Running every migration
+again per test costs twenty times what copying the file does, and a suite
+of around 450 such tests spends most of its CPU there rather than on
+anything it asserts. `storage.Open` still runs `migrate` over the copy,
+which finds every migration applied.
+
+The template is built from the migrations the binary was compiled with, so
+it cannot go stale the way a committed fixture would, and it is held as
+bytes rather than a path, so nothing needs a `TestMain` to clean it up.
+`storagetest`'s own test is what pins it: it reads the template with a bare
+driver handle, which runs no migrations, and compares its
+`schema_migrations` and `sqlite_master` with a database migrated the long
+way. `Close` is what checkpoints the WAL into the main file, and only a
+test that looks at the template directly can see a template read before
+that checkpoint — through `storage.Open` an empty one is silently migrated
+and looks identical.
+
+Only tests about opening a database migrate from scratch: `storage`'s own
+`db_test.go`, and `cmd/server`, whose tests open a second handle on the
+file `run()` created. `storage`'s in-package tests cannot use
+`storagetest` at all, since it imports `storage`, so `books_test.go`
+carries its own copy of the same few lines.
+
+`storagetest.SeedSends` writes `send_log` rows directly, in one
+transaction, for the two tests that need the history cap's worth of them.
+Seeding that table alone is faithful because history reads send_log's
+denormalised `book_title` and `recipient_address` and never joins `books`
+or `recipients`; the helper's test pins that a seeded row and an
+`EnqueueSend` row read back identically.
+
 ## What runs on real time
 
 - **The watcher tests about the kernel** — removal delivery, every

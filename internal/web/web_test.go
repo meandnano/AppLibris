@@ -22,14 +22,11 @@ import (
 
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 func TestLibraryHandlerRendersScannedBooks(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	if _, err := db.CreateBook(context.Background(), storage.Book{
 		ContentHash: "hash-1",
@@ -60,11 +57,7 @@ func TestLibraryHandlerRendersScannedBooks(t *testing.T) {
 }
 
 func TestLibraryHandlerRendersEmptyState(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -82,11 +75,7 @@ func TestLibraryHandlerRendersEmptyState(t *testing.T) {
 
 func newTestHandlerWithBook(t *testing.T, title string, authors []string) http.Handler {
 	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	if _, err := db.CreateBook(context.Background(), storage.Book{
 		ContentHash: "hash-1",
@@ -132,11 +121,7 @@ func TestSearchFullPageRendersFilteredGridWithEchoedQuery(t *testing.T) {
 // shows once a live search settles: a stale masthead frozen at some other
 // number would be just as misleading as a wrong one.
 func TestSearchFullPageMastheadCountStaysLibraryTotal(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	for i, title := range []string{"Piranesi", "Flights", "One Hundred Years of Solitude"} {
 		if _, err := db.CreateBook(context.Background(), storage.Book{
@@ -225,11 +210,7 @@ func TestVarySetOnBothFullPageAndFragmentResponses(t *testing.T) {
 // ("/loc-0.epub", "/loc-1.epub", ...) for the multi-location badge tests.
 func newTestHandlerWithLocations(t *testing.T, title string, n int) http.Handler {
 	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	ctx := context.Background()
 	mtime := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
@@ -467,7 +448,7 @@ func TestOverlongSearchQueryIsClippedInEveryRenderedCopy(t *testing.T) {
 	titleToken := clipped + strings.Repeat("y", 64)
 	queryToken := clipped + strings.Repeat("z", 64)
 
-	db := newPagingTestDB(t)
+	db := storagetest.Open(t)
 	seedBooks(t, db, pageSize+10, titleToken)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -621,11 +602,7 @@ func TestControlCharacterQueryRendersIdleNotSearchResults(t *testing.T) {
 // indexed fields that produced the hits, so a match on a description or an
 // ISBN isn't a mystery. A bare "N books matched" loses both halves.
 func TestSearchResultsLineNamesTotalAndMatchedFields(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	books := []struct{ title, author, description, isbn string }{
 		{"The Left Hand of Darkness", "Ursula K. Le Guin", "A novel about winter", "9780857059985"},
@@ -711,11 +688,7 @@ func TestSearchBarCarriesClearAndShortcutAffordances(t *testing.T) {
 // control is dimmed and inert rather than inviting a query that could only
 // ever come back empty.
 func TestEmptyLibraryDisablesTheSearchControl(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -735,11 +708,7 @@ func TestEmptyLibraryDisablesTheSearchControl(t *testing.T) {
 }
 
 func TestUnknownPathReturns404(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -755,11 +724,7 @@ func TestUnknownPathReturns404(t *testing.T) {
 }
 
 func TestLibraryHandlerSetsContentType(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -825,11 +790,7 @@ func TestRenderWriteFailureIsNotReturned(t *testing.T) {
 }
 
 func TestLibraryHandlerDoesNotDoubleWriteOnWriteFailure(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	if _, err := db.CreateBook(context.Background(), storage.Book{
 		ContentHash: "hash-1",
@@ -855,11 +816,7 @@ func TestLibraryHandlerDoesNotDoubleWriteOnWriteFailure(t *testing.T) {
 }
 
 func TestLibraryHandlerRendersCleanServerErrorOnTemplateFailure(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	// library.html can't actually fail to execute against a fully-populated
 	// libraryPage, so the package template set is swapped for one whose
@@ -883,11 +840,7 @@ func TestLibraryHandlerRendersCleanServerErrorOnTemplateFailure(t *testing.T) {
 }
 
 func TestStaticFileServed(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -909,11 +862,7 @@ func TestStaticFileServed(t *testing.T) {
 }
 
 func TestCoverServedFromCoversDir(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	coversDir := t.TempDir()
 	coverBytes := []byte("not-really-a-jpeg")
@@ -936,11 +885,7 @@ func TestCoverServedFromCoversDir(t *testing.T) {
 }
 
 func TestStaticAndCoversDoNotListDirectories(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	coversDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("cover-bytes"), 0o644); err != nil {
@@ -964,11 +909,7 @@ func TestStaticAndCoversDoNotListDirectories(t *testing.T) {
 }
 
 func TestStaticAssetETagIsContentDerived(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -1008,11 +949,7 @@ func TestStaticAssetETagIsContentDerived(t *testing.T) {
 }
 
 func TestCoverCacheControlIsBoundedNotImmutable(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	coversDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(coversDir, "hash-1.jpg"), []byte("cover-bytes"), 0o644); err != nil {
@@ -1252,11 +1189,7 @@ func TestDescriptionRendersParagraphBreaks(t *testing.T) {
 // A handler-side strings.Fields join or a template trim would defeat it
 // with the stylesheet assertion still green.
 func TestDescriptionParagraphBreakReachesTheMarkup(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	id, err := db.CreateBook(ctx, storage.Book{
@@ -1413,11 +1346,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 func TestBrandIsConsistentAcrossMastheadTitleAndScript(t *testing.T) {
 	const brand = "AppLibris"
 
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 	rec := httptest.NewRecorder()
@@ -1478,11 +1407,7 @@ func TestEveryFileRouteRefusesContentTypeSniffing(t *testing.T) {
 		t.Fatalf("write a cover: %v", err)
 	}
 
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	handler := Routes(service.New(db), coversDir, false, false)
 

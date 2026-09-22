@@ -12,6 +12,7 @@ import (
 	"library/internal/scanner"
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 // straddling builds a valid UTF-8 value of at least n bytes positioned so
@@ -62,7 +63,7 @@ func overlongEPUB(t *testing.T, path string) {
 func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := scanner.OpenTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	overlongEPUB(t, filepath.Join(libDir, "verbose.epub"))
@@ -151,7 +152,7 @@ func TestCreateBookCapsEmbeddedMetadata(t *testing.T) {
 func TestCreateBookCappedValuesAreEditable(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := scanner.OpenTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	overlongEPUB(t, filepath.Join(libDir, "verbose.epub"))
@@ -253,7 +254,7 @@ Another paragraph.</dc:description>
 func TestCreateBookWrappedValuesAreEditable(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := scanner.OpenTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	wrappedEPUB(t, filepath.Join(libDir, "wrapped.epub"))

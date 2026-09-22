@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 // A scanner-created book must be searchable without any extra step: the
@@ -14,7 +15,7 @@ import (
 func TestScanEnrollsBookIntoSearchIndex(t *testing.T) {
 	libDir := t.TempDir()
 	coversDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	writeTestEPUB(t, filepath.Join(libDir, "flights.epub"), "Flights", "Olga Tokarczuk", nil)

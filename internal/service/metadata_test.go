@@ -3,21 +3,17 @@ package service
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 func newMetadataTestService(t *testing.T) (*Service, *storage.DB, int64) {
 	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 	id, err := db.CreateBook(context.Background(), storage.Book{
 		ContentHash: "service-edit", Title: "Old", SortTitle: "old",
 	}, nil)

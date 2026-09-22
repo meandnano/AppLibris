@@ -24,6 +24,7 @@ import (
 	"library/internal/importer"
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 const importContainerXML = `<?xml version="1.0"?>
@@ -125,11 +126,7 @@ func newImportHandler(t *testing.T, maxSize int64) (http.Handler, *storage.DB, s
 func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.Handler, *storage.DB, string) {
 	t.Helper()
 
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 
 	root := t.TempDir()
 	libraryDir := filepath.Join(root, "library")
@@ -145,7 +142,7 @@ func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.
 	// cmd/server builds one only when its probe succeeds.
 	var stager *importer.Stager
 	if writable {
-		stager, err = importer.New(db, importer.Options{
+		s, err := importer.New(db, importer.Options{
 			LibraryDir: libraryDir,
 			CoversDir:  coversDir,
 			TempDir:    filepath.Join(root, "staging"),
@@ -154,6 +151,7 @@ func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.
 		if err != nil {
 			t.Fatalf("importer.New: %v", err)
 		}
+		stager = s
 	}
 
 	svc := service.New(db, service.WithImporter(stager))

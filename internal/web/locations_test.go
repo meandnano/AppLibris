@@ -5,24 +5,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
 
 // newLocationsTestBook returns a handler and a book with two locations, the
 // first of which (a/first.epub) is marked missing, plus that row's id.
 func newLocationsTestBook(t *testing.T) (http.Handler, *storage.DB, int64, int64) {
 	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	mtime := time.Now()
 
@@ -130,11 +126,7 @@ func TestForgetLocationFragmentRendersLocations(t *testing.T) {
 // not exist either, so htmx is told to navigate rather than swap.
 func TestForgetLocationRedirectsWhenBookPruned(t *testing.T) {
 	for _, hx := range []bool{false, true} {
-		db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-		if err != nil {
-			t.Fatalf("storage.Open: %v", err)
-		}
-		t.Cleanup(func() { db.Close() })
+		db := storagetest.Open(t)
 		ctx := context.Background()
 		mtime := time.Now()
 

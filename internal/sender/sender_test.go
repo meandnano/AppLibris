@@ -16,17 +16,8 @@ import (
 
 	"library/internal/resend"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
-
-func openTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
 
 // stubTransport is a Transport with no HTTP: sendFunc decides the outcome
 // per call, and every call is recorded for assertions.
@@ -73,7 +64,7 @@ func setupBookWithFile(t *testing.T, db *storage.DB, libraryDir, path string, co
 
 func TestWorkerHappyPathDelivers(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	content := []byte("epub bytes")
@@ -119,7 +110,7 @@ func TestWorkerHappyPathDelivers(t *testing.T) {
 // next one — otherwise a single bad send wedges the whole queue behind it.
 func TestWorkerTransportErrorFailsAndContinuesQueue(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	badBook := setupBookWithFile(t, db, libraryDir, "bad.epub", []byte("bad"))
@@ -172,7 +163,7 @@ func TestWorkerTransportErrorFailsAndContinuesQueue(t *testing.T) {
 
 func TestWorkerOversizedFileFailsWithoutCallingTransport(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	const size = resend.MaxAttachmentSize + 1024*1024 // 29MB
@@ -221,7 +212,7 @@ func TestWorkerOversizedFileFailsWithoutCallingTransport(t *testing.T) {
 
 func TestWorkerMissingFileLocationFails(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	bookID := setupBookWithFile(t, db, libraryDir, "gone.epub", []byte("x"))
@@ -259,7 +250,7 @@ func TestWorkerMissingFileLocationFails(t *testing.T) {
 // is nothing left to send.
 func TestWorkerPrunedBookFails(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	bookID := setupBookWithFile(t, db, libraryDir, "prune.epub", []byte("x"))
@@ -304,7 +295,7 @@ func TestWorkerPrunedBookFails(t *testing.T) {
 func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		libraryDir := t.TempDir()
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -351,7 +342,7 @@ func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
 func TestWorkerCancellationLeavesRowSendingForRecovery(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		libraryDir := t.TempDir()
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		ctx, cancel := context.WithCancel(context.Background())
 
 		bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
@@ -415,7 +406,7 @@ func TestWorkerCancellationLeavesRowSendingForRecovery(t *testing.T) {
 
 func TestWorkerRecordsDeliveryEvenIfCancelledOnTheWayBack(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -450,7 +441,7 @@ func TestWorkerRecordsDeliveryEvenIfCancelledOnTheWayBack(t *testing.T) {
 
 func TestWorkerStorageFailureDoesNotClaimTheFileIsGone(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
@@ -497,7 +488,7 @@ func TestWorkerStorageFailureDoesNotClaimTheFileIsGone(t *testing.T) {
 func TestWorkerTimeoutIsRecordedAsUnknownOutcome(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		libraryDir := t.TempDir()
-		db := openTestDB(t)
+		db := storagetest.Open(t)
 		ctx := context.Background()
 
 		var logged bytes.Buffer
@@ -577,7 +568,7 @@ func TestSendDeadlineScalesWithSize(t *testing.T) {
 // filesystem failure that genuinely means "gone".
 func TestWorkerDeletedFileIsGone(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	bookID := setupBookWithFile(t, db, libraryDir, "deleted.epub", []byte("x"))
@@ -644,7 +635,7 @@ func TestWorkerUnreadableFileIsNotGone(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			libraryDir := t.TempDir()
-			db := openTestDB(t)
+			db := storagetest.Open(t)
 			ctx := context.Background()
 
 			var logged bytes.Buffer
@@ -690,7 +681,7 @@ func TestWorkerUnreadableFileIsNotGone(t *testing.T) {
 // keeps for a month, so the sender asks the scanner's own question first.
 func TestSendUnderEmptyTopLevelDirRecordsUnreadable(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	if err := os.Mkdir(filepath.Join(libraryDir, "vol"), 0o755); err != nil {
@@ -735,7 +726,7 @@ func TestSendUnderEmptyTopLevelDirRecordsUnreadable(t *testing.T) {
 // evidence the volume is mounted, so an absent file there really is gone.
 func TestSendUnderPopulatedTopLevelDirRecordsGone(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	if err := os.Mkdir(filepath.Join(libraryDir, "vol"), 0o755); err != nil {
@@ -774,7 +765,7 @@ func TestSendWhenTheDirectoryTestFailsRecordsUnreadable(t *testing.T) {
 		t.Skip("running as root: directory mode bits aren't enforced")
 	}
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	// The book's own directory is gone, so the walk reaches the sibling —
@@ -834,7 +825,7 @@ func TestSendWhenTheDirectoryTestFailsRecordsUnreadable(t *testing.T) {
 // reconcileMissing makes.
 func TestSendRootLevelMissingFileRecordsGone(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
@@ -867,7 +858,7 @@ func TestSendRootLevelMissingFileRecordsGone(t *testing.T) {
 // otherwise skip every terminal write in process.
 func TestWorkerRecoversAPanickingTransportAndFailsTheSend(t *testing.T) {
 	libraryDir := t.TempDir()
-	db := openTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 
 	crashID := setupBookWithFile(t, db, libraryDir, "crash.epub", []byte("x"))

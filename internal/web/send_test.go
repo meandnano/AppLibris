@@ -5,24 +5,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"library/internal/service"
 	"library/internal/storage"
+	"library/internal/storage/storagetest"
 )
-
-func newSendTestDB(t *testing.T) *storage.DB {
-	t.Helper()
-	db, err := storage.Open(filepath.Join(t.TempDir(), "library.db"))
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
 
 var sendTestBookSeq int
 
@@ -56,7 +46,7 @@ func postSendForm(handler http.Handler, id int64, form url.Values, hx bool) *htt
 }
 
 func TestSendHandlerEnqueuesAndReturnsSendingFragment(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
@@ -85,7 +75,7 @@ func TestSendHandlerEnqueuesAndReturnsSendingFragment(t *testing.T) {
 // response's swap can disable the button — the no-JS path never disables
 // it at all. Both must render the one pending send, not a fresh one each.
 func TestSendHandlerDoublePostRendersTheSamePendingSend(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
@@ -126,7 +116,7 @@ func TestSendHandlerDoublePostRendersTheSamePendingSend(t *testing.T) {
 // — this test is about the *polling* contract specifically, not every
 // hx-* attribute in the fragment.
 func TestSendStatusHandlerTerminalFragmentDoesNotRepoll(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	id := createSendTestBook(t, db)
 
@@ -160,7 +150,7 @@ func TestSendStatusHandlerTerminalFragmentDoesNotRepoll(t *testing.T) {
 }
 
 func TestSendStatusHandlerMismatchedBookReturns404(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	bookID := createSendTestBook(t, db)
 	otherBookID := createSendTestBook(t, db) // a second book, distinct id
@@ -181,7 +171,7 @@ func TestSendStatusHandlerMismatchedBookReturns404(t *testing.T) {
 }
 
 func TestSendHandlerNonHXRequestRedirects303(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
@@ -200,7 +190,7 @@ func TestSendHandlerNonHXRequestRedirects303(t *testing.T) {
 }
 
 func TestSendControlWhenDisabled(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), false, false)
 
@@ -238,7 +228,7 @@ func TestSendControlWhenDisabled(t *testing.T) {
 // directly: a malicious or malformed provider response must never reach
 // the page as live markup.
 func TestSendStatusHandlerEscapesFailureReason(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	id := createSendTestBook(t, db)
 
@@ -268,7 +258,7 @@ func TestSendStatusHandlerEscapesFailureReason(t *testing.T) {
 }
 
 func TestSendHandlerInvalidAddressRendersFieldError(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
@@ -290,7 +280,7 @@ func TestSendHandlerInvalidAddressRendersFieldError(t *testing.T) {
 }
 
 func TestSendHandlerUnknownBookReturns404(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
 	rec := postSendForm(handler, 99999, url.Values{"recipient": {"reader@kindle.com"}}, true)
@@ -312,7 +302,7 @@ func postSendFormFrom(handler http.Handler, id int64, form url.Values, fetchSite
 }
 
 func TestSendHandlerRejectsCrossSitePost(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
@@ -337,7 +327,7 @@ func TestSendHandlerAllowsSameOriginAndMetadataLessPosts(t *testing.T) {
 	// that sends no fetch metadata at all — neither is the cross-origin
 	// page the guard exists for, so both must still work.
 	for _, fetchSite := range []string{"same-origin", "none", ""} {
-		db := newSendTestDB(t)
+		db := storagetest.Open(t)
 		id := createSendTestBook(t, db)
 		handler := Routes(service.New(db), t.TempDir(), true, false)
 
@@ -368,7 +358,7 @@ func postRemoveRecipientForm(handler http.Handler, bookID int64, address string,
 }
 
 func TestRemoveRecipientHandlerDeletesAndReturnsReRenderedControl(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	id := createSendTestBook(t, db)
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "Mine", time.Now()); err != nil {
@@ -397,7 +387,7 @@ func TestRemoveRecipientHandlerDeletesAndReturnsReRenderedControl(t *testing.T) 
 // Removing an address that doesn't exist (a double-submit, two open tabs)
 // is a slip, not an error — the control just comes back unchanged.
 func TestRemoveRecipientHandlerUnknownAddressIsNotAnError(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
@@ -411,7 +401,7 @@ func TestRemoveRecipientHandlerUnknownAddressIsNotAnError(t *testing.T) {
 // the address and lands back on the book page via a 303, exactly like
 // sendHandler's own progressive-enhancement split.
 func TestRemoveRecipientHandlerNonHXRequestRedirects303(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	id := createSendTestBook(t, db)
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
@@ -437,7 +427,7 @@ func TestRemoveRecipientHandlerNonHXRequestRedirects303(t *testing.T) {
 }
 
 func TestRemoveRecipientHandlerRejectsCrossSitePost(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	id := createSendTestBook(t, db)
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
@@ -470,7 +460,7 @@ func TestRemoveRecipientHandlerRejectsCrossSitePost(t *testing.T) {
 // real action — the no-JS path's whole reason for existing, which a test
 // client can assert on but not execute.
 func TestSendControlRemoveButtonMarkupContract(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	id := createSendTestBook(t, db)
 	if _, err := db.CreateRecipient(ctx, "reader@kindle.com", "", time.Now()); err != nil {
@@ -495,7 +485,7 @@ func TestSendControlRemoveButtonMarkupContract(t *testing.T) {
 }
 
 func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 	ctx := context.Background()
@@ -548,7 +538,7 @@ func TestSendHandlerInvalidAddressKeepsPreviousSendAndTypedValues(t *testing.T) 
 // since noSwap is consulted before the element at every wildcard step, so
 // an hx-status:5xx could never be reached.
 func TestEnabledSendFormOptsIts503IntoSwapping(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 
@@ -579,7 +569,7 @@ func TestEnabledSendFormOptsIts503IntoSwapping(t *testing.T) {
 // The rejection comes back as the whole page at 422, keeping the result
 // already on screen, and queues nothing.
 func TestSendHandlerNonHXInvalidAddressRendersWholePage422(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	id := createSendTestBook(t, db)
 	handler := Routes(service.New(db), t.TempDir(), true, false)
 	ctx := context.Background()
@@ -638,7 +628,7 @@ func TestSendHandlerNonHXInvalidAddressRendersWholePage422(t *testing.T) {
 // control offers no button at all and says why, on the full page and on
 // every fragment route alike; an EPUB's control is untouched.
 func TestSendControlWithholdsTheButtonForAnUnsendableFormat(t *testing.T) {
-	db := newSendTestDB(t)
+	db := storagetest.Open(t)
 	ctx := context.Background()
 	fb2 := createSendTestBookWithFormat(t, db, "fb2")
 	epub := createSendTestBook(t, db)

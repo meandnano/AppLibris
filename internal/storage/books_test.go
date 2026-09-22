@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// The same few lines as storagetest.Open, minus the template: this package
+// is what storagetest imports, so reaching for it here would be a cycle.
+// Change the two together.
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
 	db, err := Open(filepath.Join(t.TempDir(), "library.db"))
@@ -1265,16 +1268,25 @@ func TestPruneMissingFilesHandlesMoreIDsThanOneSQLChunk(t *testing.T) {
 
 	const total = pruneMissingFilesChunkSize + 200
 	var fileIDs []int64
-	for i := 0; i < total; i++ {
-		path := fmt.Sprintf("book-%d.epub", i)
-		if _, _, _, _, err := db.CreateBookWithFile(ctx, Book{ContentHash: fmt.Sprintf("hash-%d", i), Title: path, Format: "epub"}, nil, path, 100, mtime); err != nil {
-			t.Fatalf("CreateBookWithFile %s: %v", path, err)
+	// One transaction for the lot: a CreateBookWithFile and a FindFileByPath
+	// each would be two per row, and this test is about the chunking, not
+	// about how the rows arrive.
+	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		for i := 0; i < total; i++ {
+			path := fmt.Sprintf("book-%d.epub", i)
+			bookID, err := createBookTx(ctx, tx, Book{ContentHash: fmt.Sprintf("hash-%d", i), Title: path, Format: "epub"}, nil)
+			if err != nil {
+				return fmt.Errorf("create book %s: %w", path, err)
+			}
+			fileID, err := upsertBookFileTx(ctx, tx, bookID, path, 100, mtime)
+			if err != nil {
+				return fmt.Errorf("upsert file %s: %w", path, err)
+			}
+			fileIDs = append(fileIDs, fileID)
 		}
-		f, err := db.FindFileByPath(ctx, path)
-		if err != nil || f == nil {
-			t.Fatalf("FindFileByPath %s: %+v, %v", path, f, err)
-		}
-		fileIDs = append(fileIDs, f.ID)
+		return nil
+	}); err != nil {
+		t.Fatalf("seed books: %v", err)
 	}
 	if err := db.SetFilesMissing(ctx, fileIDs, old); err != nil {
 		t.Fatalf("SetFilesMissing: %v", err)
