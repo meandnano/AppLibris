@@ -947,9 +947,6 @@ func TestLibraryPageOffersNoPastingWhenImportIsDisabled(t *testing.T) {
 	if strings.Contains(body, "data-paste-link") {
 		t.Errorf("a read-only library renders the paste dialog:\n%s", body)
 	}
-	if strings.Contains(body, "paste-link.js") {
-		t.Errorf("a read-only library loads paste-link.js:\n%s", body)
-	}
 	if strings.Contains(body, "data-paste-button") || strings.Contains(body, "search__paste") {
 		t.Errorf("a read-only library renders the Paste button:\n%s", body)
 	}
@@ -989,13 +986,14 @@ func TestLibraryPageRendersThePasteButtonHidden(t *testing.T) {
 	}
 }
 
-// On the Import page a paste would compete with its own link form
-func TestImportPageDoesNotLoadPasteLink(t *testing.T) {
+// On the Import page a paste would compete with its own link form. The
+// script loads everywhere and stands down without the dialog
+func TestImportPageRendersNoPasteDialog(t *testing.T) {
 	handler, _, _ := newImportHandler(t, 1<<20)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
-	if body := rec.Body.String(); strings.Contains(body, "paste-link.js") || strings.Contains(body, "data-paste-link") {
+	if body := rec.Body.String(); strings.Contains(body, "data-paste-link") || strings.Contains(body, "data-paste-button") {
 		t.Errorf("the Import page offers pasting a link:\n%s", body)
 	}
 }

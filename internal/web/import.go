@@ -39,9 +39,9 @@ const uploadRate = 1 << 20
 const responseWindow = 30 * time.Second
 
 // linkFormLimit bounds the link form's body: one urlencoded field whose
-// value StageURL refuses past 2 KiB anyway, with room for percent-encoding
-// to triple it
-const linkFormLimit = 8 << 10
+// value StageURL refuses past MaxLinkBytes anyway, with room for
+// percent-encoding to triple it and for the field's name
+const linkFormLimit = 4 * service.MaxLinkBytes
 
 // importPage is the data import.html and its fragments render against.
 // Preview nil is the idle state, where the panel shows the file input;

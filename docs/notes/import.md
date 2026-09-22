@@ -125,7 +125,7 @@ Rules for `internal/importer`, `scanner.IndexFile`, the import surface of `inter
 - **While a link hands off, `paste-link.js` holds the drop's `uploading` flag, so drops and pastes are refused; a bfcache `pageshow`, Escape and the dialog's Cancel release it.** Two submits race to navigate the tab.
 - **Cancel during a download calls `window.stop()` before it closes the dialog.** `close()` fires no `cancel` event, so the navigation would otherwise land on the preview behind a dialog that looked cancelled.
 - **The button shows busy for a link handoff only.** A file, pasted or dropped, is the drop's upload, and its overlay says so.
-- **`paste-link` and `paste-link.js` are included only from `library.html` beside `import-drop`, the script after `drop.js`.** It hands files to the drop's script and has nothing to hand them to elsewhere.
+- **`paste-link` is included only from `library.html` beside `import-drop`; `paste-link.js` loads from `site-scripts` after `drop.js` and returns at once without the dialog or `window.importDrop`.** It hands files to the drop's script and has nothing to hand them to elsewhere.
 
 ## Deliberately absent
 

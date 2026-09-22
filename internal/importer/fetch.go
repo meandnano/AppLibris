@@ -17,8 +17,11 @@ const (
 	fetchTLSHandshakeTimeout   = 10 * time.Second
 	fetchResponseHeaderTimeout = 15 * time.Second
 
-	// maxFetchRedirects is how many hops are followed. A download link
-	// bounces once or twice to a CDN, so more than this is a loop or a
+	// maxFetchRedirects is how many hops are followed, so the sixth
+	// redirect is refused. enrich.CheckCoverRedirect counts requests
+	// instead, net/http's own convention, and refuses the fifth; the two
+	// bound different fetches and neither count is load-bearing. A download
+	// link bounces once or twice to a CDN, so more than this is a loop or a
 	// host walking the fetch around
 	maxFetchRedirects = 5
 )
@@ -28,9 +31,9 @@ const (
 // the body's own time
 const FetchStartTimeout = fetchDialTimeout + fetchTLSHandshakeTimeout + fetchResponseHeaderTimeout
 
-// fetchUserAgent is the agent every outbound client of this app sends, so
-// a host that throttles Go's generic default treats a download no worse
-// than a cover fetch
+// fetchUserAgent is the agent the provider clients and the cover fetch
+// also send, so a host that throttles Go's generic default treats a
+// download no worse than a cover fetch
 const fetchUserAgent = "library/1.0 (+https://github.com/meandnano/AppLibris)"
 
 // Fetcher downloads a book from a link a person pasted. Every connection
@@ -98,7 +101,8 @@ func checkFetchRedirect(req *http.Request, via []*http.Request) error {
 		return fmt.Errorf("redirect scheme %q is not http or https", req.URL.Scheme)
 	}
 	// The previous URL can carry a signed token the next host has no
-	// business seeing
+	// business seeing. A cover or lookup URL is a public API's and carries
+	// none, which is why their redirect policies keep the header
 	req.Header.Del("Referer")
 	return nil
 }

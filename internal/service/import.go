@@ -36,9 +36,9 @@ var (
 	ErrDownloadFailed = errors.New("service: the download failed")
 )
 
-// maxLinkBytes bounds a pasted link. A real download link, signed query
+// MaxLinkBytes bounds a pasted link. A real download link, signed query
 // and all, fits well inside it
-const maxLinkBytes = 2 << 10
+const MaxLinkBytes = 2 << 10
 
 // LinkFetcher downloads a link without reading the body.
 // *importer.Fetcher is the one production implementation
@@ -109,12 +109,11 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 	}
 
 	d, err := s.fetcher.Fetch(ctx, link)
-	var status *importer.StatusError
-	switch {
-	case err == nil:
-	case errors.As(err, &status), errors.Is(err, importer.ErrTooLarge):
-		return nil, err
-	default:
+	if err != nil {
+		var status *importer.StatusError
+		if errors.As(err, &status) || errors.Is(err, importer.ErrTooLarge) {
+			return nil, err
+		}
 		return nil, downloadFailure(ctx, err)
 	}
 	defer d.Body.Close()
@@ -173,7 +172,7 @@ func (b *bodyReader) Read(p []byte) (int, error) {
 
 func validLink(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
-	if len(raw) > maxLinkBytes {
+	if len(raw) > MaxLinkBytes {
 		return "", ErrUnsupportedLink
 	}
 	u, err := url.Parse(raw)
