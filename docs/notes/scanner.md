@@ -1,484 +1,296 @@
-# Scanner and filesystem watcher
+# Scanner
 
-Rationale for `internal/scanner` and the scan loop in `cmd/server`. The
-package map and the invariants that must hold are in CLAUDE.md.
+Rules for `internal/scanner` and for the scan loop, the startup mount
+checks and the directory resolution in `cmd/server`.
 
 ## Sweep and identity
 
-There is one code path into the index, `Scan`, and two things that wake it:
-a ticker (`SCAN_INTERVAL`) and a poke from the watcher. A sweep is a sweep
-however it was woken, two can never overlap, and nothing about the index's
-correctness depends on an event arriving. The rescan is the mechanism; the
-watcher only buys latency.
+- **`Scan` is the one sweep, woken by the `SCAN_INTERVAL` ticker or a
+  watcher poke, and two sweeps never overlap.** The rescan is the
+  mechanism and the watcher only buys latency, so correctness never
+  depends on an event arriving.
+- **The startup sweep runs in the background.** The server answers
+  `/healthz` while a large library is still indexing.
+- **A file whose path, size and mtime match its `book_files` row is
+  skipped; only a mismatch pays for the hash and the parse.** That is what
+  keeps a rescan of a large library fast.
+- **Identity is the content hash; the path is an attribute. Known content
+  at a new path is a second `book_files` row, never a new book.** A moved
+  file and a duplicate copy look the same from any one path, and one book
+  for both carries edits through a reorganisation. The grid flags several
+  locations and never merges or deletes.
+- **`file_path` is relative to `LIBRARY_DIR` and slash-separated.** The
+  index survives the library mounted at another absolute path.
+- **`scanFile` reads by content hash on the read pool and inserts later;
+  when two callers both insert, the loser re-reads and attaches its path
+  to the winner's book.** `books.content_hash` is UNIQUE, and this is what
+  makes a sweep and an import converge on one book.
+- **New content at a known path reassigns the row and, in the same
+  transaction, deletes a book left with no locations, logged at Info.**
+  `ReassignFileAndPruneOrphan` and `CreateBookWithFile` both reassign
+  unconditionally, so either can orphan the previous owner.
+- **A same-path replacement inherits the old book's `manual` fields, their
+  provenance and its `send_log` rows (`inheritFromReplacedBookTx`).
+  Reassignment across paths never inherits.** A rewrite of the same book
+  and a different book at the same name are indistinguishable from one
+  path, and no title guard separates them, since a write-back is exactly
+  the case where the title just changed. An inherited wrong value is
+  editable where a lost one is gone.
+- **Only what a person authored moves: provider values are not inherited,
+  `enrichment_jobs` cascade, the new file's cover is extracted afresh, and
+  an empty `manual` value is inherited like any other.** A Fetch recreates
+  a provider's value, and a cleared field stays `manual`. The inherited
+  fields are named at Info, since `manual` renders no marker on the page.
+- **Supported names are matched on suffix (`MatchedSuffix`), not
+  `filepath.Ext`, and `.fb2` and `.fb2.zip` both record `format` as `fb2`
+  (`BookFormat`).** `.fb2.zip` is two extensions, and packaging is not
+  something the format badge surfaces.
+- **`Scan` checks `ctx.Err()` before the walk and on every entry.** A
+  shutdown stops the walk instead of failing each remaining database call.
+  `cmd/server` runs the loop on `scanCtx` and waits for it
+  (`waitForBackground`) after the HTTP server stops and before the
+  database closes.
+- **A directory the walk cannot read costs its subtree and counts an
+  error; it does not abort the sweep.**
 
-The startup sweep runs in the background so the server answers `/healthz`
-immediately. A large library delays its own completeness rather than the
-process coming up.
+## Embedded metadata
 
-A cheap `path + size + mtime` comparison against `book_files` skips an
-unchanged file entirely. Only a mismatch pays for a SHA-256 hash and a
-metadata parse, which is what keeps a rescan of a large library fast.
-
-**Embedded metadata is bounded where it is extracted** (`capMetadata`), to
-the same rules a person's edit and a provider's answer meet — one set of
-constants in `internal/storage`, below all three writers. Scalars are
-truncated on a UTF-8 boundary and the author list is cut at
-`storage.MaxAuthors`, with an Info line naming the path and the field: a
-verbose file is worth knowing about and is not an error. Truncated, never
-rejected, because a book whose description is too long is still a book and a
-filename title is worse than prose cut at 64 KiB. A cut field is still
-`embedded` in `field_sources`: provenance says where a value came from, not
-whether it arrived whole.
-
-Length is not the only thing the editor refuses. `normalizeField` rejects a
-line break in every field but description, and a metadata element whose
-text is wrapped across two lines in the source XML — legal, and what a
-generator that pretty-prints produces — reaches the parsers with the break
-intact, since `TrimSpace` removes only what sits at either end. So every
-field but description is collapsed onto one line first, the same
-`strings.Fields` join `internal/enrich`'s `sanitizeValue` applies to a
-provider's answer, and description takes the edge trim alone, which is the
-rest of what `normalizeField` would hand back. Both run before the length
-cut: each can only shorten the value, and cutting first would let a
-truncation boundary decide whether a break survives. A description's blank
-lines are already capped by the parser that produced it, through
-`storage.CapBlankLines` — `internal/epub` inside `PlainDescription`,
-`internal/fb2` at the end of `annotationText` — so capping them again here
-would bound a run neither can hand over.
-
-The point of both is that a value the editor refuses is never stored. A
-10 MB `<dc:description>` in the column is a description that can no longer
-be saved unchanged; a wrapped title is one an `<input type="text">` silently
-rewrites on submit, flipping its provenance to `manual`, and a wrapped
-author name is one the textarea's Save splits into two authors. Nothing
-re-derives either afterwards.
-
-**Identity is the content hash, not the path.** Known content at a new
-path gets an additional `book_files` row rather than a new book. A moved
-file and a genuine duplicate copy are indistinguishable from any single
-path's point of view, so both are handled the same way, and enriched or
-hand-edited metadata survives a reorganisation. The grid flags a book with
-more than one location; it never merges or deletes, because the scanner
-owns the library directory and its rule is that writes only ever create new
-paths.
-
-Content replacing a known path's previous content reassigns that row and,
-in the same transaction, deletes whatever book is left with no locations.
-Both `ReassignFileAndPruneOrphan` and `CreateBookWithFile` reassign a path
-unconditionally, so either can orphan the previous owner; the deletion is
-logged at Info.
-
-**A same-path replacement carries the old book's `manual` fields, their
-provenance and its `send_log` rows onto the new one**, in that same
-transaction (`inheritFromReplacedBookTx`). One path sees two different
-events as the same state — the same book rewritten (Calibre's metadata
-write-back, `ebook-polish`, `kepubify`, a re-zipped re-download) and a
-different book dropped at the same filename — and no test tells them apart.
-A title-similarity guard is wrong in both directions: write-back is
-precisely the case where the file's title has just changed to match the
-edit, and a re-download's has not changed at all. The population reaching
-this path is overwhelmingly the same book, and the asymmetry decides it:
-an inherited value is visible on the detail page with an edit affordance
-beside it, where a lost one is gone. Empty is recoverable, wrong is
-editable, lost is neither.
-
-Only what a person is the author of moves. A provider-sourced value is
-recreated by a Fetch from the same catalogues, and a provider's guess about
-the old file is not a fact about the new one; `enrichment_jobs` cascade,
-since a pending intention about the old content is meaningless for the new;
-the new file's embedded cover is extracted as for any other new book. An
-*empty* `manual` value is inherited like any other, because a cleared field
-stays `manual`. The fields that moved are named at Info beside the orphan
-line, since a value on a book whose file was just rewritten is otherwise
-unexplained — `manual` renders no marker, so the page cannot say it.
-
-Reassignment across paths never inherits. The book `ReassignFileAndPruneOrphan`
-can orphan is a different book that happened to lose its last copy, not
-this one under new bytes.
-
-Supported files are matched on filename *suffix*, not `filepath.Ext`,
-because `.fb2.zip` is two extensions. `.fb2` and `.fb2.zip` both record
-`format` as `fb2`: how a book is packaged on disk is not something the
-format badge should surface.
-
-`Scan` checks `ctx.Err()` before the walk and on every entry, so a shutdown
-stops the walk outright and skips reconciliation instead of failing each
-remaining file's database call one at a time.
+- **`capMetadata` bounds embedded metadata in `createBook` to what the
+  editor accepts: every field but description is collapsed onto one line,
+  then truncated on a rune boundary through `storage.CapField`, the author
+  list is cut at `storage.MaxAuthors`, and each cut is logged at Info. The
+  file is never rejected and the field stays `embedded`.** A value the
+  editor refuses must never be stored, or it cannot be saved unchanged
+  again. Provenance says where a value came from, not whether it arrived
+  whole.
+- **The collapse runs before the cut.** Cutting first would let a
+  truncation boundary decide whether a break survives. The collapse is the
+  same `strings.Fields` join as `internal/enrich`'s `sanitizeValue`,
+  because `normalizeField` rejects a line break in every field but
+  description and a pretty-printed XML element reaches the parser with its
+  break intact.
+- **Description keeps its line breaks; `storage.CapField` caps its blank
+  runs and trims the edges instead of collapsing it.** A description is
+  the one field whose breaks carry meaning, and the cap bounds a run
+  neither parser can hand over.
 
 ## Paths and symlinks
 
-`book_files.file_path` is stored relative to `LIBRARY_DIR`,
-slash-separated, so the index survives the library being mounted at a
-different absolute path (`./library` on a dev box, `/library` in a
-container). A directory the walk cannot read costs its subtree and counts
-an error; it does not abort the sweep.
-
-`cmd/server` resolves `LIBRARY_DIR`, `COVERS_DIR` and `DB_PATH`'s directory
-so every consumer is handed one root that means the same thing whether or
-not links are followed, and the two halves resolve differently.
-
-**The library must exist and may be read-only** (`requireExistingDir`): it
-is stat'd, never created, and an absent one is a startup error naming
-`LIBRARY_DIR`. Creating it is the single call that would turn a
-legitimately read-only mount into a startup failure — the scanner only
-reads the library, and the watcher's delivery probe already treats an
-unwritable root as an Info-level skip. Creating it and warning would hide
-the misconfiguration under an empty grid, which is exactly what
-`LIBRARY_DIR` pointing at the wrong volume already looks like, leaving the
-log as the only place the mistake shows.
-
-**The covers and database directories are created** (`resolveDir`), and a
-permission failure names both uids: the uid the process runs as and the
-owner of the nearest *existing* ancestor, since the target is what
-`MkdirAll` could not make. `mkdir /data/covers: permission denied` names
-neither side of the mismatch it reports, and both are needed to fix it —
-the container runs as whatever uid it was given while a NAS bind mount is
-owned by the share's user, an Unraid one by `nobody`, and a fresh named
-volume by root. The ancestor is named as an absolute path: a relative
-`COVERS_DIR`, which is what the development target passes, leaves the
-ancestor of `./data/covers` reading back as `data`, which is neither the
-path the person wrote nor one they can go and look at. The
-owner comes from the platform's stat struct, so `ownerUID` is build-tagged
-`unix` — not `linux`, though the image is: `syscall.Stat_t` carries `Uid` on
-every unix, and the test asserting the message runs on the development
-machine and on non-Linux CI runners, where a narrower tag would take the
-fallback and fail — and reports nothing elsewhere.
-
-`LIBRARY_DIR` is the resolution that matters most:
-`filepath.WalkDir` `Lstat`s its root and never follows a link, so a
-symlinked root (`~/Books -> /volume1/books`, the ordinary NAS shape) would
-otherwise walk as a single non-directory entry and report an empty library
-with no error. A **dangling** link anywhere in a configured path is a
-startup error naming both the link and its target, and `brokenLink` runs
-in front of both resolution halves: `MkdirAll` fails on a dangling link
-too, but its message names only the link and never the missing target,
-which is the whole question when a volume did not mount. It walks every
-component, because the link is as likely to be the mount point as the
-directory under it, and a merely absent component is not a broken link —
-that one is `MkdirAll`'s job on the writable half and the `LIBRARY_DIR`
-error on the other. `DB_PATH` cannot be resolved before the first run (the
-file does not exist yet), so only its directory is.
-
-Inside the library, **a symlinked directory is not followed**, and is
-reported rather than passed over. `WalkDir` delivers it as a non-directory
-entry with no supported suffix, which the ordinary filter would drop in
-silence; the scanner instead logs it at Warn with its target and counts it
-in `Result.Errors`, on every sweep, as pressure toward a bind mount.
-Following it would need a `(dev, ino)` cycle guard, and a link pointing
-outside the library would index files whose relative `file_path` cannot
-say where they are.
-
-The branch turns on `os.Stat`, and it has three answers, not two. A link
-resolving to a directory is the refusal above. A link whose `Stat` fails
-with anything but `fs.ErrNotExist` (`ELOOP`, `EACCES`) is reported the same
-way: an unknown is not evidence, and nothing about the name says which of
-the other two it would have been. Only `ErrNotExist` or a link to a file
-takes the ordinary route, so a symlinked *file* is indexed like any other
-(stat, open and hash all go through the link) and a dangling one is a
-per-file error only if its name carries a supported suffix.
-
-The cost of not following: a real directory later replaced by a link is
-never re-indexed. `reconcileMissing`'s `Lstat` follows the link (only the
-leaf is not resolved), so those rows pass it and are marked missing, which
-is the honest annotation for a path the walk no longer names. They are
-never pruned: the walk records every unfollowed link in `linkedDirs`, and
-a row under one is refused whatever its mark's age (see Missing files),
-which is what keeps a book whose file is still readable through the link
-from being deleted after the grace period.
+- **`LIBRARY_DIR` must exist and may be read-only: `requireExistingDir`
+  stats it, never creates it, and an absent one fails startup naming
+  `LIBRARY_DIR`.** Creating it is the one call that turns a read-only
+  mount into a startup failure, and creating it with a warning hides a
+  wrong volume under an empty grid.
+- **`COVERS_DIR` and `DB_PATH`'s directory are created (`resolveDir`), and
+  a refused `MkdirAll` names both the uid the process runs as and the owner
+  of the nearest existing ancestor, as an absolute path.** `permission
+  denied` alone names neither side of the mismatch, and a relative
+  `COVERS_DIR` would otherwise name an ancestor such as `data` that nobody
+  wrote. `ownerUID` is build-tagged `unix`, not `linux`, because the test
+  asserting the message runs on non-Linux machines.
+- **Both `requireExistingDir` and `resolveDir` finish with `EvalSymlinks`.** `filepath.WalkDir` `Lstat`s
+  its root and never follows a link, so an unresolved symlinked root
+  reports an empty library with no error. Only `DB_PATH`'s directory is
+  resolved, because the file does not exist before the first run.
+- **A dangling link in any component of a configured path fails startup
+  naming link and target. `brokenLink` runs before both resolution halves
+  and walks every component; a merely absent component is not a broken
+  link.** `MkdirAll` fails on a dangling link too but names only the link,
+  and the missing target is the whole question when a volume did not
+  mount. The link is as likely to be the mount point as the directory
+  under it.
+- **Inside the library a symlinked directory is not followed; it is logged
+  at Warn with its target and counted in `Result.Errors` on every sweep.
+  Symlinked files are indexed like any other.** `WalkDir` delivers the
+  link as a non-directory entry the suffix filter would drop in silence.
+  Following it needs a cycle guard, and a target outside the library has
+  no relative `file_path`.
+- **The branch turns on `os.Stat` with three answers: a directory is
+  refused, a `Stat` error other than `fs.ErrNotExist` is reported the same
+  way, and only `ErrNotExist` or a file takes the ordinary route.** An
+  unknown is not evidence. A dangling link is a per-file error only under
+  a supported suffix.
+- **Rows under an unfollowed link (`linkedDirs`) are marked missing and
+  never pruned.** `reconcileMissing`'s `Lstat` resolves through the link
+  and succeeds, so without the guard the grace period deletes a book whose
+  file is readable. The mark is true: the walk does not name that path.
 
 ## Covers and regeneration
 
-A recorded cover whose file is missing or zero bytes is re-extracted from
-the book and its path refreshed, which is what makes `COVERS_DIR`
-disposable. Any other stat failure warns without re-parsing the source.
-
-A cover a **provider** supplied has no original in the book to rebuild
-from, so the sweep must not fail to re-extract it forever. The ordering is
-the rule: `readEmbeddedCover` runs first, and `field_sources` is consulted
-only once re-extraction has come back empty. A book can carry an embedded
-cover *and* a provider row (`cover.Store` failed at first sight, leaving
-`cover_retry` set and no `cover` row; enrichment then supplied one), so
-"there is a provider row" never means "there is nothing to re-extract". A
-re-extracted cover goes through `UpdateBookCoverPath`, which drops the
-`cover` row in the same transaction, since the image is now the scanner's.
-
-Only when the book yields nothing is the cover forgotten
-(`storage.ClearProviderCover`): `cover_path` emptied, the row removed, the
-book back in enrichment's missing set so the Fetch button repairs it, and
-the grid showing an honest empty box rather than an `<img>` pointing at a
-file that is gone. **The provider test is that a `field_sources` row for
-`cover` exists**, not that it names a provider rather than `embedded`: a
-scanner-extracted cover has no provenance row at all, so a string compare
-against `embedded` matches nothing while reading as correct.
-
-Three ambiguities resolve the same way, **an unknown is not evidence**: a
-failed provenance read, a failed `readEmbeddedCover`, and a stat failing
-with anything but `fs.ErrNotExist` (`coverFileDefinitelyGone`) each leave
-the book untouched. The read-error case matters most, because clearing
-there is permanent: an empty `cover_path` returns at
-`maybeRegenerateCover`'s first guard on every later sweep, so the embedded
-original would never be recovered even once the read works again.
-
-Two empty states are kept apart. An empty `cover_path` with no marker
-records that no usable embedded cover exists and is not retried.
-`cover_retry` records a *transient* store failure and is retried on later
-sweeps, skipping the stat check while set. `createBook` splits
-`cover.Store`'s error on `cover.ErrUnsupportedCover`: an I/O failure sets
-the marker, a cover that cannot decode (SVG, BMP, corrupt, over the caps)
-leaves both empty with an Info line. A decode failure fails identically
-forever, and a marker there would re-open and fully re-parse the book on
-every sweep to Warn the same way again. `maybeRegenerateCover`'s own
-`Store` call gets the same split through `storage.RecordUnusableCover`,
-which also removes a stale provider row beside an undecodable embedded
-original. `recordUnusableCover` refuses to write while a stored cover path
-is present unless `coverFileDefinitelyGone` confirms it: with the marker
-set the stat was skipped, so it has no evidence about that file.
-
-Both forgetting writes are guarded on the `cover_path` this sweep observed.
-The scanner decides from a snapshot, then stats, parses a whole book and
-reads provenance before the write lands, and an enrichment run finishing
-inside that window would otherwise have its fresh cover thrown away.
+- **A recorded cover whose file is missing or zero bytes is re-extracted
+  and its path refreshed; any other stat failure warns without
+  re-parsing.** That is what makes `COVERS_DIR` disposable.
+- **`readEmbeddedCover` runs first; `field_sources` is consulted only after
+  re-extraction returns empty.** A book can hold an embedded cover and a
+  provider row at once, when `cover.Store` failed at first sight and
+  enrichment then supplied one. A re-extracted cover goes through
+  `UpdateBookCoverPath`, which drops the `cover` row in the same
+  transaction.
+- **Only a book that yields nothing has its cover forgotten
+  (`storage.ClearProviderCover`), and the provider test is that a
+  `field_sources` row for `cover` exists, never a comparison against
+  `embedded`.** A scanner-extracted cover has no provenance row, so a
+  string compare matches nothing while reading as correct. Forgetting
+  returns the book to enrichment's missing set.
+- **An unknown is not evidence: a failed provenance read, a failed
+  `readEmbeddedCover` and a stat failing with anything but `fs.ErrNotExist`
+  (`coverFileDefinitelyGone`) each leave the book untouched.** Clearing is
+  permanent, since an empty `cover_path` returns at
+  `maybeRegenerateCover`'s first guard on every later sweep.
+- **`cover_retry` marks a transient store failure only; it is retried on
+  later sweeps and skips the stat while set. A decode failure
+  (`cover.ErrUnsupportedCover`) is recorded as no cover, an empty
+  `cover_path` with no marker, and never retried.** A decode failure fails
+  identically forever, and a marker there would re-parse the book on every
+  sweep. `createBook` splits `cover.Store`'s error this way, and
+  `maybeRegenerateCover` gets the same split through
+  `storage.RecordUnusableCover`, which also removes a stale provider row.
+- **`recordUnusableCover` refuses to write while a stored cover path is
+  present unless `coverFileDefinitelyGone` confirms it.** With the marker
+  set the stat was skipped, so the sweep has no evidence about that file.
+- **Both forgetting writes are guarded on the `cover_path` this sweep
+  observed.** The sweep decides from a snapshot and then stats, parses and
+  reads provenance before the write lands; an enrichment run finishing
+  inside that window would otherwise lose its fresh cover.
 
 ## Missing files
 
-A row whose path is gone is reconciled in two phases: first *marked*
-(`missing_since`, via `SetFilesMissing`), then deleted
-(`PruneMissingFiles`, taking the book if it was the last location) once it
-has stayed missing past `MISSING_GRACE`. A row seen again before then has
-its mark cleared. `PruneMissingFiles` does no filtering of its own; every
-guard lives in the scanner, the only place with live filesystem state, and
-decides the id list.
-
-The rules deciding eligibility, most of them guards against reading a
-transient failure as a deletion:
-
-- A row is eligible when `os.Lstat` either fails with `fs.ErrNotExist`
-  specifically or succeeds. Any other error only warns. The check runs
-  fresh every sweep, including for a row already marked, so a row whose
-  failure mode changes (`ErrNotExist` to `EACCES`, say) is never deleted on
-  a confirmation that has gone stale.
-- The one rule running the other way: a **successful** `Lstat` on an unseen
-  row is not an unknown, and is treated exactly as an absence — marked, and
-  prunable under the guards below. The walk is the authority on names — it
-  read that directory
-  cleanly and did not report that exact byte sequence — so a success means
-  either the filesystem matched the recorded spelling to a file the walk
-  recorded under another one, the case-only rename an SMB share or macOS
-  allows, or the file arrived between the walk and the check, which the
-  next sweep clears if the row is still inside its grace period. Leaving
-  the row live under a spelling the
-  walk disagrees with is what a case-only rename would otherwise cost for
-  good: two live rows, "2 paths" on every card, no annotation, no log line,
-  and `internal/sender` free to send from the stale spelling. Marking is
-  reversible, which is why it beats a case-insensitive comparison against
-  the walk's `seen` set: that identifies the alias precisely, says nothing
-  about the between-walk-and-check file, and needs a rule for which
-  spelling is canonical in a package whose identity story is "the path is
-  what the walk said".
-- A row under a directory the sweep could not read *this* sweep is left
-  untouched at both mark and prune time. `Scan` tracks these as
-  `skippedDirs`, a negative list, because `WalkDir` only ever reports a
-  directory-read failure as a second, error-bearing callback; a positive
-  "cleanly read" list is not obtainable from the API.
-- A row under a directory the walk declined to follow because it is a
-  symlink (`linkedDirs`) is marked but never pruned. That directory yielded
-  no files at any depth, exactly as an offline sub-mount does, and the
-  top-level test below misses it wherever the link sits under a directory
-  that still holds books. Its rows' `Lstat` resolves through the link and
-  succeeds, so without this the rule above would mark them and the grace
-  period would then delete a book whose file is present and readable. They
-  are marked rather than left alone, since the annotation is true: the walk
-  does not name that path any more.
-- A row whose **top-level directory yielded no book files this sweep** is
-  marked but never pruned, counted in `Result.Unconfirmed` and broken down
-  per directory in `Result.UnconfirmedDirs`. That is what an
-  offline sub-mount looks like (a second bind mount, an NFS share in a
-  subfolder, a disk mid-rebuild): the directory reads cleanly, so nothing
-  lands in `skippedDirs`, and every row under it fails `Lstat` with
-  `ErrNotExist`, the exact signal the two phases trust. Without this,
-  past `MISSING_GRACE` a weekend rebuild would prune every book on that
-  disk, edits, provenance and enrichment results included, the one thing
-  the scanner destroys that it cannot rebuild.
-- Reconciliation is skipped entirely when the sweep visited zero files,
-  logged at Warn. An unmounted volume can present as an empty directory,
-  so seeing nothing is not evidence that everything is gone.
-
-The row is still *marked* in the third case because the mark is
-reversible, it puts the "missing" annotation on the detail page, and it
-keeps `internal/sender` off the path: `resolveFile` takes the first
-location with a `NULL` `missing_since` and fails the job on a stat error
-without trying the next copy, so an unmarked dead row that sorts first
-fails every send of its book.
-
-The test is the row's top-level directory, not its own. A file under a
-nested directory is under its top-level ancestor too, so emptying
-`a/novels/` while `a/` keeps files still prunes, where a disk mounted at
-`a/` going offline leaves nothing under `a/` at any depth. Two limits
-follow. Only a mount directly under the library root is protected:
-`mnt/disk2` offline beside a populated `mnt/disk1` is pruned after grace.
-And a root-level row has no top-level directory, so it is covered by the
-zero-files guard alone; a root-level file is not a mount shape. Storing
-`st_dev` per row would be the precise test, and is not done because it
-adds the very column the mover section below argues against.
-
-The accepted cost: the last book file deleted from a top-level directory
-stays marked missing, a phantom location annotated "missing", until that
-directory gains a book again or a person forgets the row. The most ordinary
-way to pay it is a renamed top-level folder, where every book under it
-gains a live row and keeps its old one marked. A phantom card is
-recoverable where a pruned book's edits are not.
-
-Forgetting is `POST /books/{id}/locations/forget` over
-`storage.ForgetMissingFile`, offered on the detail page beside a location
-**that is currently marked missing and no other**. A path that is there is
-not something to forget; deleting its row would only make the next sweep
-re-add it. The same rule is a condition on the `DELETE` rather than a read
-taken before it, together with the row belonging to that book, because a
-sweep clearing the mark inside the window between such a read and the
-delete would forget a path that had just come back, and forgetting is not
-reversible. `PruneMissingFiles` is not reused for the same reason: it
-verifies nothing by design, on the understanding that its caller confirmed
-each absence with a live `Lstat` this sweep, which a click has not. A row
-matching neither condition is `(false, false, nil)` — a double click is a
-slip, not an error. It is one location at a time rather than "forget all of
-this book's missing locations", which is one click fewer for the renamed
-folder and wrong for a book with two missing rows for two different
-reasons, the state a person opens the list to disambiguate.
-
-`cmd/server` logs one line per unconfirmed directory with its row count,
-at Warn the first sweep that directory appears and Info while it stays
-there (`unconfirmedLevel`, against a set `periodicScan` carries between
-iterations). The Warn exists to point at residue nothing else surfaces;
-since a person can clear it, repeating the same warning every fifteen
-minutes for the life of a renamed folder is how a log stops being read.
-The set is a loop variable, not a column: losing it on a restart Warns once
-more, which is the right thing to say to someone who has just started the
-server, and it keeps `Scan` stateless and its tests indifferent. A sweep
-that reconciled nothing — an apparently empty library — reported on no
-directory at all, so it leaves the set alone rather than replacing it with
-its own emptiness and re-Warning about everything next time.
-
-`TopLevelDirHasBooks` is the exported, one-path-at-a-time form of the same
-rule, for a caller with no walk of its own; `internal/sender` is its second
-caller (`sending.md`).
+- **A gone path is reconciled in two phases: marked (`SetFilesMissing`,
+  `missing_since`), then deleted (`PruneMissingFiles`, taking a book with
+  no other location) once missing past `MISSING_GRACE`. A row seen again
+  has its mark cleared.** Marking is reversible where pruning is not, so an
+  unmounted disk does not delete edits.
+- **`PruneMissingFiles` filters nothing; every guard lives in the scanner
+  and decides the id list.** The scanner is the only place with live
+  filesystem state.
+- **A row is eligible when `os.Lstat` fails with `fs.ErrNotExist`
+  specifically or succeeds; any other error only warns. The check runs
+  fresh every sweep, marked rows included.** A row whose failure mode
+  changes is never deleted on a stale confirmation.
+- **A successful `Lstat` on a row the walk did not see is not an unknown;
+  it is marked like an absence.** The walk read that directory cleanly and
+  did not report that spelling, so the row is a case-only alias or a file
+  that arrived between walk and check, which the next sweep clears.
+  Marking beats a case-insensitive comparison against `seen` because it
+  needs no rule for which spelling is canonical.
+- **A row under a directory the sweep could not read this sweep is left
+  untouched at both phases (`skippedDirs`).** It is a negative list because
+  `WalkDir` reports a read failure only as a second, error-bearing
+  callback; a positive "cleanly read" list is not obtainable.
+- **A row whose top-level directory yielded no book files this sweep is
+  marked but never pruned, counted in `Result.Unconfirmed` and per
+  directory in `Result.UnconfirmedDirs`.** That is what an offline
+  sub-mount looks like: the directory reads cleanly and every row under it
+  fails `Lstat` with `ErrNotExist`, so without this a weekend rebuild
+  prunes a disk's edits and provenance.
+- **Such a row is still marked.** The mark annotates the page and keeps
+  `internal/sender` off the path: `resolveFile` takes the first location
+  with a `NULL` `missing_since` and fails on a stat error without trying
+  the next.
+- **The test is the row's top-level directory, not its own. Only a mount
+  directly under the library root is protected, and a root-level row is
+  covered by the zero-files guard alone.** A nested directory is under its
+  top-level ancestor too, so emptying `a/novels/` while `a/` keeps files
+  still prunes. A device id per row would be the precise test and is the
+  column the mover rule forbids.
+- **The accepted cost: the last book file deleted from a top-level
+  directory stays a phantom location marked missing until the directory
+  gains a book again or a person forgets the row.** A phantom card is
+  recoverable where a pruned book's edits are not.
+- **Reconciliation is skipped entirely, at Warn, when the sweep visited
+  zero files.** An unmounted volume can present as an empty directory.
+- **Forgetting (`storage.ForgetMissingFile`) is offered only beside a
+  location currently marked missing, one location at a time, and its
+  guards are clauses on the `DELETE`, never a read before it.** A sweep
+  clearing the mark between a read and the delete would forget a path that
+  just came back, and forgetting is not reversible. `PruneMissingFiles` is
+  not reused because it verifies nothing and a click has confirmed no
+  absence. A row matching neither condition answers `(false, false, nil)`.
+  One at a time because two missing rows for two reasons is the state a
+  person opens the list to disambiguate.
+- **`cmd/server` logs one line per unconfirmed directory: Warn the first
+  sweep it appears, Info while it stays (`unconfirmedLevel`, over a set
+  `periodicScan` carries between iterations). A sweep that reconciled
+  nothing leaves the set alone.** Repeating a warning a person can clear
+  on every sweep is how a log stops being read. The set is a loop
+  variable, not a column, so `Scan` stays stateless. A sweep that reported
+  on no directory must not re-Warn about everything next time.
+- **`TopLevelDirHasBooks` is the exported one-path form of the same rule,
+  for `internal/sender`.** See `docs/notes/sending.md`.
 
 ## Indexing one path
 
-`IndexFile` indexes a single file and reports the book it belongs to and
-whether it made one. It is `scanFile` with a fresh `Result`, so a caller
-gets every guard a sweep applies — `capMetadata`, the cover store's split
-between a decode failure and an I/O one, the orphan logging — without a
-second way into the index existing to drift from this one.
-
-`internal/importer` is the caller: a book uploaded through the web UI is
-indexed in the request that copied it into the library, so the response can
-send the reader to the book rather than to a wait. That is safe because
-`scanFile` is idempotent. A sweep reaching the same path afterwards sees a
-matching path, size and mtime and does nothing; one racing the call keys on
-the same content hash and converges on one book with one location.
-
-Three helpers are exported for the same caller — `MatchedSuffix`,
-`BookFormat` and `ExtractMetadata`. A preview has to say what a file is,
-what its format will be called and what it holds, and every one of those
-answers has to be the answer a sweep would give, or the page is describing
-a book the import will not produce. `MatchedSuffix` earns its export twice:
-it is what strips the extension a person's filename carried, and it is why
-the `.part` an import writes mid-copy is inert to a sweep.
-
-`ExtractMetadata` takes its fallback
-title as a parameter and hands its parse error back, because those are the
-two things the callers genuinely differ on: a sweep falls back to the
-file's own name and logs the path it was walking, while an import falls
-back to the name the browser offered and logs that, its staged path being
-an opaque id.
-
-A file mid-copy and the startup write probe are both invisible here, and
-both by suffix. `MatchedSuffix` answers "" for a name ending `.part`, which
-is what an import writes before it publishes, and for
-`.applibris-write-probe`, which `cmd/server` creates and removes to find
-out whether the library may be written at all. Nothing else may take a
-supported suffix before it is whole. See `docs/notes/import.md` for what
-the importer does with all of this.
+- **`IndexFile` is `scanFile` with a fresh `Result`, returning the book id
+  the path now belongs to and whether it created one. There is no second
+  way into the index; every guard a new book needs lives in
+  `createBook`.** A second path would drift from the first.
+- **`internal/importer` calls it in the request that copied the file,
+  which is safe because `scanFile` is idempotent.** A later sweep sees
+  matching path, size and mtime and does nothing; a racing one converges
+  on the same content hash.
+- **`MatchedSuffix`, `BookFormat` and `ExtractMetadata` are exported
+  because the importer's preview must say what a file is, what its format
+  is called and what it holds exactly as a sweep would.**
+  `ExtractMetadata` takes the fallback title and returns the parse error,
+  the two things the callers differ on: a sweep names the walked path, an
+  import names the browser's filename.
+- **A `.part` file and `.applibris-write-probe` are invisible to a sweep by
+  suffix. Nothing else may acquire a supported suffix before it is
+  whole.** `.part` is what an import writes before publishing, and the
+  probe is what `cmd/server` creates and removes to learn whether the
+  library is writable. See `docs/notes/import.md`.
 
 ## Watcher
 
-`internal/scanner/watcher.go` is a *trigger*, not a second index path. It
-never reads, hashes or parses the file an event names; it pokes a
-capacity-1 channel that `cmd/server`'s one scan goroutine selects on
-beside its ticker.
-
-Events are debounced (`WATCH_SETTLE`, default 5s) because an event says
-something changed, not that it finished changing: a copy fires `CREATE`
-long before its last byte lands. One timer covers both bounds: the settle
-window handles a burst that ends, and `watchMaxDelay` (60s) pokes on the
-first event past the cap so a bulk import cannot hold the debounce open
-forever. The debounce is a quality measure, not a correctness one: a sweep
-that catches a partial file indexes it, and the completing write's changed
-size and mtime make the next sweep re-hash and orphan-prune it in one
-transaction.
-
-Only events worth a sweep qualify: a supported suffix, any remove or rename
-(the name may already be gone, and a book leaving is what reconciliation
-wants), or a new directory. A `.part` file growing during a download
-provokes nothing until it is renamed into place.
-
-`Refresh` re-registers the watch set after every sweep, because inotify is
-not recursive (a new subdirectory needs its own watch), a watch is dropped
-silently when its directory is deleted, and a directory that moves out of
-the library leaves its descendants' watches live but filed under the names
-they had inside it, reporting files created outside the library as though
-they had arrived in it. That third case is why `Refresh` compares each
-directory's `(dev, ino)` against a `registered` map *and* checks
-`WatchList()` membership; neither test is sufficient alone, since a
-filesystem may hand a recreated directory the inode number the deleted one
-had (ext4 does), which reads as unchanged for a watch the kernel has
-already dropped. Together they are exact, because an inode number only
-becomes reusable once its inode is freed and freeing it drops the watch.
-
-A superseded watch is released explicitly before the re-add. fsnotify's
-`updatePath` drops the old descriptor from its own map, enough to stop
-delivery, but never calls `inotify_rm_watch`, so the kernel keeps a watch
-nothing can reach and one slot of a per-user budget is spent per
-replacement. Removing first is safe because inotify allocates descriptors
-cyclically, so the queued `IN_IGNORED` cannot land on the fresh watch.
-
-`Refresh` cannot recover from losing *every* watch, when the library
-directory itself is unmounted and remounted: a sweep only calls it after a
-poke, and a watcher with no watches can never poke again. So `Run` carries
-a `watchRecheckInterval` (30s) ticker that rebuilds the set once
-`WatchList()` is empty (a length check while healthy, a walk only when
-there is nothing left to lose) and pokes a sweep when it succeeds, since
-whatever changed while it was deaf is still unindexed.
-
-`WATCH_ENABLED=false` leaves exactly the ticker-only behaviour, which is
-what a mount whose delivery probe reports silence wants. A watcher that
-fails to start is a Warn, not a failed startup.
+- **`watcher.go` is a trigger, not a second index path: it never reads,
+  hashes or parses a file, and pokes a capacity-1 channel the one scan
+  goroutine selects on beside its ticker.** It is reached through
+  `watchSet` so tests can drive its debounce.
+- **Events are debounced over `WATCH_SETTLE` with one timer, and
+  `watchMaxDelay` (60s) pokes on the first event past the cap.** An event
+  says something changed, not that it finished changing, and a bulk import
+  must not hold the debounce open forever. The debounce is quality, not
+  correctness: a partial file indexed now is re-hashed by the next sweep.
+- **Only a supported suffix, any remove or rename, or a new directory
+  qualifies.** A removed name may already be gone and a book leaving is
+  what reconciliation wants; a `.part` growing during a download provokes
+  nothing until it is renamed into place.
+- **`Refresh` re-registers the watch set after every sweep, comparing each
+  directory's `(dev, ino)` against `registered` and checking `WatchList()`
+  membership; neither test alone suffices.** inotify is not recursive,
+  drops a watch silently when its directory is deleted, and a directory
+  moved out of the library keeps its descendants' watches under their old
+  names. A filesystem may reuse a deleted directory's inode number, which
+  reads as unchanged for a watch the kernel has dropped.
+- **A superseded watch is removed before it is re-added.** fsnotify's own
+  replacement drops the descriptor from its map but never calls
+  `inotify_rm_watch`, spending one slot of the per-user budget per
+  replacement. inotify allocates descriptors cyclically, so the queued
+  `IN_IGNORED` cannot land on the fresh watch.
+- **`Run` carries a `watchRecheckInterval` (30s) ticker that rebuilds the
+  set once `WatchList()` is empty and pokes a sweep when it succeeds.**
+  `Refresh` runs only after a poke, and a watcher with no watches can never
+  poke again.
+- **`WATCH_ENABLED=false` is exactly the ticker-only behaviour, and a
+  watcher that fails to start is a Warn, not a failed startup.**
 
 ## Mounts and the mover
 
-Two startup checks report what the watcher can actually see, because
-neither is observable later. `mountFor` names the filesystem backing
-`LIBRARY_DIR` from `/proc/self/mountinfo` (absent on macOS: a Debug line)
-and warns for the types where changes routinely happen *behind* the mount
-rather than through it (`fuse.*`, `nfs`, `cifs`, `9p`). On a FUSE
-passthrough a file written through the mount produces `CREATE`+`WRITE`;
-one written directly into the backing store produces nothing, though a
-later `readdir` sees it. So an SMB copy to an Unraid `/mnt/user` share is
-seen and the mover shuffling between `/mnt/cache` and `/mnt/diskN` is not.
-Bind-mounting the disk path makes every change local.
-
-Since `fsnotify.Add` on such a mount returns no error, a dead watch is
-indistinguishable from an idle one, so a delivery probe creates a file in
-the library root and waits for its own event; silence is one Warn. The
-file is made with `os.CreateTemp`, never at a name derived from the pid:
-`os.Create` would truncate whatever sits at that path and follow a symlink
-to its target, and in a container the process is pid 1, so a derived name
-is guessable. A diagnostic must not be able to destroy a book. The probe's
-name is excluded from `qualifies` so it cannot trigger the work it tests,
-and only that one file is removed, including on the timeout path. A
-read-only library is an Info-level skip.
-
-The mover needs no handling, and that is worth keeping true: it preserves
-path, size and mtime, so the cheap check skips those files, and the inode
-and physical disk it does change are not things this index stores. That is
-the reason not to add inode tracking or a device-id column.
+- **`mountFor` names the filesystem backing `LIBRARY_DIR` from
+  `/proc/self/mountinfo` and warns for `fuse.*`, `nfs`, `nfs4`, `cifs`, `smb3` and `9p`;
+  an absent mountinfo is a Debug line.** On those filesystems changes
+  routinely happen behind the mount and produce no event, and nothing
+  later than startup can observe that.
+- **A delivery probe creates a file in the library root and waits for its
+  own event; silence is one Warn, and a read-only library is an Info
+  skip.** `fsnotify.Add` on such a mount returns no error, so a dead watch
+  is indistinguishable from an idle one.
+- **The probe file is made with `os.CreateTemp`, never at a pid-derived
+  name; its name is excluded from `qualifies`; only that one file is
+  removed, on the timeout path too.** `os.Create` truncates whatever sits
+  at the path and follows a symlink, and pid 1 in a container makes a
+  derived name guessable. A diagnostic must not be able to destroy a book
+  or trigger the work it tests.
+- **Do not add inode or device-id tracking.** The mover preserves path,
+  size and mtime, so the cheap check skips its files; the inode and disk
+  it changes are not stored, and that is the whole of its invisibility.
