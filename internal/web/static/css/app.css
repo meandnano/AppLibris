@@ -1465,6 +1465,14 @@ a.masthead__link:hover {
   gap: 10px;
 }
 
+/* A second way in, under the upload rather than beside it, so the rule is
+   what tells the two forms apart at every width */
+.import__form--link {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+
 .import__label {
   font-family: var(--mono);
   font-size: 11px;
@@ -1477,6 +1485,22 @@ a.masthead__link:hover {
   font-family: var(--sans);
   font-size: 13.5px;
   color: var(--fg);
+}
+
+.import__link {
+  width: 100%;
+  border: 1px solid var(--rule);
+  background: var(--bg-raised);
+  color: var(--fg);
+  padding: 9px 11px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.import__link:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .import__hint {

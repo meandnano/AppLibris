@@ -338,10 +338,10 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 - Modify: `internal/web/static/css/app.css`
 - Modify: `internal/web/import_test.go`
 
-- [ ] add a `<form method=post action=/import/url>` with one `type=url` input named `url` beside the file form
-- [ ] style it with the existing import form rules
-- [ ] write tests: the Import page renders the URL form when importing is enabled and the explanation, without the form, when it is not
-- [ ] run tests - must pass before task 6
+- [x] add a `<form method=post action=/import/url>` with one `type=url` input named `url` beside the file form
+- [x] style it with the existing import form rules
+- [x] write tests: the Import page renders the URL form when importing is enabled and the explanation, without the form, when it is not
+- [x] run tests - must pass before task 6
 
 ### Task 6: Paste a link or a file on the library page
 

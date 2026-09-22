@@ -1146,3 +1146,58 @@ func TestDownloadWindowOutlastsTheUploadOfTheSameFile(t *testing.T) {
 		t.Errorf("downloadWindow = %s, want room for the connection past the body's own window", got)
 	}
 }
+
+func TestImportPageOffersTheLinkForm(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
+	body := rec.Body.String()
+
+	tag := openTag(t, body, "import__form import__form--link")
+	for _, want := range []string{`method="post"`, `action="/import/url"`} {
+		if !strings.Contains(tag, want) {
+			t.Errorf("the link form is missing %s: %s", want, tag)
+		}
+	}
+	// A plain post: the route answers a 303 for every caller, and only a
+	// whole-page navigation lands on the preview's URL
+	if strings.Contains(tag, "hx-") {
+		t.Errorf("the link form carries htmx attributes: %s", tag)
+	}
+	input := openTag(t, body, "import__link")
+	for _, want := range []string{`type="url"`, `name="url"`} {
+		if !strings.Contains(input, want) {
+			t.Errorf("the link input is missing %s: %s", want, input)
+		}
+	}
+}
+
+func TestDisabledImportPageOffersNoLinkForm(t *testing.T) {
+	handler, _, _ := newImportHandlerWritable(t, 1<<20, false)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "read-only") {
+		t.Errorf("the page does not explain why import is off:\n%s", body)
+	}
+	if strings.Contains(body, `action="/import/url"`) {
+		t.Errorf("a disabled page still offers the link form:\n%s", body)
+	}
+}
+
+func TestARefusedLinkIsRenderedBackIntoTheForm(t *testing.T) {
+	handler := newLinkHandler(t, 1<<20, serving("notes.txt", false, []byte("just some text")))
+
+	const link = "https://books.test/notes.txt?a=1&b=2"
+	rec := postLink(handler, link)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+	input := openTag(t, rec.Body.String(), "import__link")
+	if !strings.Contains(input, `value="`+html.EscapeString(link)+`"`) {
+		t.Errorf("the link input does not carry the refused link back: %s", input)
+	}
+}

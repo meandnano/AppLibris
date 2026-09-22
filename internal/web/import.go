@@ -74,6 +74,9 @@ type importPage struct {
 
 	Preview *importPreviewView
 	Failure string
+	// Link is what a refused download renders back into the link form, so
+	// the 422 page does not ask for the link to be pasted again
+	Link string
 	// Note is the one outcome that is neither a failure nor a redirect:
 	// the file reached the library and indexing did not.
 	Note string
@@ -262,6 +265,7 @@ func importURLHandler(svc *service.Service) http.HandlerFunc {
 			if page.Failure == "" {
 				page.Failure = downloadFailedLine
 			}
+			page.Link = rawURL
 			logLinkFailure(rawURL, err)
 			renderImportRejection(w, r, page)
 			return

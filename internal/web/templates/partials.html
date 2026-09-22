@@ -473,7 +473,7 @@
   {{else}}
   {{if .Failure}}<p class="import__error" role="alert">{{.Failure}}</p>{{end}}
   {{if .Note}}<p class="import__note" role="status">{{.Note}}</p>{{end}}
-  {{if .Preview}}{{template "import-preview" .Preview}}{{else}}{{template "import-form" .}}{{end}}
+  {{if .Preview}}{{template "import-preview" .Preview}}{{else}}{{template "import-form" .}}{{template "import-link-form" .}}{{end}}
   {{end}}
 </div>
 {{end}}
@@ -529,6 +529,24 @@
   <div class="import__actions">
     <button class="button button--lg button--primary import__submit" type="submit">Upload</button>
     <span class="import__indicator" role="status">Uploading &hellip;</span>
+  </div>
+</form>
+{{end}}
+
+{{/* A plain post and no hx-post: the route downloads inside the request
+     and answers a 303 to the preview's own URL for every caller, so a
+     whole-page navigation is what puts that URL in the address bar, and the
+     422 page carries the refusal and the typed link back. The browser's own
+     loading state is the indicator, which is also how the form works with
+     JavaScript off. No maxlength: a truncated link would fetch the wrong
+     file, where the route's own refusal says the link is unsupported */}}
+{{define "import-link-form"}}
+<form class="import__form import__form--link" method="post" action="/import/url">
+  <label class="import__label" for="import-link">Link to an EPUB or FB2 file</label>
+  <input class="import__link" id="import-link" type="url" name="url" value="{{.Link}}" placeholder="https://" autocomplete="off" required>
+  <p class="import__hint">A direct link to the file, on a public address. The server downloads it and shows the same preview as an upload.</p>
+  <div class="import__actions">
+    <button class="button button--lg button--secondary import__submit" type="submit">Download</button>
   </div>
 </form>
 {{end}}
