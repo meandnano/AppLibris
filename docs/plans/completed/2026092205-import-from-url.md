@@ -212,6 +212,24 @@ it would confirm that an internal hostname resolves.
 Each failure is logged at Info with the underlying error and the scheme,
 host and path of the requested URL, never its query or fragment.
 
+> **Correction found while implementing.**
+>
+> - **Read deadline.** Extending the read deadline was tried on the premise
+>   that Go's server cancels the request context once a read deadline passes
+>   mid-handler. That premise is false in Go 1.27: the server clears the read
+>   deadline once the body has been read. The handler therefore reads the
+>   small form under the server's own `ReadTimeout` and extends only the
+>   write deadline. Extending the read deadline before reading the form also
+>   let a client trickle the form for the whole download window.
+>   `TestImportURLOutlastsTheServersTimeouts` pins this.
+> - **"Deadline exceeded" row.** In Go 1.27 the transport's dial, TLS and
+>   header timeouts also match `context.DeadlineExceeded`, so matching on
+>   that alone showed "took too long" for a host that never answered. Only
+>   an expiry of the handler's own context maps to that line. Every other
+>   fetch or body-read failure is `service.ErrDownloadFailed` and gets the
+>   generic line. An error that is neither, a staging or database fault, is
+>   a 500 logged at Error, as an upload's is.
+
 ### Client (`internal/web/static/paste-link.js`)
 
 - **The paste listener** sits on `document` and does nothing when the
@@ -263,6 +281,14 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
   - the label turns `--fg3`;
   - it is the same state `drop.js` sets as `uploading`, cleared by a bfcache
     `pageshow` and by Escape.
+
+> **Correction found while implementing.** The handoff's `--rule2`, `--fg2`,
+> `--fg3` and `@keyframes spin` do not exist in `app.css`. The button uses
+> the nearest existing tokens instead: `--rule`, `--fg-muted`, `--fg-faint`
+> and `@keyframes search-spin`. The dialog's Cancel during a download also
+> has to call `window.stop()` and release the drop's hold, because
+> `dialog.close()` fires no `cancel` event and so leaves the navigation
+> running.
 
 ## What Goes Where
 
