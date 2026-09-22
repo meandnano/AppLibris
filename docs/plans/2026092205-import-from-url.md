@@ -324,12 +324,12 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 - Modify: `internal/web/web.go`
 - Modify: `internal/web/import_test.go`
 
-- [ ] add the handler with deadline extension, 303 and 422 per Technical Details, and register the route
-- [ ] extend `importFailureLine` with the new lines from the table
-- [ ] log failures with scheme, host and path only
-- [ ] write tests: 303 on success; the route refuses a request with no `Sec-Fetch-Site`, like the other import routes
-- [ ] write error-case tests: the 422 page with each line of the table; a URL's query string never reaches the log
-- [ ] run tests - must pass before task 5
+- [x] add the handler with deadline extension, 303 and 422 per Technical Details, and register the route
+- [x] extend `importFailureLine` with the new lines from the table
+- [x] log failures with scheme, host and path only
+- [x] write tests: 303 on success; the route refuses a request with no `Sec-Fetch-Site`, like the other import routes
+- [x] write error-case tests: the 422 page with each line of the table; a URL's query string never reaches the log
+- [x] run tests - must pass before task 5
 
 ### Task 5: Add the URL form to the Import page
 

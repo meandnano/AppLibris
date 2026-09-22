@@ -3,6 +3,7 @@ package web
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"fmt"
 	"html"
 	"image"
@@ -123,7 +124,7 @@ func newImportHandler(t *testing.T, maxSize int64) (http.Handler, *storage.DB, s
 	return newImportHandlerWritable(t, maxSize, true)
 }
 
-func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.Handler, *storage.DB, string) {
+func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool, opts ...service.Option) (http.Handler, *storage.DB, string) {
 	t.Helper()
 
 	db := storagetest.Open(t)
@@ -154,7 +155,7 @@ func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.
 		}
 	}
 
-	svc := service.New(db, service.WithImporter(stager))
+	svc := service.New(db, append([]service.Option{service.WithImporter(stager)}, opts...)...)
 	return Routes(svc, coversDir, false, false), db, libraryDir
 }
 
@@ -531,7 +532,7 @@ func TestImportNavLinkAppearsWhenImportIsEnabled(t *testing.T) {
 func TestEveryImportPOSTRefusesACrossSiteRequest(t *testing.T) {
 	handler, _, _ := newImportHandler(t, 1<<20)
 
-	for _, path := range []string{"/import/file", "/import/anything/confirm", "/import/anything/discard"} {
+	for _, path := range []string{"/import/file", "/import/url", "/import/anything/confirm", "/import/anything/discard"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(""))
 		req.Header.Set("Sec-Fetch-Site", "cross-site")
 		rec := httptest.NewRecorder()
@@ -909,5 +910,239 @@ func TestImportFormPointsAtTheDropTarget(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
 	if body := rec.Body.String(); !strings.Contains(body, `drop a file on the <a href="/">library page</a>`) {
 		t.Errorf("the import form does not mention dropping on the library page:\n%s", body)
+	}
+}
+
+// fetchFunc stands in for importer.Fetcher, whose guarded transport refuses
+// every address an in-memory or loopback server has
+type fetchFunc func(ctx context.Context, rawURL string) (importer.Download, error)
+
+func (f fetchFunc) Fetch(ctx context.Context, rawURL string) (importer.Download, error) {
+	return f(ctx, rawURL)
+}
+
+// serving answers every link with body under the given name and type
+func serving(name string, html bool, body []byte) fetchFunc {
+	return func(context.Context, string) (importer.Download, error) {
+		return importer.Download{Name: name, HTML: html, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	}
+}
+
+func newLinkHandler(t *testing.T, maxSize int64, fetcher service.LinkFetcher) http.Handler {
+	t.Helper()
+	handler, _, _ := newImportHandlerWritable(t, maxSize, true, service.WithFetcher(fetcher))
+	return handler
+}
+
+func linkRequest(link string) *http.Request {
+	form := url.Values{"url": {link}}
+	req := httptest.NewRequest(http.MethodPost, "/import/url", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+func postLink(handler http.Handler, link string) *httptest.ResponseRecorder {
+	req := linkRequest(link)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestImportURLRedirectsToThePreview(t *testing.T) {
+	handler := newLinkHandler(t, 1<<20, serving("Dune.epub", false, importEPUB(t, "Dune", "Frank Herbert", 0)))
+
+	rec := postLink(handler, "https://books.test/Dune.epub")
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303:\n%s", rec.Code, rec.Body.String())
+	}
+	location := rec.Header().Get("Location")
+	if !strings.HasPrefix(location, "/import/") {
+		t.Fatalf("Location = %q, want the preview's URL", location)
+	}
+
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, location, nil))
+	for _, want := range []string{"Dune", "Frank Herbert", "Dune.epub"} {
+		if !strings.Contains(page.Body.String(), want) {
+			t.Errorf("the preview does not mention %q:\n%s", want, page.Body.String())
+		}
+	}
+}
+
+// Behind RequireFetchMetadata, as cmd/server mounts every route, so a
+// script or a plain-HTTP page cannot make the server fetch
+func TestImportURLRefusesARequestWithoutFetchMetadata(t *testing.T) {
+	calls := 0
+	handler := RequireFetchMetadata(newLinkHandler(t, 1<<20, fetchFunc(func(context.Context, string) (importer.Download, error) {
+		calls++
+		return importer.Download{}, importer.ErrTooLarge
+	})))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, linkRequest("https://books.test/Dune.epub"))
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+	if calls != 0 {
+		t.Errorf("the link was fetched %d times, want never", calls)
+	}
+}
+
+func TestImportURLRefusalsSayWhy(t *testing.T) {
+	const maxSize = 32 << 10
+	cases := []struct {
+		name    string
+		link    string
+		fetcher service.LinkFetcher
+		want    string
+	}{
+		{
+			name:    "unsupported link",
+			link:    "ftp://books.test/Dune.epub",
+			fetcher: serving("Dune.epub", false, nil),
+			want:    "That isn&#39;t a supported link.",
+		},
+		{
+			name: "declared too large",
+			link: "https://books.test/Dune.epub",
+			fetcher: fetchFunc(func(context.Context, string) (importer.Download, error) {
+				return importer.Download{}, importer.ErrTooLarge
+			}),
+			want: "larger than the " + humanSize(maxSize) + " import limit",
+		},
+		{
+			name:    "counted too large",
+			link:    "https://books.test/Dune.epub",
+			fetcher: serving("Dune.epub", false, bytes.Repeat([]byte("PK\x03\x04"), maxSize)),
+			want:    "larger than the " + humanSize(maxSize) + " import limit",
+		},
+		{
+			name: "status",
+			link: "https://books.test/Dune.epub",
+			fetcher: fetchFunc(func(context.Context, string) (importer.Download, error) {
+				return importer.Download{}, &importer.StatusError{Code: http.StatusNotFound}
+			}),
+			want: "The server answered 404.",
+		},
+		{
+			name:    "web page",
+			link:    "https://books.test/dune",
+			fetcher: serving("dune", true, []byte("<!doctype html><title>Dune</title>")),
+			want:    "That link opens a web page, not a book file.",
+		},
+		{
+			name:    "not a book",
+			link:    "https://books.test/notes.txt",
+			fetcher: serving("notes.txt", false, []byte("just some text")),
+			want:    "That is not an EPUB or FB2 file.",
+		},
+		{
+			// The production fetcher, so the refusal is the guard's own
+			// rather than a stand-in's. 127.0.0.1 is refused before any
+			// connection, which is why no server is needed
+			name:    "private address",
+			link:    "http://127.0.0.1:1/Dune.epub",
+			fetcher: importer.NewFetcher(maxSize),
+			want:    "Couldn&#39;t download that link.",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := postLink(newLinkHandler(t, maxSize, tt.fetcher), tt.link)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Errorf("status = %d, want 422", rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), tt.want) {
+				t.Errorf("the refusal does not say %q:\n%s", tt.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestImportURLGivesUpOnADownloadPastItsWindow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		handler := newLinkHandler(t, 1<<20, fetchFunc(func(ctx context.Context, _ string) (importer.Download, error) {
+			<-ctx.Done()
+			return importer.Download{}, fmt.Errorf("download request failed: %w", ctx.Err())
+		}))
+
+		rec := postLink(handler, "https://books.test/Dune.epub")
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("status = %d, want 422", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "The download took too long.") {
+			t.Errorf("the refusal does not blame the wait:\n%s", rec.Body.String())
+		}
+	})
+}
+
+func TestImportURLRefusesASecondLinkWhileOneDownloads(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	book := importEPUB(t, "Dune", "Frank Herbert", 0)
+	handler := newLinkHandler(t, 1<<20, fetchFunc(func(context.Context, string) (importer.Download, error) {
+		close(started)
+		<-release
+		return importer.Download{Name: "Dune.epub", Body: io.NopCloser(bytes.NewReader(book))}, nil
+	}))
+
+	first := make(chan *httptest.ResponseRecorder)
+	go func() { first <- postLink(handler, "https://books.test/Dune.epub") }()
+	<-started
+
+	rec := postLink(handler, "https://books.test/Other.epub")
+	close(release)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Another link is still downloading.") {
+		t.Errorf("the refusal does not say a download is running:\n%s", rec.Body.String())
+	}
+	if got := (<-first).Code; got != http.StatusSeeOther {
+		t.Errorf("the first download answered %d, want 303", got)
+	}
+}
+
+func TestImportURLWhenImportIsDisabledSaysSo(t *testing.T) {
+	handler, _, _ := newImportHandlerWritable(t, 1<<20, false, service.WithFetcher(serving("Dune.epub", false, nil)))
+
+	rec := postLink(handler, "https://books.test/Dune.epub")
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "read-only") {
+		t.Errorf("the refusal does not explain why import is off:\n%s", rec.Body.String())
+	}
+}
+
+// A query or fragment is where a signed download link keeps its token, and
+// the url.Error a refused dial produces prints the whole link
+func TestImportURLLogsTheLinkWithoutItsQuery(t *testing.T) {
+	logs := captureLog(t)
+	handler := newLinkHandler(t, 1<<20, importer.NewFetcher(1<<20))
+
+	postLink(handler, "http://127.0.0.1:1/books/Dune.epub?token=s3cr3t#frag")
+
+	out := logs.String()
+	if !strings.Contains(out, "import from link failed") {
+		t.Fatalf("the failure was not logged:\n%s", out)
+	}
+	for _, want := range []string{"scheme=http", "host=127.0.0.1:1", "path=/books/Dune.epub"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not carry %q:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{"s3cr3t", "frag"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("the log carries %q from the link:\n%s", leak, out)
+		}
+	}
+}
+
+func TestDownloadWindowOutlastsTheUploadOfTheSameFile(t *testing.T) {
+	if got := downloadWindow(64 << 20); got <= uploadWindow(64<<20) {
+		t.Errorf("downloadWindow = %s, want room for the connection past the body's own window", got)
 	}
 }

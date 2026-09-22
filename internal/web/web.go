@@ -47,6 +47,7 @@ func Routes(svc *service.Service, coversDir string, sendEnabled, enrichEnabled b
 	// the flag actually withholds.
 	mux.HandleFunc("GET /import", importHandler(svc))
 	mux.HandleFunc("POST /import/file", sameSiteOnly(importUploadHandler(svc)))
+	mux.HandleFunc("POST /import/url", sameSiteOnly(importURLHandler(svc)))
 	mux.HandleFunc("GET /import/{id}", importPreviewHandler(svc))
 	mux.HandleFunc("GET /import/{id}/cover", importCoverHandler(svc))
 	mux.HandleFunc("POST /import/{id}/confirm", sameSiteOnly(importConfirmHandler(svc)))
