@@ -376,11 +376,11 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] verify every requirement in the Overview is implemented
-- [ ] verify the edge cases: a private-address link, a link redirecting to a private address, an HTML page, an oversize body, a timeout, a second concurrent download, a pasted file, text pasted into the search box
-- [ ] run the full test suite: `go test ./...`
-- [ ] run `go vet ./...` and `go test -race ./...` as CI does
-- [ ] verify every new function has tests covering success and error paths
+- [x] verify every requirement in the Overview is implemented
+- [x] verify the edge cases: a private-address link, a link redirecting to a private address, an HTML page, an oversize body, a timeout, a second concurrent download, a pasted file, text pasted into the search box
+- [x] run the full test suite: `go test ./...`
+- [x] run `go vet ./...` and `go test -race ./...` as CI does
+- [x] verify every new function has tests covering success and error paths
 
 ### Task 9: [Final] Update documentation
 

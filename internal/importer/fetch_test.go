@@ -316,3 +316,40 @@ func TestFetchRefusesAnHTTPSLoopbackAddress(t *testing.T) {
 		t.Errorf("requests = %d, want 0 — the dial is refused before the TLS handshake", requests)
 	}
 }
+
+// A public link that redirects inward is the SSRF the redirect policy
+// alone does not stop, since it allows a hop to any host. The guard runs
+// again on the hop's dial, which is why the target is refused with no
+// request reaching it
+func TestFetchRefusesARedirectToAPrivateAddress(t *testing.T) {
+	inner := 0
+	internal := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inner++
+		io.WriteString(w, "secret")
+	}))
+	internal.Start()
+
+	for _, tt := range []struct{ target, want string }{
+		{internal.URL + "/admin", "is loopback"},
+		{"http://169.254.169.254/latest/meta-data/", "is link-local"},
+		{"http://10.0.0.1/", "is private"},
+		{"http://100.100.100.100/", "reserved range"},
+	} {
+		t.Run(tt.target, func(t *testing.T) {
+			public := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, tt.target, http.StatusFound)
+			}))
+			public.Start()
+
+			f := NewFetcher(1 << 20)
+			dialHostAt(f, "books.test:80", public.Listener.Addr().String())
+			_, err := f.Fetch(context.Background(), "http://books.test/dune.epub")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Fetch error = %v, want the hop refused with %q", err, tt.want)
+			}
+		})
+	}
+	if inner != 0 {
+		t.Errorf("the internal server saw %d requests, want 0", inner)
+	}
+}
