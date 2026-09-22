@@ -1,655 +1,384 @@
 # Web UI and service layer
 
-Rationale for `internal/web` and `internal/service`. The package map and
-the invariants that must hold are in CLAUDE.md.
+Rules for `internal/service` and `internal/web`.
+
+## Routes
+
+`GET /{$}` (grid, search, paging), `GET /books/{id}`, `GET`/`POST
+/books/{id}/metadata/{field}`, `POST /books/{id}/locations/forget`, `POST
+/books/{id}/send`, `GET /books/{id}/sends/{sendID}`, `POST
+/books/{id}/enrich`, `GET /books/{id}/enrichment/{jobID}`, `POST
+/recipients/remove`, `GET /history`, `GET /import`, `POST /import/file`,
+`GET /import/{id}`, `GET /import/{id}/cover`, `POST /import/{id}/confirm`,
+`POST /import/{id}/discard`, `/static/`, `/covers/`. The import routes are
+governed by `docs/notes/import.md`.
 
 ## Service layer
 
-`internal/service` is the layer beneath the HTTP handlers, so a future
-`/api/v1` can be a second thin transport over the same calls. Handlers
-parse the request, call one service method and render. Business rules,
-validation and normalisation live in the service, where both transports
-would need them; presentation stays in the transport as pure functions of
-the data it is given. The history window is the worked example: what
-"recent" means is decided beside the query, from the service's own clock,
-while rendering an instant as "yesterday, 22:41" stays in `internal/web`.
-
-`Service.now` is a private `func() time.Time`, defaulted by `New` and
-overridden in tests, and every timestamp the service writes goes through
-it. That is what makes `modified_at` propagation and the history window
-testable without sleeping.
-
-Reads return shaped types rather than storage rows. `ListBooks` and
-`SearchBooks` build a `BookSummary` per book through one shared helper, so
-the two grids cannot diverge. `BookSummary.Locations` normalises a book
-absent from `CountFilesByBook`'s map to 1: zero and one both mean "no
-multi-location badge", and one location is what an absent entry means in
-practice.
-
-`SearchBooks` sanitises the query through `storage.SanitizeFTSQuery` and
-returns a `SearchResult`: one page of books, whether a search actually ran
-(`Searched`), which indexed fields matched, how many books matched in
-total (`MatchCount`) and where the next page starts. A query that
-sanitises to nothing is treated as `ListBooks`, so an empty search box and
-a freshly loaded page are one state. `Searched` exists because "sanitises
-to nothing" is wider than "looks blank": control characters are stripped,
-so `?q=%00` is a non-blank query that is nonetheless no search, and a
-transport deriving its own flag from the raw query would render a result
-count over the whole library. `Fields` is only fetched when something
-matched; the no-matches state names the searched fields itself.
-
-`GetBook` returns `nil, nil` for an unknown id, the same absent-is-not-an-
-error contract the storage finders use, and the handler turns that into a
-404. `BookDetail.FileSize` is a book-level field taken from the first
-location: every location of one book is byte-identical by construction,
-and a size per path would imply a difference that cannot exist.
-`HasFileSize` distinguishes a book with no location from one whose file
-really is zero bytes, so the page never claims `0 B` for a size it does
-not know.
-
-`UpdateBookMetadata` maps the field name onto storage's enum, normalises
-the value and returns the reloaded `BookDetail` rather than echoing the
-input, so the caller renders canonical data and normalisation is visible.
-Title is required; every scalar except description rejects an embedded
-line break, since a stored one breaks every single-line rendering
-downstream and a future API could submit one even though a browser input
-cannot. Authors are split on newlines, trimmed, blanks dropped and a
-repeated name kept once, because the textarea is free text and a repeat is
-a slip. A rejected value is a `metadataValidationError` wrapping
-`ErrInvalidMetadata` and carrying the sentence the field shows, so a bad
-value is a field error and never a 500.
-
-`QueueSend` owns the send rules. It validates the address with
-`net/mail.ParseAddress` and stores only the mailbox, so a pasted
-`"Mike <mike@kindle.com>"` saves the address and not the display name;
-`ErrInvalidAddress` queues nothing. `BookDetail.Sendable` and
-`SendableNote` say whether Amazon's Send to Kindle accepts the book's
-format at all, decided by `sendableFormat` over the formats Amazon lists
-that the scanner can index, today only `epub`. Amazon drops an FB2 or ZIP
-attachment silently, so a send Resend accepted would read "Delivered" for
-a book that never reached the device; until format conversion exists the
-honest surface is a control that says why it is not offered. `QueueSend`
-does not refuse an unsendable book: the button is not rendered, and a
-hand-crafted POST is harmless, where a 4xx would be a second rule to keep
-in step with the first for no visible gain.
-
-`Service.Notify` and `Service.NotifyEnrichment` are function fields set by
-`cmd/server`, nil in tests and whenever a queue is unconfigured. Function
-fields rather than interfaces, because `internal/service` importing
-`internal/sender` would be a cycle. Two fields rather than one multiplexed
-hook, because poking the wrong worker leaves a job waiting for its poll
-tick. `Notify` fires only when `EnqueueSend` reports it actually inserted a
-row, so a double submit never wakes the worker twice.
-
-The send and enrichment surfaces are parallel triples (queue, state,
-latest) shaped through `sendStateFrom` and `enrichmentStateFrom`, each
-collapsing "when did this happen" to one `At` field so a template branches
-on one shape. They stay two surfaces on purpose: an abstraction over
-exactly two cases has no third instance to test against, and they differ
-in precisely the part that would have to be generic, an address and a
-failure reason versus a list of written fields.
-
-`SendHistory` covers a trailing 30 days capped at `SendHistoryLimit`
-(500). Truncation is detected by asking storage for one row past the
-limit rather than a second `COUNT`; `ListBooks` and `SearchBooks` decide
-`HasMore` the same way. The cap is exported because `internal/web` spells
-the number out in the scope line, and a copy of the literal there would
-drift.
+- **`internal/service` sits beneath the handlers; a handler parses the
+  request, calls one service method and renders.** A future `/api/v1` is
+  a second thin transport, so validation and normalisation live where both
+  need them and presentation stays a pure function of the data.
+- **`Service.now` is the clock for every timestamp the service writes,
+  and `relativeTime(t, now)` takes `now` as a parameter.** Timing is
+  testable without sleeping.
+- **`New` takes functional options and `WithImporter` is the only one; a
+  nil importer answers `ErrImportDisabled`, the nav asks
+  `svc.ImportEnabled()`, and `ImportPreview` is an alias for
+  `importer.Staged`.** The importer is the service's own, where the
+  send and enrich flags are configuration the service never sees.
+- **`ListBooks` and `SearchBooks` build a `BookSummary` through one shared
+  helper.** The two grids cannot diverge.
+- **`BookSummary.Locations` normalises a book absent from
+  `CountFilesByBook` to 1.** One location is what an absent entry means.
+- **`SearchBooks` sanitises through `storage.SanitizeFTSQuery`; a query
+  that sanitises to nothing is `ListBooks`.** An empty box and a fresh
+  page are one state.
+- **`SearchResult.Searched` is decided by the service, never derived by
+  the transport from the raw query.** `?q=%00` looks non-blank and is no
+  search; a transport-side flag would render a count over the whole
+  library.
+- **`Fields` is fetched only when something matched.** The no-matches
+  state names the searched fields itself.
+- **`GetBook` returns `nil, nil` for an unknown id and the handler answers
+  404.** Absent is not an error.
+- **`BookDetail.FileSize` is book-level, from the first location, and
+  `HasFileSize` distinguishes no location from a zero-byte file.** Every
+  location is byte-identical, and the page must not claim `0 B` for a size
+  it does not know.
+- **`UpdateBookMetadata` returns the reloaded `BookDetail`, never the
+  input.** Normalisation is visible.
+- **Title is required; every scalar but description rejects a line
+  break.** A stored break breaks every single-line rendering, and an API
+  could submit one where a browser input cannot.
+- **Authors are split on newlines, trimmed, blanks dropped, a repeat kept
+  once.** A repeat in free text is a slip.
+- **A rejected value is a `metadataValidationError` wrapping
+  `ErrInvalidMetadata` and carrying the sentence the field shows.** A bad
+  value is a field error, never a 500.
+- **`QueueSend` validates through `net/mail.ParseAddress` and stores only
+  the mailbox; `ErrInvalidAddress` queues nothing.** A pasted display name
+  is not part of the address.
+- **`sendableFormat` decides `Sendable` and `SendableNote`, today `epub`
+  only; `QueueSend` does not refuse an unsendable book, the button is not
+  rendered.** Amazon drops an FB2 silently, so Delivered would lie; a 4xx
+  on a hand-crafted POST is a second rule to keep in step for no gain.
+- **`Notify` and `NotifyEnrichment` are function fields set by
+  `cmd/server`, nil in tests and when a queue is unconfigured.**
+  Importing `internal/sender` is a cycle, and one multiplexed hook would
+  poke the wrong worker.
+- **`Notify` fires only when `EnqueueSend` reports it inserted.** A double
+  submit never wakes the worker twice.
+- **Sending and enrichment stay two parallel surfaces (`sendStateFrom`,
+  `enrichmentStateFrom`, one `At` field each). Never abstract over
+  exactly two cases.** They differ in precisely the part that would have
+  to be generic.
+- **`SendHistory` covers a trailing 30 days capped at `SendHistoryLimit`;
+  truncation is detected by asking for one row past the limit, as
+  `HasMore` is.** No second `COUNT`. The cap is exported because
+  `internal/web` spells it out in the scope line.
 
 ## Rendering
 
-`render` executes the template into a buffer before writing anything, so
-a template error is a clean 500 rather than a truncated page. Only the
-pre-write `ExecuteTemplate` error is returned to the handler. Once the
-buffer starts writing, the response is committed, and a write failure
-there (almost always the client disconnecting) is logged inside `render`;
-a handler answering it with `http.Error` would double-write onto a
-committed response. `renderStatus` is the same with an explicit status,
-for a body and a non-200 together: a rejected edit, send address or import
-answering 422 with its form and message, and a refused request answering
-403 with the line saying so.
+- **`render` executes into a buffer before writing; only the pre-write
+  error reaches the handler, and a write failure after the commit is
+  logged inside `render`.** A template error is a clean 500, and
+  `http.Error` on a committed response would double-write.
+  `renderStatus` is the same with an explicit status.
+- **Every sentence the page shows is composed in the handler; the
+  template only chooses a block.** The paths badge is set only above one,
+  so the template cannot render "1 paths".
+- **Static assets carry a content-derived `ETag` computed once at startup
+  and a five-minute `max-age`.** `embed.FS` reports a zero `ModTime`, so
+  `http.FileServer` would emit no validator.
+- **Covers carry a day-long `max-age` and never `immutable`.** A cover is
+  named by the book's hash, not the bytes served.
+- **Both file mounts wrap their filesystem in `noDirFS`, and every route
+  serving raw bytes sets `X-Content-Type-Options: nosniff`.** A directory
+  must 404 rather than list every hash in the library.
+- **The UI is translated from mockups kept as `UI.md` and `ui-handoff/`
+  on the `init` branch.**
 
-Handlers map service types onto small per-page view models so templates
-hold no logic. Every label is composed in the handler: the results line,
-the "2 paths" badge (set only above one, so the template branches on
-presence and cannot render "1 paths"), the send button's label, the
-history row's status. The template only ever chooses which block to show.
+## htmx contract
 
-Static assets are embedded via `go:embed` with no build step. They get a
-content-derived `ETag` computed once at startup (`embed.FS` reports a zero
-`ModTime`, so `http.FileServer` would otherwise emit no validator) and a
-five-minute `max-age`, which bounds how long a stale file survives a
-deploy. Covers get a day-long `max-age` and no `immutable`: `cover.Store`
-names a file by the book's content hash, not by the bytes served, so a
-changed resize pipeline can put different bytes at an unchanged URL. Both
-mounts wrap their filesystem in `noDirFS` so a directory 404s instead of
-listing every content hash in the library.
-
-The UI is translated from mockups kept on the `init` branch.
-
-## htmx contract and progressive enhancement
-
-htmx is vendored at `internal/web/static/js/htmx.min.js`, version 4.0.0,
-pinned in a comment at the top of the file. It is used only where
-dynamism is needed: search-as-you-type, the send and enrichment controls
-polling their job, inline editing, and the grid appending its next page.
-
-Every dynamic affordance has one markup path that works with and without
-JavaScript. A read affordance is an `<a>` carrying both `href` and
-`hx-get`; an editor is a `<form>` carrying both `action` and `hx-post`;
-the plain-navigation response is a whole page or a `303` back to it, and
-the htmx response is a fragment. There is no separate no-JS path to drift.
-
-Dropping a file on the library page is the one affordance that cannot
-exist without JavaScript, and it is an enhancement over the Import page
-rather than a path of its own: `drop.js` fills a hidden plain upload form
-and submits it natively, bypassing htmx, so the answer is the no-JS
-upload's redirect or 422 page. See `docs/notes/import.md`.
-
-Whether a request gets a fragment is decided by `isHTMXFragment`:
-`HX-Request` present **and** `HX-History-Restore-Request` absent. htmx
-keeps no copy of the pages it pushes, so Back onto any entry it pushed
-(and `hx-push-url` pushes one per keystroke) issues a GET marked
-`HX-History-Restore-Request` and swaps the response into the whole
-document body. Answering it with a fragment replaces the masthead, search
-bar and scripts with a bare grid that can no longer search. The check
-names both halves so the answer never rests on which other headers a
-restore happens to carry. Every route serving two bodies
-names both headers in `Vary: HX-Request, HX-History-Restore-Request`; a
-route serving one body to every caller, such as the send status poll,
-sets no `Vary` at all.
-
-The page configures htmx through the `htmx-config` meta tag in
-`document-head`. Its `noSwap` lists `4xx` and `5xx` beside `204` and
-`304`, so an error response swaps only when the element that asked opts
-its status in with `hx-status`, which htmx reaches at the exact-status step
-before the wildcard step where `noSwap` matches. A plain-text `internal
-error` or `404 page not found` therefore never replaces a control, while an
-error response that carries something to show answers its honest status and
-is swapped in:
-
-- a rejected inline edit, send address, upload or confirm answers 422, and
-  each of those forms carries `hx-status:422="swap:outerHTML"`;
-- a refused fetch-metadata request answers 403, and every page's `<body>`
-  carries `hx-status:403:inherited="swap:afterbegin"` (further below);
-- a send with Resend unconfigured and an enrich with no provider answer 503
-  with the disabled control, and `send__form` and `enrich__form` each carry
-  `hx-status:503="swap:outerHTML"` — the opt-in belongs on the enabled form,
-  since the tab that needs it is one loaded before the feature went away.
-
-An opt-in names the exact status rather than a wildcard, because htmx walks
-`422`, `42x`, `4xx` in turn and consults `noSwap` before the element at
-each step: an `hx-status:4xx` or `hx-status:5xx` sits behind `noSwap`'s own
-entry for that wildcard and is never reached.
-
-The status and the opt-in are a pair. A route answering an error body, 4xx
-or 5xx, without the matching attribute on the element that asked swaps
-nothing, and Save looks like it did nothing, the worst failure the page
-has; the handler tests assert the attribute where the form renders — in the
-rejected response for a 422, on the enabled control for a 503, whose own
-refusal carries no form to put it on.
-
-The same tag turns `includeIndicatorCSS` off. htmx would otherwise adopt a
-stylesheet for `htmx-indicator`, a class nothing here carries; every
-indicator on these pages is a rule of this app's own keyed on the
-`htmx-request` class htmx puts on the element named by `hx-indicator`.
-
-The request timeout is scoped rather than global. htmx abandons a request
-after sixty seconds, which is right for a search or a status poll — a
-hung one would otherwise leave its indicator up forever — and wrong for
-the two import routes, whose windows are sized by the server: an upload's
-scales with `MAX_IMPORT_SIZE` and a confirm's is at least
-`importer.IndexTimeout`. Those two forms say so themselves with
-`hx-config="timeout:0"`, so the server's deadlines are the only bound
-where an abandoned request would hide an import that still lands.
-
-The same two forms, and the discard form beside them, carry
-`hx-disable="find button"`. The button dims while a request is in flight,
-but dimming is appearance: a focused button still answers Enter, and htmx
-queues a second submit rather than dropping it. `hx-disable` sets the
-`disabled` attribute for the duration, and htmx applies it after the
-request body has been read, so it cannot strip the file part it is
-guarding.
+- **htmx is vendored at `static/js/htmx.min.js`, 4.0.0, pinned in a
+  comment at the top, and used only where dynamism is needed.**
+- **Every read affordance carries both `href` and `hx-get`, every editor
+  both `action` and `hx-post`; the plain answer is a page or a 303, the
+  htmx answer a fragment.** One markup path, so no no-JS path drifts.
+- **Dropping a file on the library page is the upload form's own post:
+  `drop.js` fills a hidden plain form and calls `form.submit()`, never a
+  fetch or an htmx request.** The drop relies on the redirect and the 422
+  page; see `docs/notes/import.md`.
+- **A fragment is answered when `HX-Request` is present and
+  `HX-History-Restore-Request` absent (`isHTMXFragment`).** Back issues a
+  GET marked with the second header and swaps the answer into the whole
+  body; a fragment there leaves a bare grid that cannot search.
+- **Every route serving two bodies names both headers in `Vary`, import
+  routes included; a one-body route sets no `Vary`.**
+- **The `htmx-config` tag in `document-head` keeps `4xx` and `5xx` in
+  `noSwap`; every form whose route answers 422 carries
+  `hx-status:422="swap:outerHTML"`, `send__form` and `enrich__form` also
+  carry `hx-status:503="swap:outerHTML"`, and every `<body>` carries the
+  403 one.** A plain-text `internal error` must never replace a control.
+  A route gaining an error body gains the attribute on the element that
+  asked, or Save looks like it did nothing; the 503 opt-in sits on the
+  enabled form, the one a stale tab holds.
+- **The opt-in names the exact status, never a wildcard.** htmx consults
+  `noSwap` before the element at each of the `422`, `42x`, `4xx` steps, so
+  `hx-status:4xx` is never reached.
+- **A rejection answers 422 wherever it has a body, on both paths.** A
+  redirect lands on a page that has forgotten the message and the input.
+- **`includeIndicatorCSS` is false; nothing carries `htmx-indicator`, and
+  every indicator is a rule of this app's own keyed on `htmx-request`.**
+- **The timeout is htmx's own 60s everywhere but the two import forms,
+  which carry `hx-config="timeout:0"`. Never move that to
+  `defaultTimeout` on the meta tag.** An upload's window scales with
+  `MAX_IMPORT_SIZE` and a confirm's with `importer.IndexTimeout`; a hung
+  search with no bound leaves its indicator up forever.
+- **Both import forms and the discard form carry `hx-disable="find
+  button"`.** Dimming is appearance only: a focused button still answers
+  Enter, and htmx queues the second submit. The attribute is applied after
+  the body is read, so it cannot strip the file part.
 
 ## Search
 
-Search is `GET /{$}` with a `q` parameter, not a separate route, so the
-empty box and the unfiltered library are the same page. Each keystroke is
-a debounced (`delay:300ms`) request swapping `#book-grid` with
-`outerHTML`. The search box lives only in the full page and is never
-re-rendered, so a keystroke mid-request is never lost. `hx-push-url` keeps
-the URL shareable. With JavaScript off the same `<form method="get">`
-submits to the same handler.
-
-`hx-sync="this:replace"` is what makes a stale grid hard to reach rather
-than routine. The default queues at most one request per element and drops
-every keystroke after that, and a queued request carries the query string
-it was built with, so two overlapping requests are enough for the grid to
-settle on an older string than the box holds — and since the box is never
-re-rendered, nothing on the page says so until the next keystroke.
-`replace` abandons the request in flight instead, which also cancels the
-query the server is still running for a keystroke nobody is waiting for.
-The cost is a console error per superseded request, since htmx logs every
-rejected fetch including the ones it aborted itself.
-
-It narrows that window without closing it. htmx releases the element's
-sync slot from whichever request finishes, with no check that the one
-finishing still owns it, and an aborted request runs that release like any
-other — so the request that did the aborting has its own slot cleared out
-from under it, and a third keystroke a debounce period later starts
-alongside rather than replacing it. Two concurrent requests answering out
-of order leave the same stale grid. Reaching it takes three overlapping
-requests where the default took two, which is why the answer is this
-attribute and not a patched copy of the vendored htmx.
-
-Three affordances resolve in the browser because the input is never
-re-rendered: the `clear ×` link (a plain `href="/"`, hidden by CSS while
-the box shows its placeholder), the `/` shortcut hint (unhidden only after
-`search.js` binds the key, so it never advertises a shortcut that is not
-bound) and the `filtering …` status line. The status line renders inside
-`<main>` sharing the results count's container and margins, because the
-two swap places and the grid would otherwise jump on every keystroke.
-
-Two separate things bound an overlong query, and pairing them the obvious
-way is backwards. The handler passes `q` through
-`storage.NormalizeSearchQuery`, the same call the service makes on the
-way to a `MATCH` expression, so every copy the page renders back (the
-input's value, the no-results heading, the paging URLs) is the string
-that was searched rather than a same-numbered clip made at a different
-point. That is all it does; it cannot bound the request, because the
-input is outside `#book-grid` and htmx re-sends whatever was pasted on
-the next keystroke. What bounds the request is the input's own
-`maxlength`, carried into the template as `SearchMaxLength` from
-`storage.MaxSearchBytes` so the number has one home. A forgotten field
-renders `maxlength="0"` and makes the box untypeable, which is why the
-wiring has a test. `maxlength` counts UTF-16 units, so it approximates
-the byte cap from above and never cuts what the server would keep.
-
-A query that sanitises to nothing renders the plain grid with no result
-count. One that searches renders either the results line (`4 of 1,284 ·
-matched title, author`, both counts grouped by thousands as the masthead's
-is, since one screen must not show the same number two ways) or a
-distinct `search__empty` block, kept separate from the empty-library
-block because the two call for different next actions. The empty-library
-state dims and disables the search control; with nothing indexed there is
-nothing to search.
-
-The search deliberately does not order by relevance: a grid someone is
-scanning while they type must not reorder under them. That same property
-is what lets one cursor page both the filtered and unfiltered grid.
+- **Search is `GET /{$}` with `q`; each keystroke is a `delay:300ms`
+  request swapping `#book-grid` with `outerHTML`, and `hx-push-url` keeps
+  the URL shareable.** The box lives only in the full page and is never
+  re-rendered, so a keystroke mid-request is never lost.
+- **The search input carries `hx-sync="this:replace"`.** htmx queues one
+  request per element and a queued one carries the query it was built
+  with, so the grid settles on an older string than the box holds and
+  nothing says so. `replace` narrows that window without closing it, which
+  is why the answer is the attribute and not a patched htmx.
+- **The clear link, the `/` shortcut hint and the filtering status line
+  resolve in the browser.** The input is never re-rendered. The hint is
+  unhidden only after `search.js` binds the key, and the status line shares
+  the results count's container so the grid does not jump.
+- **The handler passes `q` through `storage.NormalizeSearchQuery`, and
+  `SearchMaxLength` carries `storage.MaxSearchBytes` into `maxlength`.**
+  The first only makes every rendered copy the searched string; the input
+  is outside `#book-grid`, so only `maxlength` bounds the request. A
+  forgotten field renders `maxlength="0"`, so the wiring has a test. UTF-16
+  units approximate the byte cap from above.
+- **A query that sanitises to nothing renders the plain grid with no
+  count; a search renders the results line or the distinct `search__empty`
+  block; the empty-library state disables the control.** Counts group
+  thousands as the masthead does, and the two empty states call for
+  different next actions.
+- **Search never orders by relevance.** A grid must not reorder under
+  someone typing, and the same property lets one cursor page both grids.
 
 ## Paging
 
-The grid renders `pageSize` (48) books and appends the next batch when
-the trigger beneath it is revealed. 48 is the mockup's own figure, and a
-number in a mockup is a decision about how much scrolling one reveal buys.
-Unpaged, a reference library of 1,284 books was 1,284 cards and 1,284
-lazy cover requests in one document; nothing about it was bounded.
-
-One route serves three shapes, one more than the `HX-Request` split can
-tell apart, so the third is named in the query: the full page, the whole
-`book-grid` fragment a keystroke gets, and with `append=1` just the next
-batch of cards. `book-grid-cards` is that batch, and the same template
-renders inside the full grid's `<ul>`, so a page of cards looks identical
-however it arrived.
-
-The trigger is a single `<li class="grid__more">` inside the cards'
-`<ul>`, because it replaces itself (`hx-target="this"`,
-`hx-swap="outerHTML"`) with the next batch plus a fresh trigger, and
-whatever it swaps in has to be a legal child of that list. It carries both
-`href` and `hx-get`. The plain href is a whole page starting at the same
-cursor; an unpaged grid works with JavaScript off, so a paged one that
-forgets the fallback is strictly worse than no paging. `MoreLabel` empty
-is how the last page renders no trigger rather than an offer of zero more
-books, and the count in it is the one the reader is looking at: the
-library total on an unfiltered grid, `MatchCount` during a search.
-
-A keystroke rebuilds the whole grid including its trigger, so a new
-search resets paging by construction; a stale trigger would append page
-two of the previous query. That is invisible until it breaks, so a test
-pins it.
-
-Paging creates the possibility of being deep in the library with
-JavaScript off, and every affordance that would lead home is inert there:
-the brand and the current nav item are plain text, and the clear link is
-hidden whenever the box is empty, which is exactly a deep unfiltered
-page's state. The clear link therefore persists on such a page, reading
-"first page" rather than naming a search that is not running.
-
-The cursor itself, and why it is keyset rather than `OFFSET`, is
-`internal/storage`'s decision; see `docs/notes/storage.md`.
+- **`pageSize` is 48, the mockup's figure.** A number in a mockup is a
+  decision about how much scrolling one reveal buys.
+- **One route serves three shapes: the page, the `book-grid` fragment, and
+  with `append=1` the `book-grid-cards` batch.** `HX-Request` tells two
+  apart, so the third is named in the query; one template renders the
+  cards wherever they land.
+- **The trigger is one `<li class="grid__more">` inside the cards' `<ul>`,
+  replacing itself, and carries both `href` and `hx-get`.** It must swap
+  in a legal child of that list, and the href is a whole page at the same
+  cursor, since a paged grid with no fallback is worse than no paging.
+- **`MoreLabel` empty means no trigger; its count is the library total, or
+  `MatchCount` during a search.**
+- **A new search rebuilds the whole grid including its trigger, so paging
+  resets by construction.** A stale trigger would append page two of the
+  previous query; a test pins it.
+- **The clear link persists on a deep unfiltered page, reading "first
+  page".** With JavaScript off nothing else on such a page leads home.
+- **The cursor is keyset and is `internal/storage`'s decision.** See
+  `docs/notes/storage.md`.
 
 ## Book detail and editing
 
-`GET /books/{id}` parses the id with `strconv.ParseInt`; a non-numeric
-and an unknown id both plain 404, indistinguishable on purpose, since
-neither is a client error worth its own page. Metadata renders one element
-per field. Empty optional fields (publisher, date, language, ISBN, and
-file size when the book has no location) render as visible em-dash rows
-rather than being dropped: a hidden field cannot be filled in, and sparse
-metadata is the common FB2 case. `PublishedDate` renders exactly as
-stored; it is free text from embedded metadata, sometimes a year and
-sometimes a full date, and parsing it would lie confidently. Locations
-reveal through a native `<details>`, since no JavaScript is guaranteed to
-have loaded, with a location inside its missing-file grace period
-annotated.
-
-A marked location also carries a "forget" form, posting to
-`POST /books/{id}/locations/forget` with the `book_files` id in `file`,
-wrapped in `sameSiteOnly` like every other state-changing route. It exists
-because the scanner refuses to prune a row whose top-level directory
-yielded no files — that being equally what an offline sub-mount looks like
-— so a renamed folder otherwise leaves a dead path on every book in it for
-good (`scanner.md`, which also carries the rule for when it is offered).
-The whole `<dd>` is the `book-locations` partial with `id="locations"`,
-rendered by the full page and by the route alike: an `outerHTML` swap has
-to replace the element carrying the id, so the partial cannot be just the
-list inside it. That is the `send-control` arrangement, one markup path.
-Forgetting a book's last location prunes the book, and the response then
-has nowhere to go: `303` to `/` without htmx, `HX-Redirect: /` with it,
-since a fragment cannot be swapped into a page whose subject no longer
-exists either.
-
-Inline editing is `GET`/`POST /books/{id}/metadata/{field}`, one route
-per field rather than one form per page, so each field is its own swap
-target and a keystroke in one never re-renders another. `makeFieldViews`
-builds all seven from one place, so a whole-page render and a single-field
-fragment cannot drift. Each view carries `Value` (what the control edits,
-authors newline-separated) and `Display` (what the read view shows, "A, B
-& C") separately, because the stored and readable forms differ. Every
-read affordance carries an `aria-label` naming its field: with an optional
-value empty its visible text is only an em dash, so the accessible name is
-the only thing distinguishing seven otherwise identical links.
-
-Without htmx the `GET` redirects to `/books/{id}?edit={field}`, which
-renders the whole page with that editor open, and the `POST` 303s back to
-the book. An unrecognised `?edit=` value opens nothing rather than 400ing;
-it names no resource. Both paths load the book before choosing a shape,
-so an unknown book is the same plain 404 on each rather than a 303 for a
-book that does not exist.
-
-The metadata block is a two-column grid of `space-between` rows, and every
-`<dd>` in it takes the row's free space so a value sits against its label
-rather than against the far edge. That has to be a property of the row, not
-of the editable rows alone: `added` is the one value with no editor behind
-it, and a `<dd>` sized to its content is the odd one out pushed right.
-
-`storage.ParseMetadataField` is the gate on these routes and on `?edit=`,
-and `cover` is deliberately absent from it: `cover_path` holds a path
-`internal/cover.Store` produced, never text a person types. Admitting the
-name would make `POST /books/{id}/metadata/cover` reach storage, come back
-with an error that is not `service.ErrInvalidMetadata`, and answer 500,
-where a name nobody may edit should simply 404.
-
-**A rejected edit answers 422 on both paths.** The fragment is the editor
-holding the value and its message, and the form's
-`hx-status:422="swap:outerHTML"` is what lets htmx swap it in past
-`noSwap`; the navigation path answers the whole page with that field open.
-
-**The body cap is derived, not chosen.** `maxMetadataFormBody` is
-`3 × service.MaxMetadataValueBytes + 1024`: the service limits decoded
-bytes, `MaxBytesReader` bounds the encoded body, and form-urlencoding
-triples non-ASCII text. It is sized off the author list rather than the
-description, since 100 names of 1 KiB outweigh 64 KiB of prose, and
-sizing off the description would reject a valid author list before
-`normalizeAuthors` could apply its own limits. Over the cap is still a
-field error, not a bare 413.
-
-Provenance markers appear only where they are not obvious.
-`providerSourceNote` renders a marker for a provider's name and nothing
-for `embedded`, `manual` or an absent source. Every field has a source,
-and rendering all seven would double the block's weight to say "embedded"
-seven times. The marker is a caveat: a value read out of the file is a
-fact about the file, a typed value is the person's own, and a third-party
-guess is the only one whose origin changes how much to trust it. `manual`
-renders nothing even though it is the source the resolver cares most
-about, because the person who typed it does not need telling. The marker
-is derived in `makeFieldViews`, and the metadata POST reloads the book
-rather than echoing the submitted value, which is what makes saving a
-field clear its marker for free. A test pins that, because it is exactly
-what a later optimisation removes.
+- **A non-numeric and an unknown id both plain 404.** Neither is worth its
+  own page.
+- **Empty optional fields render as visible em-dash rows.** A hidden field
+  cannot be filled in.
+- **`PublishedDate` renders exactly as stored.** It is free text, and
+  parsing it would lie confidently.
+- **Locations reveal through a native `<details>`, with a location in its
+  grace period annotated.** No JavaScript is guaranteed to have loaded.
+- **A marked location carries a forget form posting to `POST
+  /books/{id}/locations/forget` with the `book_files` id in `file`.** The
+  scanner never prunes under a top-level directory that yielded no files,
+  so a renamed folder otherwise leaves a dead path for good
+  (`docs/notes/scanner.md`).
+- **The `book-locations` partial is the whole `<dd>` with
+  `id="locations"`, rendered by page and route alike.** An `outerHTML`
+  swap must replace the element carrying the id.
+- **Forgetting a book's last location answers `303` to `/` without htmx
+  and `HX-Redirect: /` with it.** A fragment cannot be swapped into a page
+  whose subject is gone.
+- **Editing is one route per field, and `makeFieldViews` builds all seven
+  from one place.** Each field is its own swap target, and page and
+  fragment cannot drift.
+- **Each view carries `Value` and `Display` separately, and every read
+  affordance carries an `aria-label` naming its field.** Stored and
+  readable forms differ, and an empty value's visible text is only a dash.
+- **Without htmx the GET redirects to `?edit={field}` and the POST 303s
+  back; an unrecognised `?edit=` opens nothing; both paths load the book
+  before choosing a shape.** An unknown book is a 404 on each, never a 303
+  to nowhere.
+- **Every metadata `<dd>` takes the row's free space, as a property of the
+  row and not of editable rows alone.** `added` has no editor and would be
+  the one pushed right.
+- **`storage.ParseMetadataField` gates these routes and `?edit=`, and
+  `cover` is absent from it.** `cover_path` is never typed text; admitting
+  the name would answer 500 where it should 404.
+- **`maxMetadataFormBody` is `3 × service.MaxMetadataValueBytes + 1024`,
+  sized off the author list; over the cap is a field error, not a 413.**
+  Form-urlencoding triples non-ASCII text, and 100 names of 1 KiB outweigh
+  64 KiB of prose, so sizing off the description would reject a valid
+  author list before `normalizeAuthors` could.
+- **`providerSourceNote` renders a marker for a provider's name and nothing
+  for `embedded`, `manual` or absent.** A third-party guess is the only
+  origin that changes how much to trust a value. Editing clears the marker
+  because the POST reloads the book rather than echoing the input; a test
+  pins that, since it is what a later optimisation removes.
 
 ## Send and enrichment controls
 
-The send control mounts above the description, the reason the page gets
-opened, via `{{template "send-control" .}}` over `bookDetailPage` itself,
-so `POST /books/{id}/send` and `GET /books/{id}/sends/{sendID}` build one
-mostly-zero-valued `bookDetailPage` rather than a parallel type. Its
-states (idle, sending, delivered, failed, sending unconfigured, format
-not accepted) are driven by fields `applySendState` computes once, so the
-template branches on which block to show and never on how to phrase it.
-`queued` and `sending` are one visual state, "Sending": the UI has no
-separate treatment for the gap between enqueue and claim, which the
-worker's `Notify` poke keeps short.
-
-The whole control is one swap target (`id="send"`). Form and status share
-a region because the states replace each other. The pending status box's
-`hx-get`/`hx-trigger="load delay:2s"` targets `#send`, not itself, so the
-outer swap replaces the whole control, and a terminal state's block
-carries no such attributes, so polling stops by construction. The
-`<form>`'s own `hx-post` survives every state, keeping "Send again" and
-"Retry" enhanced; a retry is a new row.
-
-Every route that renders the control copies `BookDetail.SendableNote`
-onto the page, so a fragment can never offer a button the full page
-withholds. The page carries only the note, and the template branches on
-it: a separate `Sendable` bool beside it would let a route that copied
-neither render a refusal with no reason.
-
-With zero saved recipients the `+ add address` `<details>` renders open
-and the `<select>` is omitted. It also renders open after a rejected
-address, with the typed values carried back so the fix is an edit rather
-than a retype. That path re-reads `LatestSend` rather than rendering a
-nil state: nothing was queued, so retracting a Delivered or Failed result
-over a typo would make the page contradict itself.
-
-`POST /books/{id}/send` answers a fragment request with the fragment and
-everyone else with a `303` back to the book, whose initial render picks
-the job up through `LatestSend`. A rejected address answers 422 on both
-paths, the way a rejected edit does: the fragment with the control holding
-the error, and the plain POST with the whole book page around the same
-control, built through `makeBookDetailPage`, rather than a `303`. A
-redirect there would land on a page that has forgotten both the message
-and what was typed, having queued nothing to show instead; both shapes set
-the error through `setPageSendError`, so they cannot word it differently.
-With sending unconfigured it 503s with
-the disabled fragment rather than 404ing, so a stale open tab gets an
-explanation. `GET /books/{id}/sends/{sendID}` is scoped under the book id
-so a mismatched pairing 404s instead of leaking one book's send under
-another's page.
-
-Removing a saved recipient is `POST /recipients/remove`, reachable only
-from the send control's address list; there is no management screen. An
-`<option>` cannot hold a button, so the address list lives in the `+ add
-address` `<details>`, one row per address with a "remove" button. That
-button cannot be a child of the send form, since submitting it must never
-also submit a send and HTML forbids nested forms, so it submits a sibling
-`<form id="recipient-form">` through its `form=` attribute, plain HTML
-with no duplicated markup. The form carries the book id so the response
-re-renders that book's whole send control, since removing an address
-changes the picker too. Removing an unknown address 200s like any other:
-a double submit is a slip, not an error.
-
-Enrichment reuses the send control's state machine rather than inventing
-a second one: `POST /books/{id}/enrich` and
-`GET /books/{id}/enrichment/{jobID}`, the same book-id scoping, one swap
-region (`#enrich`), the same fragment-or-303 split, polling that stops
-because only the pending block carries a trigger. It differs where the
-job differs: no recipient picker, and the terminal states are "Added
-publisher, description" or "Nothing to add". **"Nothing to add" is a
-success.** It is the ordinary outcome for a book whose embedded metadata
-is complete and for any book no provider could answer, and rendering it
-as a failure would teach people to distrust a working feature.
-`EnrichResultOK` carries that, and a mutation test asserts it. The result
-names the fields that moved rather than saying "done". With no provider
-configured the control renders the disabled treatment the send control
-shows without Resend, and the POST 503s with that fragment.
-
-The enrichment surface is exactly three affordances, one per question it
-raises: where did this value come from (the provenance marker), can I
-fetch metadata now (the trigger), did it do anything (the result). A
-library-wide enrich, an enrichment history page and editable provenance
-are absent by decision: the first has no honest progress display short of
-building one, the second is a page nobody opens because the result is
-visible in the fields themselves, and a source is a fact rather than a
-setting.
+- **The send control is `{{template "send-control" .}}` over
+  `bookDetailPage`, and the send routes build a mostly-zero
+  `bookDetailPage` rather than a parallel type.** `applySendState`
+  computes the states once, so the template branches on a block and never
+  on phrasing; `queued` and `sending` are one visual state.
+- **The whole control is one swap target, `#send`; the pending block's
+  poll targets `#send`, and only the pending block carries
+  `hx-get`/`hx-trigger`.** Polling stops by construction. The form's
+  `hx-post` survives every state, so Retry stays enhanced and is a new row.
+- **Every route that renders the control copies `SendableNote`, and the
+  page carries only the note, no `Sendable` bool.** A fragment can never
+  offer a button the page withholds, and a route copying neither cannot
+  render a refusal with no reason.
+- **With zero recipients the add-address `<details>` renders open and the
+  `<select>` is omitted; it also renders open after a rejected address with
+  the typed values carried back, and that path re-reads `LatestSend`.**
+  Nothing was queued, so retracting a shown result would contradict the
+  page.
+- **`POST /books/{id}/send` answers a fragment or a 303; a rejected
+  address answers 422 on both paths through `makeBookDetailPage` and
+  `setPageSendError`; sending unconfigured answers 503 with the disabled
+  fragment; `GET /books/{id}/sends/{sendID}` is scoped under the book
+  id.** One setter cannot word the error two ways, a 503 explains itself
+  to a stale tab, and the scoping keeps one book's send off another's page.
+- **`POST /recipients/remove` is reachable only from the send control; the
+  remove button submits the sibling `recipient-form` through `form=`, the
+  form carries the book id, and an unknown address 200s.** HTML forbids
+  nested forms and the button must never also send; the picker changed, so
+  the whole control re-renders; a double submit is a slip.
+- **Enrichment reuses the send state machine: `#enrich`, the same scoping,
+  the same fragment-or-303 split, polling that stops because only the
+  pending block carries a trigger; with no provider the control renders
+  disabled and the POST answers 503.**
+- **"Nothing to add" is a success, carried by `EnrichResultOK`, and the
+  result names the fields that moved.** It is the ordinary outcome for a
+  complete book, and a failure there teaches distrust of a working feature.
+- **Enrichment is exactly three affordances: marker, trigger, result. A
+  library-wide enrich, an enrichment history page and editable provenance
+  are absent by decision.** The first has no honest progress display, the
+  second shows nothing the fields do not, and a source is a fact, not a
+  setting.
 
 ## Cross-site protection and the HTTPS requirement
 
-The send POST, every metadata POST, the enrich POST, recipient removal and
-forgetting a location are the only state-changing routes, and each is
-wrapped in `sameSiteOnly`, which rejects a request whose `Sec-Fetch-Site` is anything
-but `same-origin` or `none`. There is no login, so the network position of
-the request is the only thing between the collection and everyone else.
-Any page in the user's browser can reach a LAN or localhost server its
-author cannot, and a form-encoded POST needs no CORS preflight, with the
-attachment's destination address in the request body.
-
-Browsers send `Sec-Fetch-Site` only to a potentially trustworthy origin:
-HTTPS, or localhost. Over plain HTTP on a LAN or tailnet address it is
-absent from every request, cross-site ones included, and `sameSiteOnly`
-alone admits everything. The deployment requirement follows, in two parts
-that only work together: an HTTPS gateway in front (the app's redirects
-are relative paths, so it is agnostic to the scheme), and the plain
-listener bound so nothing but that gateway reaches it,
-`ADDR=127.0.0.1:8080` with the proxy on the host or an unpublished port on
-a shared Docker network with a sidecar. A listener published on the LAN
-beside an HTTPS front is the requirement half-met, which is unmet.
-
-Two wrappers in `web.go`, one of which `cmd/server` puts around the whole
-handler, make a violated requirement visible. `RequireFetchMetadata`
-(`REQUIRE_FETCH_METADATA=true`, the default) refuses any
-non-GET/HEAD/OPTIONS request with no `Sec-Fetch-Site` at all, logging each
-refusal at Warn: every current browser sends the header over HTTPS, so a
-mutation without it is a script or an exposed plain listener, and the
-person whose edit was refused needs the log to say so. The refusal is a
-403 in two shapes: an htmx fragment request's carries the
-`fetch-metadata-refused` partial, which every page's `<body>` swaps in
-through `hx-status:403:inherited="swap:afterbegin"`, inserting one line as
-the first child of whatever the posting form's `hx-target` names, so the
-control survives beneath it and the wrapper never learns which control
-posted. Every other client gets it as plain text. `next` is not called in either shape.
-`WarnMissingFetchMetadata` (`REQUIRE_FETCH_METADATA=false`) admits
-everything and logs one Warn per process, a tripwire rather than a guard.
-`cmd/server` picks between them through a pure function with a table test
-pinning both directions, since swapping the branches would invert the
-security default with every handler test still green.
-
-`sameSiteOnly` itself passes an empty header through, deliberately: it
-answers only the question it can, "the browser said cross-site", and the
-opt-out mode depends on that.
-
-The HTTPS requirement also closes DNS rebinding against the unchecked
-`Host` header: a rebound hostname fails certificate validation against an
-HTTPS origin, and the plain listener is not reachable from a browser at
-all. That is why there is no `Host` allowlist.
+- **Every state-changing route is wrapped in `sameSiteOnly`, which rejects
+  a `Sec-Fetch-Site` other than `same-origin` or `none`.** There is no
+  login, and a form POST from any page needs no preflight to reach a LAN
+  server.
+- **Deployment is an HTTPS gateway in front and the plain listener
+  reachable only by it.** Browsers send `Sec-Fetch-Site` only to HTTPS or
+  localhost, so over plain HTTP `sameSiteOnly` admits everything.
+  Redirects are relative paths, so the app is scheme-agnostic.
+- **`cmd/server` wraps the whole handler in `fetchMetadataGuard`, picking
+  `RequireFetchMetadata` (refuse a non-GET/HEAD/OPTIONS request with no
+  header, Warn per refusal) or `WarnMissingFetchMetadata` (admit all, one
+  Warn per process) through a pure function with a table test on both
+  directions.** Swapped branches would invert the security default with
+  every handler test green.
+- **The refusal is a 403 for every client; an htmx fragment caller's
+  carries the `fetch-metadata-refused` partial, which every `<body>` swaps
+  in through `hx-status:403:inherited="swap:afterbegin"`. `next` is not
+  called in either shape.** The line lands as the first child of the
+  form's target, so the control survives and the wrapper never learns
+  which control posted.
+- **`sameSiteOnly` passes an empty header through.** It answers only "the
+  browser said cross-site", and the opt-out mode depends on that.
+- **There is no `Host` allowlist.** A rebound hostname fails certificate
+  validation against an HTTPS origin, and the plain listener is not
+  reachable from a browser.
 
 ## Upload bodies
 
-One route takes a body worth bounding, and it bounds it three ways.
-
-`cmd/server`'s `ReadTimeout` covers the request body and is sized for a
-page request; a book of tens of megabytes over Wi-Fi to a NAS routinely
-takes longer. The upload handler therefore extends its own read deadline
-through `http.NewResponseController`, sized from the import cap at a floor
-of 1 MiB/s. Per request rather than globally, so every other route keeps
-the tight timeout, and extended rather than removed, so a stalled upload
-still ends. A server that does not support the control is left alone and
-the global timeout applies.
-
-`http.MaxBytesReader` bounds the body itself, at the cap plus multipart
-overhead, and it is installed before the handler can refuse anything —
-including the read-only refusal, which answers a request whose body is
-still arriving. The number a refusal actually names is not this one but the
-importer's own count of the file part's bytes, since the part is what is
-being measured and only the importer sees it.
-
-The body streams through `r.MultipartReader` rather than
-`ParseMultipartForm`, which would spool the whole file to a second
-temporary copy before the handler saw a byte. Every refusal drains what is
-left before rendering, so no response is written over a request body
-nobody consumed. See `docs/notes/import.md` for how far that drain
-actually helps.
+- **The upload and confirm routes extend their own deadlines through
+  `http.NewResponseController`, both halves; `cmd/server`'s timeouts are
+  never loosened for other routes.** Go installs the write deadline once,
+  when the headers are read, so a widened read window alone sits inside a
+  write deadline that expired while the body arrived, and the import lands
+  with its answer never reaching the browser. Extended rather than removed,
+  so a stalled upload still ends. `confirmWindow` is derived from
+  `importer.IndexTimeout`, never restated.
+- **`http.MaxBytesReader` bounds the body at the cap plus multipart
+  overhead and is installed before any refusal; the number a refusal names
+  is the importer's own count of the file part.** The read-only refusal
+  answers a body still arriving, and only the importer sees the part.
+- **The body streams through `r.MultipartReader`, never
+  `ParseMultipartForm`, and every refusal drains what is left before
+  rendering.** `ParseMultipartForm` spools a second copy of the file, and
+  no response is written over a body nobody consumed.
 
 ## History page
 
-`GET /history` lists every send over `service.SendHistory`'s window,
-newest first, answering "did I already put this on the Kindle?" across the
-library rather than per book. It renders even with sending unconfigured:
-it is a log, not an action, and a library that used to send still has
-history worth reading. Each row is composed in the handler.
-`historyStatus` collapses `queued` and `sending` into one "Sending", the
-same collapse the send control makes, since two screens naming one state
-differently would be worse than either alone. `BookURL` is empty for a
-send whose book has been pruned, rendered unlinked rather than pointing
-nowhere; the row's title and address come from `send_log`'s own columns,
-which is what lets a pruned book's send still appear.
-
-The scope line reads "last 30 days" ordinarily and names
-`SendHistoryLimit` once the cap has truncated the window. The page's two
-wrong answers are not symmetric: a false "yes" costs a moment's doubt, a
-false "no" causes a duplicate delivery, the failure the send job model is
-built to avoid. A fixed "last 30 days" over a silently truncated list
-would reintroduce in the UI what the queue prevents.
-
-`relativeTime(t, now)` renders "today, 14:02", "yesterday, 22:41",
-"28 Aug, 09:15" as a pure function with `now` passed in, so every case is
-a table test. It converts both times to the server's local zone, the only
-zone a server-rendered page without JavaScript knows, and compares
-calendar dates via `AddDate` rather than a raw `time.Sub`: a send at 23:50
-is "yesterday" twenty minutes later at 00:10, which a `< 24h` comparison
-gets wrong at exactly that boundary.
-
-The masthead's `site-header` partial takes `Nav` and `HeaderNote`, both
-composed by the handler. `navFor(current)` builds every nav entry each
-time and marks one current, rendered as plain text rather than a link,
-since there is nowhere more useful to send someone already on the page.
-The book detail page passes `navFor("library")`, having no entry of its
-own. `headerBookCount` composes the "1,284 books" note both book pages
-share; the history page puts its scope line in the same slot.
+- **`GET /history` renders with sending unconfigured.** It is a log, not
+  an action.
+- **`historyStatus` collapses `queued` and `sending` into "Sending", as
+  the send control does.** Two screens must not name one state
+  differently.
+- **`BookURL` is empty for a pruned book and rendered unlinked; the row's
+  title and address come from `send_log`'s own columns.** That is what
+  lets a pruned book's send still appear.
+- **The scope line reads "last 30 days" and names `SendHistoryLimit` once
+  the cap has truncated the window.** A false "no" causes a duplicate
+  delivery, the failure the send queue exists to avoid.
+- **`relativeTime` converts both times to the server's local zone and
+  compares calendar dates through `AddDate`, never `< 24h`.** A send at
+  23:50 is "yesterday" at 00:10.
+- **`site-header` takes `Nav` and `HeaderNote` composed by the handler;
+  `navFor` marks the current entry as plain text, the book page passes
+  `navFor("library")`, `headerBookCount` composes the count both book
+  pages share, and the history page puts its scope line in that slot.**
+  There is nowhere more useful to send someone already on the page.
 
 ## Styling
 
-There is one button system in `app.css`: `.button` with `--md`/`--lg`
-sizes and `--primary`/`--secondary`/`--tertiary` intents, plus `.spinner`
-and `.spinner--sm`, shared by the send control, the enrichment control and
-the inline editors. The locations list's forget button is in it too, at a
-size `.locations__forget` states itself: it is the third size and the one
-the backlog item below would turn into `--sm`, so it clears the base's
-`min-height` the way `--md` and `--lg` do rather than inheriting a minimum
-shaped for the editors. Two neighbours stay outside it on purpose:
-`.search__spinner` is toggled by `htmx-request` and coloured against the
-input, sharing only the keyframes, and `.send__remove` is a borderless
-text affordance rather than a button.
-
-`--primary`'s foreground is `var(--bg-raised)` and must stay a token. It
-resolves to `#fff` in light theme, which reads as the obvious
-simplification, but `--accent` is a light tan in dark theme, where white
-on it measures 2.9:1, under even the 3:1 large-text floor, on the primary
-action of the whole application. The token holds 5.8:1 in both themes.
-
-Two rules read as tidy-ups and are load-bearing: `--md`/`--lg` reset the
-base's `min-height`, without which the enrichment button gains a pixel,
-and `.button--tertiary:disabled` beats `.button:disabled` on source order
-alone, so grouping the `--tertiary` rules together silently reverts it.
-Two tests guard the class names in each direction: no retired name
-survives in any template or stylesheet, and every button or spinner class
-the markup names has a rule, since a mistyped modifier renders as a bare
-`.button` with every handler test still green. Known limit:
-`docs/backlog/2026090702-button-base-carries-the-editors-size.md`.
-
-`white-space: pre-line` on the description's read view is contract rather
-than styling, and has two tests: one that the rule is there, one that the
-break survives to the markup, since a handler-side join would defeat the
-first while it stayed green. A description is stored with its paragraph
-breaks — Google's flattened HTML supplies them and the edit textarea
-preserves them — and this is what makes them visible. `pre-wrap` is the
-wrong half of the pair: it also reproduces a provider's leading
-indentation and its stray double spaces.
-
-The selector is `.editable__read.detail__description`, not the bare class,
-because the edit `<textarea>` carries `.detail__description` too. A
-textarea's user-agent default is `pre-wrap` and an author `white-space`
-overrides it, so the bare class would collapse runs of spaces inside a
-control whose submitted value keeps them, putting the caret where the text
-is not.
+- **There is one button system in `app.css`: `.button` with `--md`/`--lg`
+  and `--primary`/`--secondary`/`--tertiary`, plus `.spinner` and
+  `.spinner--sm`.** `.locations__forget` is in it at a size it states
+  itself and clears the base `min-height` as `--md` and `--lg` do, since
+  the base minimum is shaped for the editors. `.search__spinner` stays
+  outside because it is coloured against the input and shares only the
+  keyframes; `.send__remove` because it is a borderless text affordance,
+  not a button. Known limit:
+  `docs/backlog/2026090702-button-base-carries-the-editors-size.md`.
+- **`.button--primary`'s foreground stays `var(--bg-raised)`, never
+  `#fff`.** `--accent` is a light tan in dark theme, where white measures
+  2.9:1; the token holds 5.8:1 in both.
+- **`--md`/`--lg` reset the base `min-height`, and
+  `.button--tertiary:disabled` beats `.button:disabled` on source order
+  alone.** Without the first the enrichment button gains a pixel; grouping
+  the `--tertiary` rules together silently reverts the second.
+- **Two tests guard button class names in each direction: no retired name
+  survives, and every class the markup names has a rule.** A mistyped
+  modifier renders as a bare `.button` with every handler test green.
+- **`white-space: pre-line` on the description's read view is contract,
+  with one test for the rule and one that the break reaches the markup.**
+  A description is stored with its paragraph breaks; `pre-wrap` would also
+  reproduce a provider's indentation and stray double spaces.
+- **The selector is `.editable__read.detail__description`, never the bare
+  class.** The `<textarea>` carries `.detail__description` too, and an
+  author `white-space` overrides its `pre-wrap` default, collapsing spaces
+  a submitted value keeps.
