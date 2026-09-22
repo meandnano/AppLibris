@@ -887,6 +887,82 @@ func TestLibraryPageIsNoDropTargetWhenImportIsDisabled(t *testing.T) {
 	}
 }
 
+func TestLibraryPageOffersPastingALinkWhenImportIsEnabled(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `<dialog class="paste" data-paste-link`) {
+		t.Fatalf("the library page carries no paste dialog:\n%s", body)
+	}
+	// A plain form, so a pasted link is the Import page's own link post and
+	// htmx never takes it
+	form := openTag(t, body, "paste__form")
+	for _, want := range []string{`method="post"`, `action="/import/url"`} {
+		if !strings.Contains(form, want) {
+			t.Errorf("the paste form lacks %s: %s", want, form)
+		}
+	}
+	if strings.Contains(form, "hx-") {
+		t.Errorf("the paste form carries an htmx attribute: %s", form)
+	}
+	input := openTag(t, body, "import__link")
+	for _, want := range []string{`type="url"`, `name="url"`, "required"} {
+		if !strings.Contains(input, want) {
+			t.Errorf("the paste input lacks %s: %s", want, input)
+		}
+	}
+	// The script finds the dialog's parts by these, so a missing one leaves
+	// the first paste throwing instead
+	for _, want := range []string{
+		`<span data-paste-host></span>`,
+		`data-paste-import`,
+		`data-paste-cancel`,
+		`<span data-paste-downloading hidden>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the paste dialog is missing %s:\n%s", want, body)
+		}
+	}
+	// A pasted file is handed to drop.js, which must have run first
+	dropAt := strings.Index(body, `src="/static/js/drop.js"`)
+	pasteAt := strings.Index(body, `src="/static/js/paste-link.js"`)
+	if pasteAt < 0 {
+		t.Fatalf("the library page does not load paste-link.js:\n%s", body)
+	}
+	if dropAt < 0 || pasteAt < dropAt {
+		t.Errorf("paste-link.js loads before drop.js:\n%s", body)
+	}
+}
+
+func TestLibraryPageOffersNoPastingWhenImportIsDisabled(t *testing.T) {
+	handler, _, _ := newImportHandlerWritable(t, 1<<20, false)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+
+	if strings.Contains(body, "data-paste-link") {
+		t.Errorf("a read-only library renders the paste dialog:\n%s", body)
+	}
+	if strings.Contains(body, "paste-link.js") {
+		t.Errorf("a read-only library loads paste-link.js:\n%s", body)
+	}
+}
+
+// On the Import page a paste would compete with its own link form
+func TestImportPageDoesNotLoadPasteLink(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/import", nil))
+	if body := rec.Body.String(); strings.Contains(body, "paste-link.js") || strings.Contains(body, "data-paste-link") {
+		t.Errorf("the Import page offers pasting a link:\n%s", body)
+	}
+}
+
 // The grid fragment is what a search swaps in, so a target inside it would be
 // duplicated or lost on every keystroke
 func TestLibraryGridFragmentCarriesNoDropTarget(t *testing.T) {
@@ -897,8 +973,12 @@ func TestLibraryGridFragmentCarriesNoDropTarget(t *testing.T) {
 		req.Header.Set("HX-Request", "true")
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
-		if body := rec.Body.String(); strings.Contains(body, "data-import-drop") {
+		body := rec.Body.String()
+		if strings.Contains(body, "data-import-drop") {
 			t.Errorf("the %s fragment carries the drop target:\n%s", path, body)
+		}
+		if strings.Contains(body, "data-paste-link") || strings.Contains(body, "paste-link.js") {
+			t.Errorf("the %s fragment carries the paste dialog:\n%s", path, body)
 		}
 	}
 }

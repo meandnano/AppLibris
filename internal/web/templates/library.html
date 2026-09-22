@@ -6,11 +6,12 @@
 {{template "search-bar" .}}
 
 <main class="page">
-{{with .ImportDrop}}{{template "import-drop" .}}{{end}}
+{{with .ImportDrop}}{{template "import-drop" .}}{{template "paste-link" .}}{{end}}
 {{template "search-status" .}}
 {{template "book-grid" .}}
 </main>
 
 {{template "site-scripts" .}}
+{{if .ImportDrop}}<script src="/static/js/paste-link.js" defer></script>{{end}}
 </body>
 </html>

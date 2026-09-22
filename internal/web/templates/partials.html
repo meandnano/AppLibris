@@ -505,6 +505,25 @@
 </div>
 {{end}}
 
+{{/* A pasted link's confirmation. The form is the Import page's link form
+     posted natively, so the answer is the same redirect to the preview or
+     422 page; paste-link.js only fills it and names the host. Only included
+     beside import-drop, whose script it hands a pasted file to */}}
+{{define "paste-link"}}
+<dialog class="paste" data-paste-link aria-labelledby="paste-host">
+  <form class="paste__form" method="post" action="/import/url">
+    <p class="paste__host" id="paste-host">Download from <span data-paste-host></span>?</p>
+    <label class="import__label" for="paste-url">Link to an EPUB or FB2 file</label>
+    <input class="import__link" id="paste-url" type="url" name="url" placeholder="https://" autocomplete="off" required>
+    <div class="paste__actions">
+      <button class="button button--md button--primary" type="submit" data-paste-import>Import</button>
+      <button class="button button--md button--secondary" type="button" data-paste-cancel>Cancel</button>
+      <span class="paste__status" role="status"><span data-paste-downloading hidden>Downloading &hellip;</span></span>
+    </div>
+  </form>
+</dialog>
+{{end}}
+
 {{/* Both an action and an hx-post, the one markup path every other control
      here uses: with htmx loaded the panel swaps in place, and without it
      the same handler answers a redirect to the preview's own URL. enctype

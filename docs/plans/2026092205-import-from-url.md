@@ -353,12 +353,12 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 - Modify: `internal/web/static/css/app.css`
 - Modify: `internal/web/web_test.go`
 
-- [ ] expose the drop's file submit from `drop.js` so a pasted file reuses its refusals and sentences
-- [ ] add the confirmation dialog partial: host line, editable `url` input inside a real form, Import and Cancel
-- [ ] implement `paste-link.js` per Technical Details: paste listener, file routed to the drop, link to the dialog, the handing-off state
-- [ ] include the partial and script from `library.html` only when a `Stager` exists
-- [ ] write tests: the library page carries the dialog and script when importing is enabled and neither when it is not; a search fragment (`book-grid`) carries neither
-- [ ] run tests - must pass before task 7
+- [x] expose the drop's file submit from `drop.js` so a pasted file reuses its refusals and sentences
+- [x] add the confirmation dialog partial: host line, editable `url` input inside a real form, Import and Cancel
+- [x] implement `paste-link.js` per Technical Details: paste listener, file routed to the drop, link to the dialog, the handing-off state
+- [x] include the partial and script from `library.html` only when a `Stager` exists
+- [x] write tests: the library page carries the dialog and script when importing is enabled and neither when it is not; a search fragment (`book-grid`) carries neither
+- [x] run tests - must pass before task 7
 
 ### Task 7: Add the Paste button to the library toolbar
 

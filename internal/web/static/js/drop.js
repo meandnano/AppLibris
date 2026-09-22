@@ -70,15 +70,10 @@
     event.dataTransfer.dropEffect = uploading ? "none" : "copy";
   });
 
-  // Always prevented for a file drag, so a refused drop never navigates the
-  // tab to the file itself
-  document.addEventListener("drop", function (event) {
-    if (!carriesFiles(event)) return;
-    event.preventDefault();
-    if (uploading) return;
+  // Shared with a pasted file, so both gestures keep one set of refusals
+  function submitFiles(dataTransfer) {
     depth = 0;
-
-    var dataTransfer = event.dataTransfer;
+    showRefusal(null);
     if (!isSingleFile(dataTransfer)) {
       overlay.hidden = true;
       showRefusal("not-one");
@@ -94,9 +89,32 @@
 
     input.files = dataTransfer.files;
     uploading = true;
+    overlay.hidden = false;
     showState("uploading");
     form.submit();
+  }
+
+  // Always prevented for a file drag, so a refused drop never navigates the
+  // tab to the file itself
+  document.addEventListener("drop", function (event) {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    if (uploading) return;
+    submitFiles(event.dataTransfer);
   });
+
+  // paste-link.js hands a pasted file here, and holds drops off while a
+  // pasted link is on its way to the server
+  window.importDrop = {
+    submitFiles: submitFiles,
+    busy: function () {
+      return uploading;
+    },
+    hold: function () {
+      uploading = true;
+    },
+    release: reset,
+  };
 
   // Back onto a page restored from the bfcache would otherwise still say
   // it is uploading
