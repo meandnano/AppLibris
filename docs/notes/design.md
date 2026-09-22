@@ -1,144 +1,64 @@
 # Design
 
-Project-level decisions. Per-area rationale is in the sibling files under
-`docs/notes/`; the package map and invariants are in CLAUDE.md.
+Project-level decisions and the startup rules of `cmd/server`.
 
 ## Purpose
 
-A personal ebook library server. It solves one problem: see what books I
-have, and send one to a Kindle by email. Everything else is secondary.
-
-One user, plus a family member as an occasional send recipient. That
-second person is a saved address, never a second account. The server runs
-on an internal network with a sole maintainer, so every decision favours
-simplicity over generality: no multi-tenancy, no permissions, no
-configuration surface beyond environment variables.
+- **One user. A family member is a saved recipient address, never a second account.**
+- **Simplicity beats generality: no multi-tenancy, no permissions, no configuration beyond environment variables.** A sole maintainer on an internal network needs none of them.
 
 ## Constraints
 
-- Written in Go.
-- Ships as a single container with no external process dependencies: no
-  database server, no sidecar, no message broker. A NAS box should run it
-  as one image and nothing else.
-- Embedded, file-backed storage, so backup is copying a directory.
-- No JavaScript build step and no `node_modules`. Templates, CSS and the
-  vendored htmx are embedded in the binary.
-- `CGO_ENABLED=0`, so the binary is static and cross-compiles trivially.
-  The image base is `distroless/static-debian12:nonroot` rather than
-  `scratch` because the app needs four things scratch lacks: CA
-  certificates for the outbound HTTPS calls, tzdata so local time is not
-  always UTC, a writable `/tmp`, and a non-root uid. It still ships no
-  shell and no package manager, so the static-binary property survives.
+- **Written in Go.**
+- **One container, no external processes: no database server, sidecar or broker.** A NAS box runs one image and nothing else.
+- **Embedded, file-backed storage.** Backup is copying a directory.
+- **No JavaScript build step and no `node_modules`. Templates, CSS and the vendored htmx are embedded in the binary.**
+- **`CGO_ENABLED=0`.** A static binary cross-compiles trivially.
+- **The image base is `distroless/static` (`nonroot`), not `scratch`.** Scratch lacks the CA certificates, tzdata, writable `/tmp` and non-root uid the app needs; distroless still has no shell or package manager.
 
 ## Library directory
 
-One library directory, and the originals in it are never modified. The
-rule the code enforces is that writes only ever create new paths. Any
-derived file the app might produce lands beside the originals as a new
-path and is registered in the index in the same transaction that created
-it, so the next sweep sees a known content hash rather than a mystery
-arrival.
+- **Originals are never modified. Writes only ever create new paths.**
+- **A derived file lands beside the originals as a new path, registered in the index in the transaction that created it.** The next sweep then sees a known content hash.
+- **The one path written today is an imported book in the library root, named from the offered file: `<name>.part`, then `os.Link` onto the first free name, then `IndexFile` in the confirming request.** No sweep indexes `.part`, and a link fails where `os.Rename` silently replaces. See `docs/notes/import.md`.
+- **A read-only library is a legitimate deployment.** The scanner only reads it, so importing is probed at startup and offered or explained, never assumed.
+- **"Importing is offered" means `probeWritable` on `LIBRARY_DIR` succeeded and the staging directory under `os.TempDir()` could be created; `newStager` builds an `importer.Stager` only then.** Either failing is a Warn, never a startup failure: a library that can be read is still worth serving.
+- **A flat pile: no folder conventions, no directory-as-metadata heuristics.** A folder name is a guess about the file; the file's metadata is not.
+- **Covers live in a separate directory keyed by content hash, only the path in the database, and the directory is disposable.** An extracted cover is rebuilt by the next sweep; a provider's is fetched again from the book's page.
 
-The app writes exactly one kind of path into the library today: a book
-imported through the web UI, which lands in the root under a name derived
-from the file that was offered. It is written as `<name>.part`, which no
-sweep indexes because the suffix matches no format, and published by
-`os.Link` onto the first free name — a link fails rather than replacing,
-where `os.Rename` would silently destroy whatever is at the name. It is then
-indexed in the confirming request through the scanner's own per-file path. A library
-directory that cannot be written is a legitimate deployment — the scanner
-only ever reads it — so importing is probed for at startup and offered or
-explained rather than assumed. See `docs/notes/import.md`.
+## Startup and shutdown
 
-The library is a flat, unorganised pile of files. There are no folder
-conventions and no directory-as-metadata heuristics, because a folder name
-is a guess about the file inside it and the file's own metadata is not.
-
-Covers live in a separate derived directory keyed by content hash, with
-only the path stored in the database. The directory is disposable: a
-cover extracted from a book is rebuilt by the next sweep, and one a
-provider supplied is forgotten and can be fetched again from the book's
-page.
+- **`LIBRARY_DIR` goes through `requireExistingDir` (stat, then `EvalSymlinks`) and is never created. `COVERS_DIR` and `DB_PATH`'s directory go through `resolveDir` (create, then `EvalSymlinks`).** Creating the library is the one call that fails a read-only mount, and an absent library is a misconfiguration to name rather than an empty grid to serve.
+- **A dangling symlink in any component fails startup naming link and target. A refused `MkdirAll` names both uids.** `MkdirAll` on a dangling link names the link and not the missing target, which is the whole question when a volume did not mount.
+- **The server serves immediately. The scan loop, sender worker, enrichment worker and import janitor run on one cancellable `scanCtx`; the janitor exists only when the importer does.** A first sweep is minutes of hashing; a readiness probe would otherwise restart the container.
+- **Shutdown order: HTTP server, then `waitForBackground` over each goroutine with a 10s deadline, then the database.** A goroutine past its deadline would otherwise write onto a closed connection.
+- **`MAX_IMPORT_SIZE` is parsed through `parseByteSize`.**
+- **Logging is `log/slog` on stderr through the package-level functions, levelled once in `cmd/server` from `LOG_LEVEL`.**
 
 ## Storage engine
 
-SQLite through `modernc.org/sqlite`, a pure-Go port, rather than a
-key-value store: FTS5 gives full-text search out of the box, which is most
-of what a library server needs, where a KV store means hand-rolling every
-index. The pure-Go driver is slower than the C one under heavy
-concurrent writes, which does not matter here: writes arrive in scan
-bursts and reads dominate, and it is what keeps `CGO_ENABLED=0` true.
+- **SQLite through `modernc.org/sqlite`, a pure-Go port, not a key-value store, and its slower concurrent writes are accepted.** FTS5 gives full-text search out of the box; writes arrive in scan bursts and reads dominate; the pure-Go driver is what keeps `CGO_ENABLED=0` true.
 
 ## Conversion model
 
-Format conversion is not built, but the schema accommodates it so that
-adding it is not a migration of every book. A converted file would be a
-separate book entity with `books.derived_from` pointing at its source. It
-would skip enrichment and copy its metadata from the parent, and the UI
-would show both rows with a format label.
-
-Two entities linked by a foreign key rather than one entity with two files
-avoids the failure where both get independently enriched into disagreeing
-metadata, or fixing an author on one leaves the other wrong. If the rows
-should ever collapse into one, the link is already there. Today the column
-exists and nothing writes it.
+- **Conversion is not built. `books.derived_from` exists and nothing writes it.** Adding conversion is then not a migration of every book.
+- **A converted file is a separate book row pointing at its source through `derived_from`, never a second file on one book. It skips enrichment, copies the parent's metadata, and the UI shows both rows with a format label.** One shared row is what lets independent enrichment write disagreeing metadata, or an author fix on one leave the other wrong.
 
 ## Authentication
 
-None. The server is bound to an internal network and trusts it. There is
-no rate limiting and no request logging, and both are acceptable only
-under that assumption. If the server is ever exposed beyond a trusted
-network, this is the first decision that has to change, and several others
-follow from it.
-
-The one qualification is that "trust the network" describes who can reach
-the server, and a browser breaks it: any page a user visits can POST to a
-LAN or localhost address its author cannot reach. So every state-changing
-route rejects a request the browser reports as cross-site, and the service
-must sit behind an HTTPS front for that report to exist at all. The
-mechanism and the deployment requirement are in `docs/notes/web.md`. This
-is not authentication and does not weaken the case for having none; it
-closes the one hole "internal network only" leaves open.
+- **None. The server trusts its network. No rate limiting, no request logging.** All three hold only under that assumption; exposure beyond a trusted network makes this the first decision to change.
+- **Every state-changing route rejects a request the browser reports as cross-site, and the server must sit behind HTTPS for that report to exist.** Any page a person visits can POST to a LAN address its author cannot reach. This is not authentication. Mechanism in `docs/notes/web.md`.
 
 ## Deferred by decision
 
-These are out of scope by decision. None of them is backlog, and none is
-started.
+None of these is backlog and none is started.
 
-- **Series.** A real relation rather than a flag, so the one that hurts
-  most to retrofit. Acceptable given a mostly standalone library.
+- **Series.** A real relation rather than a flag, so the one that hurts most to retrofit; acceptable for a mostly standalone library.
 - **Tags.**
-- **Format conversion.** Amazon accepts EPUB directly, so the primary flow
-  does not need it. See the conversion model above for the shape it takes
-  if it arrives.
-- **Near-duplicate detection.** Byte-identical duplicates are merged by
-  content hash. Matching different compressions or editions needs
-  normalised title, author and ISBN comparison and should surface as a
-  suggestion, since false positives (omnibus editions, translations) are
-  annoying to undo.
-- **Programmatic API.** Expected later, not OPDS. The service layer
-  beneath the HTTP handlers exists so it can be a second thin transport.
-  It is not free: every state-changing route is refused unless it carries
-  `Sec-Fetch-Site`, which a non-browser client never sends. So an
-  API needs a credential of its own — a bearer token from an `API_TOKEN`
-  variable — and its routes must bypass `sameSiteOnly` on the strength of
-  it. The service surface itself is ready: import, for instance, takes a
-  reader and returns a stage, or takes an id and returns a book, so a
-  one-shot API import is `StageImport` then `ConfirmImport` in one handler.
+- **Format conversion.** Amazon accepts EPUB directly. The conversion model above is its shape if it arrives.
+- **Near-duplicate detection.** Byte-identical duplicates merge by content hash. Other editions need normalised title, author and ISBN comparison, surfaced as a suggestion, since a false positive such as an omnibus is annoying to undo.
+- **Programmatic API.** Expected later, not OPDS. The service layer is its second thin transport; `StageImport` then `ConfirmImport` is already a one-shot import. It needs a bearer-token credential of its own and routes that bypass `sameSiteOnly`, since a non-browser client never sends `Sec-Fetch-Site`.
 - **Authentication and user management.** See above.
-
-Three things are ruled out within enrichment on the same footing:
-
-- **Automatic enrichment on scan or on a schedule.** The first thing a
-  person should see is enrichment they asked for, on a book they chose. It
-  is a small change to make automatic and a hard one to take back. If it
-  ever arrives, a ceiling on how many times one book is asked about must
-  arrive with it; the failed-job record that such a ceiling would count is
-  already in place, and the ceiling itself is tracked in
-  `docs/backlog/2026090402-enrichment-has-no-attempt-ceiling.md`.
-- **A library-wide enrich.** The queue supports it. What is missing is an
-  honest progress display for work that takes hours behind a rate limiter,
-  which is its own piece of work.
-- **An enrichment history page.** Send history exists because a send is an
-  irreversible outbound act one may need to prove happened. Enrichment is
-  repeatable and its result is visible in the fields themselves.
+- **Automatic enrichment on scan or on a schedule.** The first enrichment a person sees is one they asked for; automatic is a small change and a hard one to take back. If it arrives, a per-book attempt ceiling arrives with it: `docs/backlog/2026090402-enrichment-has-no-attempt-ceiling.md`.
+- **A library-wide enrich.** The queue supports it; what is missing is an honest progress display for hours of work behind a rate limiter.
+- **An enrichment history page.** A send is an irreversible outbound act one may need to prove; enrichment is repeatable and visible in the fields themselves.
