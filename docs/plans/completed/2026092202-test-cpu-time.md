@@ -57,6 +57,18 @@ Add a package `internal/storage/storagetest` with
   WAL into the main file, so a template read before its checkpoint would
   lack tables, and this test is what catches that.
 
+  **Correction found while implementing this, recorded here because the
+  instruction above does not work as written.** A test that compares a
+  *template copy* with a fresh `storage.Open` catches nothing: an empty
+  template opens into a database `storage.Open` then migrates from
+  scratch, so the two agree on `schema_migrations` and `sqlite_master`
+  either way. Written that way first, then checked by deleting the
+  `Close` — the test still passed. What the checkpoint costs is the whole
+  saving, and only a reader that runs no migrations can see it, so the
+  test opens the template bytes with a bare `sql.Open("sqlite", path)`
+  and compares *that* with a database migrated the long way. Deleting the
+  `Close` then fails it with "no such table: schema_migrations".
+
 Replace `storage.Open(filepath.Join(t.TempDir(), "library.db"))`, and the
 cleanup registered after it, with `storagetest.Open(t)`:
 
@@ -132,6 +144,22 @@ Measure each conversion. Where one does not at least halve its test,
 leave that test as it is. These are only the four seeders above one
 second, not a rule for every seeding loop.
 
+**Measured while implementing, against the rule above (`-race`, three runs
+each):**
+
+| Seeder | Before | After | Kept |
+|---|---|---|---|
+| `TestSendHistoryReportsTruncatedOnlyWhenCapBites` | 3.89 s | 0.64 s | yes |
+| `TestHistoryScopeLineNamesTheCapOnlyWhenTruncated` | 1.85 s | 0.37 s | yes |
+| `TestPruneMissingFilesHandlesMoreIDsThanOneSQLChunk` | 7.14 s | 3.81 s | yes |
+| `seedSearchableBooks` | 2.18 s | 1.95 s | **no** |
+
+`seedSearchableBooks` is reverted: 200 books is not where that test spends
+its time, and the rule above is what says so. The prune conversion is
+0.53x rather than the 0.5x the rule asks for, and is kept anyway — it is
+the largest single saving of the four, and what remains is
+`PruneMissingFiles` itself, which is the thing under test.
+
 ## Documentation
 
 - `docs/notes/testing.md` gains a short section:
@@ -158,5 +186,31 @@ second, not a rule for every seeding loop.
    summed per package, on the same machine with the same build cache.
    Expected: roughly 145 s down to about 75 s of CPU. That is about 55 s
    from the template, 9.6 s from the FB2 node, and about 8 s from seeding.
+
+   **Measured, on an M-series laptop rather than the machine the estimates
+   above came from, which is why the baseline is 177 s and not 145 s:**
+
+   | Package | Before | After |
+   |---|---|---|
+   | `web` | 32.77 s | 10.32 s |
+   | `fb2` | 33.26 s | 22.03 s |
+   | `scanner` | 19.99 s | 8.50 s |
+   | `service` | 14.32 s | 3.55 s |
+   | `storage` | 34.71 s | 27.91 s |
+   | `importer` | 7.81 s | 4.36 s |
+   | `enrich` | 6.46 s | 3.73 s |
+   | `sender` | 5.77 s | 2.84 s |
+   | `storagetest` | — | 1.88 s |
+   | everything else | 22.90 s | 22.30 s |
+   | **total** | **176.99 s** | **107.42 s** |
+
+   A 39% cut against the 48% the estimate expected. The FB2 node and the
+   seeders landed where they were predicted; the template saved less per
+   test than 127 ms − 6.7 ms suggests, because a test that opens a
+   database also does work the template cannot remove.
+
 6. Compare CI's Test step against `2026092201`'s cold-cache 2m13s, still on
    a cold cache. Record both figures when this plan moves to `completed/`.
+
+   Not done here: the Test step is only measurable once this branch has
+   run in CI, which is after the merge this plan moves with.
