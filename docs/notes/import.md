@@ -23,6 +23,7 @@ Rules for `internal/importer`, `scanner.IndexFile`, the import surface of `inter
 - **Staging is bounded in total bytes, `stagingBudgetFactor` times the import cap, never in stages; past it an upload is refused with `ErrStagingFull`.** `os.TempDir()` is tmpfs in a container, so what is held is RAM.
 - **The reservation is taken at the cap before the copy and corrected afterwards to what the stage retains.** A check made after the copy admits everything and reports later.
 - **The charge is the file, the cover kept for the preview and the metadata, never the file alone.** A small archive can hold a `cover.MaxCoverBytes` cover.
+- **`Stage` cuts the offered name to `maxOfferedNameBytes` on a rune boundary before anything else.** The name is charged only after the reservation, and a `Content-Disposition` may run to the transport's 10 MiB header limit, which would overshoot the budget and lock imports out until the stage expired.
 - **The reservation is released by every path that drops a staged file: discard, expiry, confirm, and the duplicate verdict.** The duplicate releases the file's share and keeps charging the cover its page still renders.
 
 ## Format by content
@@ -118,12 +119,12 @@ Rules for `internal/importer`, `scanner.IndexFile`, the import surface of `inter
 
 - **A paste whose target is an input, textarea or contenteditable element is left alone.** The search box pastes normally.
 - **A pasted file goes to the drop's own `submitFiles`, exposed on `window.importDrop`, with no dialog.** Both gestures keep one set of refusals and sentences, and the preview is the confirmation.
-- **A pasted file is handed on only when its name or type says EPUB or FB2, or it has no type; otherwise the paste is read as text.** A copied image rides on the clipboard as a file, and a stray paste must not navigate to a refusal.
+- **A pasted file is handed on unless its type is `image/*`; an image paste is read as text.** A copied image rides on the clipboard as a file and must not navigate to a refusal, while `detectSuffix` already decides what any other file is, an FB2 archive named `.zip` included.
 - **Pasted text opens the `paste-link` dialog only when, trimmed, it is one token `new URL()` parses as `http:` or `https:`; anything else is ignored silently.** A stray paste on the page must not become a question.
 - **The dialog holds a real form posted natively to `/import/url`, never a fetch or htmx.** The redirect and the 422 page are the link form's own.
 - **The Paste button reads text only, through `navigator.clipboard.readText()`; denied access or no link opens the dialog empty. It renders `hidden` and the script reveals it.** The clipboard API never reads a file, and with JavaScript off the Import page's link form is the way in.
-- **While a link hands off, `paste-link.js` holds the drop's `uploading` flag, so drops and pastes are refused; a bfcache `pageshow`, Escape and the dialog's Cancel release it.** Two submits race to navigate the tab.
-- **Cancel during a download calls `window.stop()` before it closes the dialog.** `close()` fires no `cancel` event, so the navigation would otherwise land on the preview behind a dialog that looked cancelled.
+- **While a link hands off, `paste-link.js` holds the drop's `uploading` flag, so drops and pastes are refused; a bfcache `pageshow`, the dialog's `cancel` event and its Cancel button release it.** Two submits race to navigate the tab.
+- **The Cancel button and the dialog's `cancel` event share one abort that calls `window.stop()` while the dialog shows a download, tested by its own downloading line rather than `drop.busy()`.** Dismissing the dialog must not leave a navigation that lands on the preview, and drop.js lets go of its hold on the Escape keydown before `cancel` fires.
 - **The button shows busy for a link handoff only.** A file, pasted or dropped, is the drop's upload, and its overlay says so.
 - **`paste-link` is included only from `library.html` beside `import-drop`; `paste-link.js` loads from `site-scripts` after `drop.js` and returns at once without the dialog or `window.importDrop`.** It hands files to the drop's script and has nothing to hand them to elsewhere.
 

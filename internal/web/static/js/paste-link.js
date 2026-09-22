@@ -29,13 +29,10 @@
 
   // A copied image rides on the clipboard as a file too, and handing it to
   // the drop would navigate to a refusal for a paste nobody meant as an
-  // import. A file with no type goes through, since the server decides by
-  // content anyway
+  // import. Anything else goes through: the server decides by content, and
+  // an FB2 archive can arrive as a plain .zip
   function mayBeABook(file) {
-    if (/\.(epub|fb2|fb2\.zip)$/i.test(file.name)) return true;
-    var type = file.type;
-    if (!type) return true;
-    return type === "application/epub+zip" || /fictionbook|fb2/i.test(type);
+    return !/^image\//i.test(file.type);
   }
 
   // The host line is the one part of the question worth reading, so it
@@ -88,15 +85,21 @@
 
   input.addEventListener("input", showHost);
 
-  // close() fires no cancel event, so a download under way is stopped here
-  // rather than left to land on the preview behind a dialog that looked
-  // cancelled
-  dialog.querySelector("[data-paste-cancel]").addEventListener("click", function () {
-    if (drop.busy()) {
+  // A download under way is stopped rather than left to land on the preview
+  // behind a dialog that looked cancelled. The dialog's own downloading line
+  // is the test, not drop.busy(): drop.js lets go of its hold on the Escape
+  // keydown, which fires before the dialog's cancel event
+  function abort() {
+    if (!downloading.hidden) {
       window.stop();
       drop.release();
-      reset();
     }
+    reset();
+  }
+
+  // close() fires no cancel event, so the button aborts for itself
+  dialog.querySelector("[data-paste-cancel]").addEventListener("click", function () {
+    abort();
     dialog.close();
   });
 
@@ -112,9 +115,9 @@
     form.submit();
   });
 
-  // Escape aborts the navigation without unloading the page, so no pageshow
-  // follows it
-  dialog.addEventListener("cancel", reset);
+  // Escape and a platform close gesture both arrive here, and neither
+  // unloads the page, so no pageshow follows to clean up after them
+  dialog.addEventListener("cancel", abort);
 
   window.addEventListener("pageshow", function (event) {
     if (!event.persisted) return;

@@ -55,6 +55,13 @@ const stagingBudgetFactor = 4
 // is still inside this budget imports the book and loses the answer.
 const IndexTimeout = 2 * time.Minute
 
+// maxOfferedNameBytes bounds the name a stage keeps. The name is charged to
+// the staging budget only after the reservation, so an unbounded one — a
+// Content-Disposition may run to the transport's 10 MiB header limit —
+// would hold more than the budget admits until the stage expires. It seeds
+// nothing longer than a title, so the title's limit loses nothing
+const maxOfferedNameBytes = storage.MaxTitleBytes
+
 // janitorInterval is how often expired stages are swept. Expiry is also
 // rechecked on confirm, so this only bounds how long a dead file sits on
 // disk, never whether a stale click is caught.
@@ -240,6 +247,10 @@ func (s *Stager) MaxSize() int64 { return s.maxSize }
 // nor the stored extension, both of which come out of the content
 // (detectSuffix); it only seeds what the library file is called.
 func (s *Stager) Stage(ctx context.Context, name string, r io.Reader) (Staged, error) {
+	if len(name) > maxOfferedNameBytes {
+		name = strings.ToValidUTF8(name[:maxOfferedNameBytes], "")
+	}
+
 	// Reserved at the cap rather than at the body's own size, which is not
 	// known until it has been written: a reservation made after the copy
 	// would be a budget that admits everything and reports afterwards.
