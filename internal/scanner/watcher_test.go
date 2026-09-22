@@ -3,14 +3,21 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // testSettle is short enough to keep the suite quick and long enough that
@@ -83,106 +90,204 @@ func expectNoPoke(t *testing.T, trigger chan struct{}, quiet time.Duration, why 
 	}
 }
 
-// A copy produces CREATE then one or more WRITEs, and a burst produces one
-// pair per file. The whole point of the debounce is that the scan loop is
-// woken once for the lot, not once per event.
-//
-// Counting requires draining continuously rather than reading the trigger
-// once: the channel holds a single poke and drops the rest, so an
-// undebounced watcher looks identical to a debounced one from the outside
-// unless something is emptying it. Draining also makes the count
-// independent of how fast the writes land — twenty pokes are twenty pokes
-// whether the burst takes a millisecond or a second — which matters
-// because CI runs this under -race on four shared cores.
-func TestWatcherPokesOnceForABurst(t *testing.T) {
-	// Comfortably longer than twenty small writes need even under
-	// contention, so a straggling burst can't debounce twice for a
-	// legitimate reason and fail a test that isn't about that.
-	const burstSettle = 500 * time.Millisecond
+// fakeWatchSet stands in for fsnotify's handle, so a watcher can be driven
+// by events a test sends on synctest's clock rather than by the kernel's.
+// Tests about what the kernel does with a directory use NewWatcher
+type fakeWatchSet struct {
+	mu    sync.Mutex
+	paths map[string]bool
+}
 
-	dir := t.TempDir()
-	trigger := startWatcher(t, dir, burstSettle)
+func (s *fakeWatchSet) Add(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paths[path] = true
+	return nil
+}
 
-	var pokes atomic.Int64
-	stop, drained := make(chan struct{}), make(chan struct{})
+func (s *fakeWatchSet) Remove(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.paths, path)
+	return nil
+}
+
+func (s *fakeWatchSet) WatchList() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Collect(maps.Keys(s.paths))
+}
+
+func (s *fakeWatchSet) Close() error { return nil }
+
+// fakeWatcher is a Watcher over a real directory and a fakeWatchSet. Build it
+// inside synctest.Test: its channels and Run's goroutine belong to the
+// bubble
+type fakeWatcher struct {
+	*Watcher
+	dir     string
+	events  chan fsnotify.Event
+	trigger chan struct{}
+}
+
+func newFakeWatcher(t *testing.T, dir string, settle time.Duration) *fakeWatcher {
+	t.Helper()
+	events := make(chan fsnotify.Event)
+	trigger := make(chan struct{}, 1)
+	w, err := newWatcher(&fakeWatchSet{paths: make(map[string]bool)}, events, make(chan error), dir, settle, trigger)
+	if err != nil {
+		t.Fatalf("newWatcher: %v", err)
+	}
+	return &fakeWatcher{Watcher: w, dir: dir, events: events, trigger: trigger}
+}
+
+// run starts Run and stops it before the bubble ends, which synctest.Test
+// requires of every goroutine it started
+func (f *fakeWatcher) run(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
-		defer close(drained)
-		for {
-			select {
-			case <-trigger:
-				pokes.Add(1)
-			case <-stop:
-				return
-			}
-		}
+		defer close(done)
+		f.Run(ctx)
 	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
 
-	for i := range 20 {
-		path := filepath.Join(dir, fmt.Sprintf("book-%02d.epub", i))
-		if err := os.WriteFile(path, []byte(strings.Repeat("x", 4096)), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
+// completeProbe answers the delivery probe with the event its own file
+// produces, as a mount that delivers events would
+func (f *fakeWatcher) completeProbe(t *testing.T) {
+	t.Helper()
+	synctest.Wait()
+	f.send(fsnotify.Create, f.probePath(t))
+}
+
+// probePath finds the file the delivery probe created. Call it once Run is
+// parked in the probe, which synctest.Wait arranges
+func (f *fakeWatcher) probePath(t *testing.T) string {
+	t.Helper()
+	entries, err := os.ReadDir(f.dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var found []string
+	for _, e := range entries {
+		// A symlink at a probe-shaped name is a test's decoy, not the probe
+		if strings.HasPrefix(e.Name(), ".watch-probe-") && e.Type().IsRegular() {
+			found = append(found, filepath.Join(f.dir, e.Name()))
 		}
 	}
+	if len(found) != 1 {
+		t.Fatalf("found probe files %v, want exactly one", found)
+	}
+	return found[0]
+}
 
-	time.Sleep(burstSettle * 3)
-	close(stop)
-	<-drained
+func (f *fakeWatcher) send(op fsnotify.Op, path string) {
+	f.events <- fsnotify.Event{Name: path, Op: op}
+}
 
-	if got := pokes.Load(); got != 1 {
-		t.Errorf("a burst of twenty books triggered %d sweeps, want exactly 1", got)
+// poked reports whether a poke is pending, and takes it
+func (f *fakeWatcher) poked() bool {
+	select {
+	case <-f.trigger:
+		return true
+	default:
+		return false
 	}
 }
 
+// A copy produces CREATE then one or more WRITEs, and a burst produces one
+// pair per file. The whole point of the debounce is that the scan loop is
+// woken once for the lot, not once per event, and not before the lot has
+// stopped arriving: each event restarts the settle window, so a burst
+// longer than the window still sweeps only once it goes quiet
+func TestWatcherPokesOnceForABurst(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newFakeWatcher(t, t.TempDir(), testSettle)
+		f.run(t)
+		f.completeProbe(t)
+
+		// Twenty books a tenth of the settle window apart: the burst outlasts
+		// the window twice over, which a timer armed once would not survive
+		for i := range 20 {
+			path := filepath.Join(f.dir, fmt.Sprintf("book-%02d.epub", i))
+			f.send(fsnotify.Create, path)
+			f.send(fsnotify.Write, path)
+			synctest.Sleep(testSettle / 10)
+		}
+		if f.poked() {
+			t.Fatal("a sweep was triggered while the burst was still arriving")
+		}
+
+		synctest.Sleep(testSettle - testSettle/10 - time.Nanosecond)
+		if f.poked() {
+			t.Fatal("a sweep was triggered before the burst had been quiet for the settle window")
+		}
+		synctest.Sleep(time.Nanosecond)
+		if !f.poked() {
+			t.Fatal("no sweep was triggered once the burst went quiet")
+		}
+		synctest.Sleep(3 * testSettle)
+		if f.poked() {
+			t.Error("a burst of twenty books triggered a second sweep")
+		}
+	})
+}
+
 // A stream of events that never pauses would hold a naive debounce open
-// forever. The cap pokes anyway.
+// forever. The cap pokes anyway, on the first event past it
 func TestWatcherPokesWhileEventsKeepArriving(t *testing.T) {
-	dir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		f := newFakeWatcher(t, t.TempDir(), time.Hour) // a settle window that will never elapse
+		f.maxDelay = 200 * time.Millisecond
+		f.run(t)
+		f.completeProbe(t)
 
-	trigger := make(chan struct{}, 1)
-	w, err := NewWatcher(dir, time.Hour, trigger) // a settle window that will never elapse
-	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
-	}
-	w.maxDelay = 200 * time.Millisecond
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
-	waitForPokeToSettle(t, trigger)
-
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
+		start := time.Now()
 		for i := 0; ; i++ {
-			select {
-			case <-stop:
+			f.send(fsnotify.Create, filepath.Join(f.dir, fmt.Sprintf("bulk-%03d.epub", i)))
+			synctest.Wait()
+			if f.poked() {
+				if elapsed := time.Since(start); elapsed != f.maxDelay {
+					t.Errorf("poked %v into the stream, want at the maximum delay, %v", elapsed, f.maxDelay)
+				}
 				return
-			default:
 			}
-			os.WriteFile(filepath.Join(dir, fmt.Sprintf("bulk-%03d.epub", i)), []byte("x"), 0o644)
+			if elapsed := time.Since(start); elapsed > f.maxDelay {
+				t.Fatalf("events kept arriving %v past the first without a sweep; the maximum delay is %v", elapsed, f.maxDelay)
+			}
 			time.Sleep(10 * time.Millisecond)
 		}
-	}()
-
-	awaitPoke(t, trigger, "events kept arriving past the maximum delay")
+	})
 }
 
 // A download in progress is not a book. It becomes one when it is renamed
 // into place, and that is the event worth a sweep.
 func TestWatcherIgnoresPartialDownloadsUntilRenamed(t *testing.T) {
-	dir := t.TempDir()
-	trigger := startWatcher(t, dir, testSettle)
+	synctest.Test(t, func(t *testing.T) {
+		f := newFakeWatcher(t, t.TempDir(), testSettle)
+		f.run(t)
+		f.completeProbe(t)
 
-	partial := filepath.Join(dir, "book.epub.part")
-	if err := os.WriteFile(partial, []byte("not finished"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	expectNoPoke(t, trigger, testSettle*4, "a .part file is not a book yet")
+		partial := filepath.Join(f.dir, "book.epub.part")
+		f.send(fsnotify.Create, partial)
+		f.send(fsnotify.Write, partial)
+		synctest.Sleep(4 * testSettle)
+		if f.poked() {
+			t.Fatal("a sweep was triggered for a .part file, which is not a book yet")
+		}
 
-	if err := os.Rename(partial, filepath.Join(dir, "book.epub")); err != nil {
-		t.Fatalf("Rename: %v", err)
-	}
-	awaitPoke(t, trigger, "the download was renamed into place")
+		// A rename arrives as the old name leaving and the new one appearing
+		f.send(fsnotify.Rename, partial)
+		f.send(fsnotify.Create, filepath.Join(f.dir, "book.epub"))
+		synctest.Sleep(testSettle)
+		if !f.poked() {
+			t.Fatal("no sweep was triggered: the download was renamed into place")
+		}
+	})
 }
 
 // A book leaving is what missing-file reconciliation reacts to, so it is
@@ -202,31 +307,28 @@ func TestWatcherPokesOnRemoval(t *testing.T) {
 }
 
 // The probe writes into the library to prove events arrive. It must not be
-// able to trigger the very work it is testing.
+// able to trigger the very work it is testing — including through the
+// removal of its own file, which arrives after the probe has handed over to
+// the debounce and qualifies as a removal would
 func TestWatcherProbeDoesNotPoke(t *testing.T) {
-	dir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		f := newFakeWatcher(t, t.TempDir(), testSettle)
+		f.run(t)
+		synctest.Wait()
 
-	trigger := make(chan struct{}, 1)
-	w, err := NewWatcher(dir, testSettle, trigger)
-	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
-
-	expectNoPoke(t, trigger, testSettle*4, "the delivery probe's own file must be inert")
-
-	// And it cleans up after itself, so a restart loop can't litter.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".watch-probe-") {
-			t.Errorf("probe file %q was left behind", e.Name())
+		probe := f.probePath(t)
+		f.send(fsnotify.Create, probe)
+		f.send(fsnotify.Remove, probe)
+		synctest.Sleep(4 * testSettle)
+		if f.poked() {
+			t.Fatal("a sweep was triggered by the delivery probe's own file")
 		}
-	}
+
+		// And it cleans up after itself, so a restart loop can't litter.
+		if _, err := os.Lstat(probe); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("probe file %q was left behind: %v", probe, err)
+		}
+	})
 }
 
 // inotify is not recursive: a watch on the parent says nothing about files
@@ -344,26 +446,19 @@ func TestWatcherRecoversAfterTheLibraryDirectoryIsReplaced(t *testing.T) {
 
 // The scan loop's trigger has capacity 1 and the watcher never blocks on
 // it: a poke arriving while one is already pending is dropped, because the
-// sweep it would have asked for is the sweep already about to run.
+// sweep it would have asked for is the sweep already about to run. A poke
+// that blocked here would deadlock the bubble, which fails the test
 func TestWatcherPokeNeverBlocks(t *testing.T) {
-	trigger := make(chan struct{}, 1)
-	w := &Watcher{trigger: trigger}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	synctest.Test(t, func(t *testing.T) {
+		trigger := make(chan struct{}, 1)
+		w := &Watcher{trigger: trigger}
 		for range 10 {
 			w.poke()
 		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("poke blocked when the trigger was already full")
-	}
-	if len(trigger) != 1 {
-		t.Errorf("trigger holds %d pokes, want exactly 1", len(trigger))
-	}
+		if len(trigger) != 1 {
+			t.Errorf("trigger holds %d pokes, want exactly 1", len(trigger))
+		}
+	})
 }
 
 func TestNewWatcherRejectsAMissingDirectory(t *testing.T) {
@@ -418,37 +513,79 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 // fixed name is guessable: a symlink at that name pointing at a book would
 // leave the book empty.
 func TestWatcherProbeDoesNotDisturbAnExistingPath(t *testing.T) {
-	dir := t.TempDir()
-	book := filepath.Join(dir, "book.epub")
-	const content = "the whole book"
-	if err := os.WriteFile(book, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	decoy := filepath.Join(dir, fmt.Sprintf(".watch-probe-%d", os.Getpid()))
-	if err := os.Symlink(book, decoy); err != nil {
-		t.Fatalf("Symlink: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		book := filepath.Join(dir, "book.epub")
+		const content = "the whole book"
+		if err := os.WriteFile(book, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		decoy := filepath.Join(dir, fmt.Sprintf(".watch-probe-%d", os.Getpid()))
+		if err := os.Symlink(book, decoy); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
 
-	trigger := make(chan struct{}, 1)
-	w, err := NewWatcher(dir, testSettle, trigger)
-	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
-	waitForPokeToSettle(t, trigger)
+		f := newFakeWatcher(t, dir, testSettle)
+		f.run(t)
+		f.completeProbe(t)
+		synctest.Wait()
 
-	got, err := os.ReadFile(book)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if string(got) != content {
-		t.Errorf("the probe modified an existing book: content = %q, want %q", got, content)
-	}
-	if _, err := os.Lstat(decoy); err != nil {
-		t.Errorf("the probe removed a path it did not create: %v", err)
-	}
+		got, err := os.ReadFile(book)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		if string(got) != content {
+			t.Errorf("the probe modified an existing book: content = %q, want %q", got, content)
+		}
+		if _, err := os.Lstat(decoy); err != nil {
+			t.Errorf("the probe removed a path it did not create: %v", err)
+		}
+	})
+}
+
+// A book landing while the probe waits for its own event is consumed by the
+// probe, and must still reach the debounce rather than being lost to the
+// startup check
+func TestWatcherProbeHandsOnAnEventItConsumed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newFakeWatcher(t, t.TempDir(), testSettle)
+		f.run(t)
+		synctest.Wait()
+
+		probe := f.probePath(t)
+		f.send(fsnotify.Create, filepath.Join(f.dir, "early.epub"))
+		f.send(fsnotify.Create, probe)
+		synctest.Sleep(testSettle)
+		if !f.poked() {
+			t.Fatal("no sweep was triggered for a book that arrived during the delivery probe")
+		}
+	})
+}
+
+// A mount that delivers nothing is named at startup, and the watcher carries
+// on rather than giving up: the probe's verdict is a warning, not a switch
+func TestWatcherProbeTimesOutOnAMountThatDeliversNothing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := captureLogs(t)
+		f := newFakeWatcher(t, t.TempDir(), testSettle)
+		f.run(t)
+		synctest.Wait()
+		probe := f.probePath(t)
+
+		synctest.Sleep(watchProbeTimeout)
+		if !strings.Contains(logs.String(), "live updates are not arriving") {
+			t.Errorf("the probe timed out without saying so:\n%s", logs.String())
+		}
+		if _, err := os.Lstat(probe); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("probe file %q was left behind on the timeout path: %v", probe, err)
+		}
+
+		f.send(fsnotify.Create, filepath.Join(f.dir, "late.epub"))
+		synctest.Sleep(testSettle)
+		if !f.poked() {
+			t.Fatal("no sweep was triggered after the probe timed out")
+		}
+	})
 }
 
 // A watch is attached to an inode, but fsnotify files it under the pathname

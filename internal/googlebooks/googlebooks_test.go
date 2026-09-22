@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"library/internal/enrich"
@@ -44,9 +45,8 @@ import (
 //     error_429_per_minute.json — the three failures the live check
 //     actually provoked, which is what settled the retry classification
 //
-// A cover fetch still builds its response inline with imageLinks.thumbnail
-// pointing at a local httptest.Server: a fixture cannot bake in a server
-// address chosen at test run time.
+// A cover test still builds its response inline, since the thumbnail it
+// names is a test host rather than anything Google served
 
 // testClient serves handler at the list endpoint (/volumes) and 404s the
 // single-volume one (/volumes/{id}), so a test written about a search can
@@ -60,21 +60,15 @@ import (
 func testClient(t *testing.T, apiKey string, handler http.HandlerFunc) (*Client, *int) {
 	t.Helper()
 	hits := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := apiClient(t, apiKey, func(w http.ResponseWriter, r *http.Request) {
 		if isVolumeDetailPath(r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}
 		hits++
 		handler(w, r)
-	}))
-	t.Cleanup(server.Close)
-
-	return &Client{
-		baseURL:    server.URL,
-		apiKey:     apiKey,
-		httpClient: testHTTPClient(server),
-	}, &hits
+	})
+	return client, &hits
 }
 
 // detailClient serves list at /volumes and detail at /volumes/{id},
@@ -83,32 +77,49 @@ func testClient(t *testing.T, apiKey string, handler http.HandlerFunc) (*Client,
 func detailClient(t *testing.T, list, detail http.HandlerFunc) (*Client, *int) {
 	t.Helper()
 	detailHits := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := apiClient(t, "", func(w http.ResponseWriter, r *http.Request) {
 		if isVolumeDetailPath(r.URL.Path) {
 			detailHits++
 			detail(w, r)
 			return
 		}
 		list(w, r)
-	}))
-	t.Cleanup(server.Close)
-
-	return &Client{
-		baseURL:    server.URL,
-		apiKey:     "",
-		httpClient: testHTTPClient(server),
-	}, &detailHits
+	})
+	return client, &detailHits
 }
 
-// testHTTPClient is httptest's client with this package's redirect policy
-// on it. httptest.Server.Client() does not carry one, so a helper handing
-// back the bare client silently tests against net/http's default hop limit
-// and no scheme check at all — which is how a CheckRedirect regression goes
-// unnoticed even with a redirect test in the file.
-func testHTTPClient(server *httptest.Server) *http.Client {
-	c := server.Client()
-	c.CheckRedirect = enrich.CheckLookupRedirect
-	return c
+// testHost is the API host a test client talks to. It sits under .test,
+// which never resolves, so a client that somehow missed the in-memory
+// transport fails rather than reaching the real Google Books
+const testHost = "www.googleapis.test"
+
+// apiClient serves handler as the whole API host
+func apiClient(t *testing.T, apiKey string, handler http.HandlerFunc) *Client {
+	t.Helper()
+	return hostsClient(t, apiKey, map[string]http.HandlerFunc{testHost: handler})
+}
+
+// hostsClient is New's client over an in-memory server that answers each
+// host from its own handler and 404s any other. One server stands in for
+// every host because its transport sends every request to it whatever the
+// URL names, so a test about which host was asked dispatches on r.Host.
+// Building through New keeps the production Timeout and redirect policy
+// under test: a helper setting its own would pass a CheckRedirect
+// regression with a redirect test in the file
+func hostsClient(t *testing.T, apiKey string, hosts map[string]http.HandlerFunc) *Client {
+	t.Helper()
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handler, ok := hosts[r.Host]; ok {
+			handler(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+
+	client := New(apiKey)
+	client.httpClient.Transport = server.Client().Transport
+	client.baseURL = "https://" + testHost
+	return client
 }
 
 // isVolumeDetailPath reports whether p addresses one volume rather than the
@@ -354,17 +365,21 @@ func TestByISBN5xxIsAnError(t *testing.T) {
 }
 
 func TestByISBNTransportErrorIsAnError(t *testing.T) {
-	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(50 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		// The handler never answers, so only the caller's deadline ends the
+		// request
+		client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		defer cancel()
+
+		_, err := client.ByISBN(ctx, "9780262011532")
+		if err == nil {
+			t.Fatal("ByISBN: want error on a timed-out request, got nil")
+		}
 	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
-
-	_, err := client.ByISBN(ctx, "9780262011532")
-	if err == nil {
-		t.Fatal("ByISBN: want error on a timed-out request, got nil")
-	}
 }
 
 func TestByISBNMalformedBodyIsAnError(t *testing.T) {
@@ -492,20 +507,24 @@ func TestAPIKeyNeverAppearsInErrorText(t *testing.T) {
 }
 
 func TestAPIKeyNeverAppearsInTransportErrorText(t *testing.T) {
-	client, _ := testClient(t, "super-secret-key", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(50 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		// The handler never answers, so only the caller's deadline ends the
+		// request
+		client, _ := testClient(t, "super-secret-key", func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		defer cancel()
+
+		_, err := client.ByISBN(ctx, "9780262011532")
+		if err == nil {
+			t.Fatal("ByISBN: want error on a timed-out request, got nil")
+		}
+		if strings.Contains(err.Error(), "super-secret-key") {
+			t.Errorf("error text leaks the API key: %v", err)
+		}
 	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
-
-	_, err := client.ByISBN(ctx, "9780262011532")
-	if err == nil {
-		t.Fatal("ByISBN: want error on a timed-out request, got nil")
-	}
-	if strings.Contains(err.Error(), "super-secret-key") {
-		t.Errorf("error text leaks the API key: %v", err)
-	}
 }
 
 func TestBestISBNPrefersISBN13Type(t *testing.T) {
@@ -546,27 +565,27 @@ func isZeroMetadata(m enrich.Metadata) bool {
 // internal/enrich's Worker's, so it only happens for a book that actually
 // needs a cover.
 func TestByISBNNamesCoverURLWithoutFetchingIt(t *testing.T) {
+	const coverHost = "books.google.test"
 	coverHits := 0
-	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		coverHits++
-	}))
-	t.Cleanup(coverServer.Close)
-
-	client, _ := testClient(t, "", func(w http.ResponseWriter, r *http.Request) {
-		body := fmt.Sprintf(`{"totalItems":1,"items":[{"volumeInfo":{
-			"title":"Structure and Interpretation of Computer Programs",
-			"imageLinks":{"thumbnail":%q}
-		}}]}`, coverServer.URL+"/cover.jpg")
-		w.Write([]byte(body))
+	client := hostsClient(t, "", map[string]http.HandlerFunc{
+		testHost: func(w http.ResponseWriter, r *http.Request) {
+			body := fmt.Sprintf(`{"totalItems":1,"items":[{"volumeInfo":{
+				"title":"Structure and Interpretation of Computer Programs",
+				"imageLinks":{"thumbnail":%q}
+			}}]}`, "http://"+coverHost+"/cover.jpg")
+			w.Write([]byte(body))
+		},
+		coverHost: func(w http.ResponseWriter, r *http.Request) {
+			coverHits++
+		},
 	})
 
 	got, err := client.ByISBN(context.Background(), "9780262011532")
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	// best() upgrades http to https; the test server only speaks http, so
-	// the expectation is the upgraded form rather than the URL as served.
-	want := strings.Replace(coverServer.URL+"/cover.jpg", "http://", "https://", 1)
+	// best() upgrades http to https, as Google serves thumbnails over http
+	want := "https://" + coverHost + "/cover.jpg"
 	if got.CoverURL != want {
 		t.Errorf("CoverURL = %q, want %q", got.CoverURL, want)
 	}
@@ -1320,7 +1339,7 @@ func TestEmptyDetailDescriptionKeepsTheListOne(t *testing.T) {
 // same quota, and an unkeyed one would answer 429 for everyone.
 func TestDetailRequestCarriesTheKey(t *testing.T) {
 	detailHits := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := apiClient(t, "test-api-key", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("key"); got != "test-api-key" {
 			t.Errorf("%s: key = %q, want %q", r.URL.Path, got, "test-api-key")
 		}
@@ -1333,10 +1352,8 @@ func TestDetailRequestCarriesTheKey(t *testing.T) {
 			return
 		}
 		w.Write(readFixture(t, "volumes_pair_list.json"))
-	}))
-	t.Cleanup(server.Close)
+	})
 
-	client := &Client{baseURL: server.URL, apiKey: "test-api-key", httpClient: server.Client()}
 	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
@@ -1361,7 +1378,7 @@ func TestAPIKeyNeverAppearsInTheDetailPathsLogLine(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(restore) })
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := apiClient(t, key, func(w http.ResponseWriter, r *http.Request) {
 		if isVolumeDetailPath(r.URL.Path) {
 			w.WriteHeader(http.StatusInternalServerError)
 			// Google's own error bodies do not echo the key, but a
@@ -1371,10 +1388,8 @@ func TestAPIKeyNeverAppearsInTheDetailPathsLogLine(t *testing.T) {
 			return
 		}
 		w.Write(readFixture(t, "volumes_pair_list.json"))
-	}))
-	t.Cleanup(server.Close)
+	})
 
-	client := &Client{baseURL: server.URL, apiKey: key, httpClient: server.Client()}
 	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
@@ -1401,17 +1416,15 @@ func TestAPIKeyNeverAppearsInTheDetailPathsTransportErrorLog(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := apiClient(t, key, func(w http.ResponseWriter, r *http.Request) {
 		if isVolumeDetailPath(r.URL.Path) {
 			cancel()
 			<-r.Context().Done()
 			return
 		}
 		w.Write(readFixture(t, "volumes_pair_list.json"))
-	}))
-	t.Cleanup(server.Close)
+	})
 
-	client := &Client{baseURL: server.URL, apiKey: key, httpClient: server.Client()}
 	if _, err := client.ByISBN(ctx, "9780547928227"); err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
@@ -1488,7 +1501,7 @@ func TestDetailRequestEscapesTheVolumeID(t *testing.T) {
 
 	var gotEscapedPath, gotRawQuery string
 	reached := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := apiClient(t, "configured-key", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/volumes" && r.URL.Query().Get("q") != "" {
 			fmt.Fprintf(w, `{"totalItems":1,"items":[{"id":%q,"volumeInfo":{"title":"T"}}]}`, hostile)
 			return
@@ -1496,10 +1509,8 @@ func TestDetailRequestEscapesTheVolumeID(t *testing.T) {
 		reached = true
 		gotEscapedPath, gotRawQuery = r.URL.EscapedPath(), r.URL.RawQuery
 		w.Write([]byte(`{"volumeInfo":{}}`))
-	}))
-	t.Cleanup(server.Close)
+	})
 
-	client := &Client{baseURL: server.URL, apiKey: "configured-key", httpClient: testHTTPClient(server)}
 	if _, err := client.ByISBN(context.Background(), "9780547928227"); err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
@@ -1534,45 +1545,51 @@ func TestDetailRequestEscapesTheVolumeID(t *testing.T) {
 func TestARedirectOffTheAPIHostNeverCarriesTheKey(t *testing.T) {
 	const key = "SUPERSECRETKEY"
 
-	var mu sync.Mutex
-	var foreignSaw []string
-	foreign := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		foreignSaw = append(foreignSaw, r.Header.Get("Referer")+"|"+r.URL.RawQuery)
-		mu.Unlock()
-		w.Write([]byte(`{"totalItems":1,"items":[{"id":"x","volumeInfo":{"title":"Foreign","description":"A different book entirely."}}]}`))
-	}))
-	t.Cleanup(foreign.Close)
+	for _, tc := range []struct {
+		name, foreign string
+	}{
+		{"another host", "books.elsewhere.test"},
+		// SameHost compares the port too: the same name on another port can
+		// be another service entirely
+		{"the same name on another port", testHost + ":8443"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var foreignSaw []string
+			client := hostsClient(t, key, map[string]http.HandlerFunc{
+				testHost: func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, "https://"+tc.foreign+r.URL.Path, http.StatusFound)
+				},
+				tc.foreign: func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					foreignSaw = append(foreignSaw, r.Header.Get("Referer")+"|"+r.URL.RawQuery)
+					mu.Unlock()
+					w.Write([]byte(`{"totalItems":1,"items":[{"id":"x","volumeInfo":{"title":"Foreign","description":"A different book entirely."}}]}`))
+				},
+			})
 
-	home := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, foreign.URL+r.URL.Path, http.StatusFound)
-	}))
-	t.Cleanup(home.Close)
+			got, err := client.ByISBN(context.Background(), "9780547928227")
 
-	httpClient := foreign.Client()
-	httpClient.CheckRedirect = enrich.CheckLookupRedirect
-	client := &Client{baseURL: home.URL, apiKey: key, httpClient: httpClient}
-
-	got, err := client.ByISBN(context.Background(), "9780547928227")
-
-	// What the foreign host saw is reported first and with Errorf, so a
-	// regression prints the evidence rather than stopping at the verdict:
-	// a Fatal here would make the one observation this test exists to make
-	// unreachable on both paths.
-	mu.Lock()
-	saw := append([]string(nil), foreignSaw...)
-	mu.Unlock()
-	for _, s := range saw {
-		t.Errorf("the foreign host was reached, and saw Referer|query %q", s)
-	}
-	if err == nil {
-		t.Error("ByISBN: want an error when the lookup is redirected off its host")
-	} else if strings.Contains(err.Error(), key) {
-		t.Errorf("the error text leaks the API key: %v", err)
-	}
-	// And nothing the foreign host said was adopted.
-	if got.Title != "" || got.Description != "" {
-		t.Errorf("adopted the foreign host's answer: %+v", got)
+			// What the foreign host saw is reported first and with Errorf, so
+			// a regression prints the evidence rather than stopping at the
+			// verdict: a Fatal here would make the one observation this test
+			// exists to make unreachable on both paths.
+			mu.Lock()
+			saw := append([]string(nil), foreignSaw...)
+			mu.Unlock()
+			for _, s := range saw {
+				t.Errorf("the foreign host was reached, and saw Referer|query %q", s)
+			}
+			if err == nil {
+				t.Error("ByISBN: want an error when the lookup is redirected off its host")
+			} else if strings.Contains(err.Error(), key) {
+				t.Errorf("the error text leaks the API key: %v", err)
+			}
+			// And nothing the foreign host said was adopted.
+			if got.Title != "" || got.Description != "" {
+				t.Errorf("adopted the foreign host's answer: %+v", got)
+			}
+		})
 	}
 }
 

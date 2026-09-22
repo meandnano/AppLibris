@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"library/internal/importer"
@@ -651,8 +652,8 @@ func TestAnOverCapUploadStillReadsItsRefusalBack(t *testing.T) {
 	const cap = 32 << 10
 
 	handler, _, _ := newImportHandler(t, cap)
-	server := httptest.NewServer(handler)
-	defer server.Close()
+	server := httptest.NewTestServer(t, handler)
+	server.Start()
 
 	// Over the importer's cap and under MaxBytesReader's, which is the
 	// case the sentence exists for and the one a drain can fix.
@@ -688,8 +689,9 @@ func TestAnOverCapUploadStillReadsItsRefusalBack(t *testing.T) {
 // which is why the body is bounded above that check rather than below it.
 func TestADisabledImportStillReadsItsRefusalBack(t *testing.T) {
 	handler, _, _ := newImportHandlerWritable(t, 32<<10, false)
-	server := httptest.NewServer(handler)
-	defer server.Close()
+	// A real socket, for the same reason as the test above
+	server := httptest.NewTestServer(t, handler)
+	server.Start()
 
 	req := uploadRequest(t, "Dune.epub", importEPUB(t, "Dune", "Frank Herbert", 16<<10), true)
 	req.URL, _ = url.Parse(server.URL + "/import/file")
@@ -755,53 +757,56 @@ func (s *slowBody) Read(p []byte) (int, error) {
 // other test in this package runs against an httptest.Server with no
 // WriteTimeout at all, which is exactly why none of them saw this.
 func TestASlowUploadStillDeliversItsAnswerUnderAWriteTimeout(t *testing.T) {
-	handler, _, _ := newImportHandler(t, 1<<20)
+	synctest.Test(t, func(t *testing.T) {
+		handler, _, _ := newImportHandler(t, 1<<20)
 
-	server := httptest.NewUnstartedServer(handler)
-	// Shorter than the body takes to arrive, so the handler renders after
-	// it would have expired.
-	server.Config.WriteTimeout = time.Second
-	server.Start()
-	defer server.Close()
+		// In memory, where the connection's deadlines run on the bubble's
+		// clock, so the body can take its time without the test taking it
+		server := httptest.NewTestServer(t, handler)
+		// Shorter than the body takes to arrive, so the handler renders after
+		// it would have expired. Config is read when Client starts serving
+		server.Config.WriteTimeout = time.Second
+		client := server.Client()
 
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	part, err := mw.CreateFormFile("file", "Dune.epub")
-	if err != nil {
-		t.Fatalf("CreateFormFile: %v", err)
-	}
-	// Padded so the body genuinely outlasts the write deadline below; a
-	// small one finishes in milliseconds and proves nothing.
-	part.Write(importEPUB(t, "Dune", "Frank Herbert", 64<<10))
-	if err := mw.Close(); err != nil {
-		t.Fatalf("close multipart writer: %v", err)
-	}
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		part, err := mw.CreateFormFile("file", "Dune.epub")
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		// Padded so the body genuinely outlasts the write deadline below; a
+		// small one finishes in milliseconds and proves nothing.
+		part.Write(importEPUB(t, "Dune", "Frank Herbert", 64<<10))
+		if err := mw.Close(); err != nil {
+			t.Fatalf("close multipart writer: %v", err)
+		}
 
-	slow := &slowBody{data: body.Bytes(), chunk: 512, pause: 10 * time.Millisecond}
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/import/file", slow)
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("HX-Request", "true")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
+		slow := &slowBody{data: body.Bytes(), chunk: 512, pause: 10 * time.Millisecond}
+		req, err := http.NewRequest(http.MethodPost, "http://library.test/import/file", slow)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Header.Set("HX-Request", "true")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
 
-	resp, err := server.Client().Do(req)
-	if err != nil {
-		t.Fatalf("the preview never arrived: %v", err)
-	}
-	defer resp.Body.Close()
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("the preview never arrived: %v", err)
+		}
+		defer resp.Body.Close()
 
-	answer, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("the preview was cut short: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
-	}
-	if !strings.Contains(string(answer), "Dune") {
-		t.Errorf("the response is not the preview:\n%s", answer)
-	}
+		answer, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("the preview was cut short: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+		if !strings.Contains(string(answer), "Dune") {
+			t.Errorf("the response is not the preview:\n%s", answer)
+		}
+	})
 }
 
 // confirmWindow must outlast what the importer allows a confirm to take, or

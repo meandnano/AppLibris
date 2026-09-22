@@ -44,48 +44,63 @@ func (r *rateLimitedProvider) Search(ctx context.Context, title string, authors 
 	return r.Provider.Search(ctx, title, authors)
 }
 
-// rateLimiter hands out one token every `every`, via a ticker feeding a
-// capacity-1 channel: a token sitting unused between calls (the ordinary
-// case, since enrichment jobs are not a tight loop) is why callers wait on
-// the channel rather than the ticker directly — the ticker only ever tops
-// the channel back up to one. The first token is pre-loaded so the very
-// first call never pays a full interval of latency for no reason. It runs
-// for the life of the process, same as the Worker it paces: nothing ever
-// stops the ticker, matching every other background ticker in this
-// package (e.g. Worker.Run's own pollInterval).
+// rateLimiter spaces calls at least `every` apart by handing each caller the
+// next free slot. A caller arriving after a quiet spell gets a slot of now,
+// so the first call never pays a full interval of latency for no reason.
+// Nothing runs between calls: a limiter owning a goroutine would outlive
+// every caller, since nothing that builds one ever closes it, and a
+// synctest bubble refuses to end while one is left
 type rateLimiter struct {
-	tokens chan struct{}
+	every time.Duration
+
+	mu sync.Mutex
+	// next is the earliest instant the next caller may proceed
+	next time.Time
 }
 
 func newRateLimiter(every time.Duration) *rateLimiter {
-	// time.NewTicker panics below zero, and WithRateLimit is exported —
-	// falling back to the default matches how WithRetry and newCache
-	// normalise an unusable argument rather than taking the caller down.
+	// WithRateLimit is exported, so falling back to the default matches how
+	// WithRetry and newCache normalise an unusable argument rather than
+	// pacing nothing
 	if every <= 0 {
 		every = DefaultRateLimitInterval
 	}
-
-	rl := &rateLimiter{tokens: make(chan struct{}, 1)}
-	rl.tokens <- struct{}{}
-
-	ticker := time.NewTicker(every)
-	go func() {
-		for range ticker.C {
-			select {
-			case rl.tokens <- struct{}{}:
-			default:
-			}
-		}
-	}()
-	return rl
+	return &rateLimiter{every: every}
 }
 
 func (rl *rateLimiter) wait(ctx context.Context) error {
+	rl.mu.Lock()
+	now := time.Now()
+	slot := rl.next
+	if slot.Before(now) {
+		slot = now
+	}
+	rl.next = slot.Add(rl.every)
+	rl.mu.Unlock()
+
+	delay := slot.Sub(now)
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 	select {
-	case <-rl.tokens:
+	case <-timer.C:
 		return nil
 	case <-ctx.Done():
+		rl.release(slot)
 		return ctx.Err()
+	}
+}
+
+// release hands back a slot its caller gave up waiting for, unless a later
+// caller has already queued behind it: moving next back then would let two
+// calls through one interval
+func (rl *rateLimiter) release(slot time.Time) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if rl.next.Equal(slot.Add(rl.every)) {
+		rl.next = slot
 	}
 }
 

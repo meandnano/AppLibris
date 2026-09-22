@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -205,53 +206,58 @@ func TestNestedWriteReturnsErrNestedWrite(t *testing.T) {
 // pre-existing, unchanged property of a one-connection pool) and then
 // succeed, rather than fail immediately with ErrNestedWrite.
 func TestConcurrentWritesFromDifferentGoroutinesBothSucceed(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
+	synctest.Test(t, func(t *testing.T) {
+		db := openTestDB(t)
+		ctx := context.Background()
 
-	firstStarted := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	errs := make(chan error, 2)
+		firstStarted := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		errs := make(chan error, 2)
 
-	go func() {
-		errs <- db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			close(firstStarted)
-			<-releaseFirst
-			_, err := createBookTx(ctx, tx, Book{ContentHash: "hash-first", Title: "First"}, nil)
-			return err
-		})
-	}()
-	<-firstStarted // the first Write now holds the pool's one connection
+		go func() {
+			errs <- db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+				close(firstStarted)
+				<-releaseFirst
+				_, err := createBookTx(ctx, tx, Book{ContentHash: "hash-first", Title: "First"}, nil)
+				return err
+			})
+		}()
+		<-firstStarted // the first Write now holds the pool's one connection
 
-	secondDone := make(chan struct{})
-	go func() {
-		errs <- db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			_, err := createBookTx(ctx, tx, Book{ContentHash: "hash-second", Title: "Second"}, nil)
-			return err
-		})
-		close(secondDone)
-	}()
+		secondDone := make(chan struct{})
+		go func() {
+			errs <- db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+				_, err := createBookTx(ctx, tx, Book{ContentHash: "hash-second", Title: "Second"}, nil)
+				return err
+			})
+			close(secondDone)
+		}()
 
-	select {
-	case <-secondDone:
-		t.Fatal("second Write returned before the first released the connection; want it blocked, not failed with ErrNestedWrite")
-	case <-time.After(50 * time.Millisecond):
-		// Still blocked on BeginTx, as wanted.
-	}
-
-	close(releaseFirst)
-
-	for i := 0; i < 2; i++ {
-		if err := <-errs; err != nil {
-			t.Errorf("concurrent Write %d: %v", i, err)
+		// Wait returns once the second Write has either finished or parked
+		// on the pool, so this is a verdict rather than a guess at how long
+		// failing fast would take
+		synctest.Wait()
+		select {
+		case <-secondDone:
+			t.Fatal("second Write returned before the first released the connection; want it blocked, not failed with ErrNestedWrite")
+		default:
 		}
-	}
 
-	for _, hash := range []string{"hash-first", "hash-second"} {
-		b, err := db.FindBookByContentHash(ctx, hash)
-		if err != nil || b == nil {
-			t.Errorf("FindBookByContentHash(%q) = %v, %v; want a book", hash, b, err)
+		close(releaseFirst)
+
+		for i := 0; i < 2; i++ {
+			if err := <-errs; err != nil {
+				t.Errorf("concurrent Write %d: %v", i, err)
+			}
 		}
-	}
+
+		for _, hash := range []string{"hash-first", "hash-second"} {
+			b, err := db.FindBookByContentHash(ctx, hash)
+			if err != nil || b == nil {
+				t.Errorf("FindBookByContentHash(%q) = %v, %v; want a book", hash, b, err)
+			}
+		}
+	})
 }
 
 // A schema_migrations row naming a file that no longer exists is ignored,
