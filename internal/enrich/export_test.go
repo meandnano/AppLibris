@@ -7,7 +7,7 @@ import (
 
 // allowAnyCoverAddress lets a Worker's cover fetch reach any address,
 // including the loopback one the worker tests' cover servers listen on.
-// RefusePrivateAddress refuses that by design, so a cover test either opts
+// netguard.RefusePrivateAddress refuses that by design, so a cover test either opts
 // out here or is testing the guard rather than the thing it named.
 //
 // This lives in a _test.go file on purpose: production code has no way to

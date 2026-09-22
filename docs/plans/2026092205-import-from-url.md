@@ -283,11 +283,11 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 - Modify: `internal/enrich/worker.go`
 - Modify: `internal/enrich/export_test.go`
 
-- [ ] move `RefusePrivateAddress`, `refusedPrefixes`, `translatedPrefixes` into `internal/netguard`, with error text that names no caller
-- [ ] replace `coverDialContext` with `netguard.DialContext(guard, timeout)` and use it from `internal/enrich`
-- [ ] move the guard's tests into `netguard_test.go` unchanged
-- [ ] confirm the `enrich.Worker` guard opt-out and its real-socket guard tests still pass
-- [ ] run tests - must pass before task 2
+- [x] move `RefusePrivateAddress`, `refusedPrefixes`, `translatedPrefixes` into `internal/netguard`, with error text that names no caller
+- [x] replace `coverDialContext` with `netguard.DialContext(guard, timeout)` and use it from `internal/enrich`
+- [x] move the guard's tests into `netguard_test.go` unchanged
+- [x] confirm the `enrich.Worker` guard opt-out and its real-socket guard tests still pass
+- [x] run tests - must pass before task 2
 
 ### Task 2: Add `importer.Fetcher`
 
