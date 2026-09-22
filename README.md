@@ -31,9 +31,10 @@ step, and every page works with JavaScript off.
   you scroll. Every page and search has its own URL.
 - **Inline metadata editing** on the detail page, one field at a time. An
   edited value is never overwritten by anything automatic.
-- **Import from the browser.** The Import page takes an EPUB or FB2, shows
-  its cover, metadata and whether the library already has it, and on
-  confirmation copies it into the library directory and opens its page.
+- **Import from the browser.** The Import page takes an EPUB or FB2, or a
+  link to one, shows its cover, metadata and whether the library already
+  has it, and on confirmation copies it into the library directory and
+  opens its page.
   Needs write access to the library; without it the page says so.
 - **Metadata enrichment on request.** "Fetch metadata" fills fields the
   file did not provide from Open Library and Google Books, and fetches a
@@ -118,7 +119,11 @@ you press Save, Send or Fetch metadata, with a log warning naming
 ### Importing a book
 
 The Import page uploads one EPUB or FB2 at a time; dropping a file onto the
-library page does the same. The file is held in `applibris-imports` under
+library page, or pasting a copied one there with Cmd/Ctrl+V, does the same.
+A link to a book file works too: paste it on the library page, use its
+Paste button, or type it into the Import page's link field, and the server
+downloads it to the same preview. Only publicly reachable addresses are
+downloaded, so a book on your own network is dropped or uploaded instead. The file is held in `applibris-imports` under
 `TMPDIR` (`/tmp` in the container) while you look at the preview, and is
 copied into the root of `/library` under its own name only when you press
 Import. An unconfirmed upload is discarded after thirty minutes, and the
@@ -134,7 +139,7 @@ already holds byte for byte is refused with a link to the existing book; a
 different file with a title you already own is offered under a warning,
 since a second edition is legitimate.
 
-`MAX_IMPORT_SIZE` caps an upload at 64 MiB by default.
+`MAX_IMPORT_SIZE` caps an upload or a download at 64 MiB by default.
 
 ### Sending to a Kindle
 

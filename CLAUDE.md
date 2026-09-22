@@ -38,8 +38,11 @@ for what these files may and may not say.
   Note: `docs/notes/enrichment.md`.
 - `internal/importer` — staging, previewing and landing an upload:
   `Stager`, the three `Verdict`s, `detectSuffix`, the library-name
-  derivation. Indexes through `scanner.IndexFile`. Note:
+  derivation, and the `Fetcher` that downloads a pasted link. Indexes through `scanner.IndexFile`. Note:
   `docs/notes/import.md`.
+- `internal/netguard` — the address guard every outbound fetch of a
+  user- or remote-chosen URL dials through. Notes:
+  `docs/notes/enrichment.md`, `docs/notes/import.md`.
 - `internal/service` — validation, normalisation and page assembly beneath
   the handlers, so a future `/api/v1` is a second thin transport.
   `internal/web` — `html/template` pages, htmx fragments, CSS and vendored

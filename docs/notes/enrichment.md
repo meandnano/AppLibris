@@ -143,10 +143,14 @@ Rules for `internal/enrich`, `internal/openlibrary`, `internal/googlebooks`,
 - **The cover request carries the same descriptive `User-Agent` both
   provider clients set.** The answering host is most often Open Library's
   own, and a throttle there arrives as a fetch failure naming no cause.
-- **`RefusePrivateAddress` refuses loopback, private, link-local, multicast
-  and unspecified addresses at dial time, through `net.Dialer.Control`, on
-  every hop.** Without it the fetch is a blind GET at any address the
-  deployment can reach, chosen by whichever host answered the hop before.
+- **`netguard.RefusePrivateAddress` refuses loopback, private, link-local,
+  multicast and unspecified addresses at dial time, through
+  `netguard.DialContext`'s `net.Dialer.Control`, on every hop.** Without
+  it the fetch is a blind GET at any address the deployment can reach,
+  chosen by whichever host answered the hop before.
+- **The guard lives in `internal/netguard`, which `importer.Fetcher` dials
+  through too.** A check deciding what the server may connect to must
+  exist once.
 - **The guard runs at dial, not on the URL's host.** `Control` runs per
   candidate address immediately before the connect, so a hostname resolving
   to a private address only at connect time is caught, and so is a redirect

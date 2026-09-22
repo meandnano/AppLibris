@@ -384,12 +384,12 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 
 ### Task 9: [Final] Update documentation
 
-- [ ] `docs/notes/import.md`: rules for the URL route, the fetcher, the busy limit, the refusal lines, the logging, and the paste gestures; remove the Deliberately-absent line
-- [ ] `docs/notes/enrichment.md`: the guard lives in `internal/netguard`
-- [ ] `docs/notes/web.md`: `POST /import/url` in the route list; the `paste-link.js` inclusion rule
-- [ ] README.md: the Importing section covers pasting a link or a file, and public addresses only
-- [ ] CLAUDE.md code map: `internal/netguard`
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `docs/notes/import.md`: rules for the URL route, the fetcher, the busy limit, the refusal lines, the logging, and the paste gestures; remove the Deliberately-absent line
+- [x] `docs/notes/enrichment.md`: the guard lives in `internal/netguard`
+- [x] `docs/notes/web.md`: `POST /import/url` in the route list; the `paste-link.js` inclusion rule
+- [x] README.md: the Importing section covers pasting a link or a file, and public addresses only
+- [x] CLAUDE.md code map: `internal/netguard`
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
