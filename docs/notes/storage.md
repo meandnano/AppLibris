@@ -1,434 +1,97 @@
 # Storage
 
-Rationale for `internal/storage`. The package map and the invariants that
-must hold are in CLAUDE.md.
+Rules for `internal/storage` and `internal/storage/storagetest`.
 
 ## Engine, pools and writes
 
-SQLite through `modernc.org/sqlite`, chosen over a key-value store because
-FTS5 gives full-text search without hand-rolled indexes. The pure-Go
-driver keeps `CGO_ENABLED=0`, so the binary cross-compiles and the image
-is a single static file. The driver is slower than the C one under heavy
-concurrent writes, which does not matter here: writes arrive in scan
-bursts and reads dominate.
-
-The database runs in WAL mode with foreign keys on. The DSN names a
-5-second `busy_timeout` because the driver applies one only when asked and
-otherwise defaults to zero: a lock held from outside the process (a backup
-tool, `sqlite3 library.db` opened by hand, WAL recovery after a crash)
-would fail a write instantly instead of waiting out the few seconds such a
-lock actually holds.
-
-Two pools. The read pool is bounded to `readPoolSize` (8) open and idle
-connections, so concurrency above `database/sql`'s default idle ceiling of
-two reuses connections rather than opening and discarding one per request.
-The write pool holds a single connection, which serialises writes without
-a goroutine-and-channel writer. Each exported write method owns exactly
-one transaction. A multi-step atomic write composes the package-internal
-`…Tx` helpers inside one `DB.Write` call, never two exported methods: the
-outer call already holds the pool's only connection, so a nested exported
-call blocks until the context expires. A directly nested `Write` is
-detected and returns `ErrNestedWrite`.
-
-Every timestamp column holds fixed-width UTC RFC 3339 text
-(`sqliteTimeLayout`, `formatTime`), so SQLite's date functions and a plain
-`ORDER BY` both work on it.
+- **SQLite through `modernc.org/sqlite`.** The pure-Go driver keeps `CGO_ENABLED=0`, and FTS5 covers search.
+- **WAL mode, foreign keys on, and a 5s `busy_timeout` named in the DSN.** The driver defaults the timeout to zero, so a lock held from outside the process would fail a write instantly instead of waiting it out.
+- **The read pool is bounded to `readPoolSize` (8); the write pool holds one connection.** One connection serialises writes without a goroutine-and-channel writer.
+- **Every exported write method owns exactly one transaction. A multi-step atomic write composes the `…Tx` helpers inside one `DB.Write`, never two exported methods, and a `Write` callback never calls an exported `*DB` method.** The outer call holds the pool's only connection, so the inner call blocks until the context expires. A directly nested `Write` returns `ErrNestedWrite`.
+- **Every timestamp column holds fixed-width UTC RFC 3339 text (`sqliteTimeLayout`, `formatTime`).** SQLite's date functions and a plain `ORDER BY` both work on it.
 
 ## Migrations
 
-Embedded SQL files under `migrations/`, one statement each, named
-`YYYYMMDDNN_description.sql`, applied in filename order in individual
-transactions and recorded in `schema_migrations`. `Open` is idempotent and
-runs on every start. The migrator iterates the embedded files and skips
-those already recorded, so a recorded name whose file no longer exists is
-inert. That is what makes deleting a migration safe while the project is
-pre-deployment.
-
-There are no backfill migrations. The service has never been deployed, so
-no database predates any table; a `SELECT` that can only match zero rows
-is a fixture pretending to be a guarantee. A local development database
-older than `books_fts` or `field_sources` is reset by deleting the file
-and letting the next sweep rescan.
-
-SQLite cannot alter a CHECK constraint in place, so widening one is a
-create-copy-drop-rename sequence of four migrations. `field_sources` and
-`book_files` were both rebuilt that way.
+- **Embedded SQL files under `migrations/`, one statement each, named `YYYYMMDDNN_description.sql`, applied in filename order in individual transactions and recorded in `schema_migrations`.**
+- **`Open` is idempotent and runs the migrator on every start. A recorded name whose file is absent is inert.** The migrator skips recorded names, so deleting a migration is safe while the project is pre-deployment.
+- **No backfill migrations. A development database older than a table is reset by deleting the file.** No deployed database predates any table, so a `SELECT` that can only match zero rows is a fixture pretending to be a guarantee.
+- **Widening a CHECK constraint is a create-copy-drop-rename sequence of four migrations.** SQLite cannot alter a CHECK constraint in place.
 
 ## Schema
 
-`books` carries identity and metadata and no location fields. Locations
-live in `book_files`, one row per physical path keyed by `book_id`, so
-byte-identical content at several paths is one book with several rows.
-Content hash is identity; path is a mutable attribute. `derived_from` is
-a nullable self-reference reserved for format conversion (see
-`design.md`).
-
-`books.sort_title` is derived from the title (one leading English article
-stripped, case folded) rather than copied from it, and is declared
-`COLLATE NOCASE` so every `ORDER BY sort_title` is case-insensitive without
-a per-query clause. `SortTitle` lives here because two writers derive the
-column, the scanner on first sight and a title edit, and a second copy of
-the rule is a library that sorts differently depending on how a title
-arrived.
-
-`NormalizeISBN` and the `Max*` length constants are here for the same
-reason, one step further: this package sits below every writer of a
-metadata column. Three of them exist — `internal/service` for a person's
-edit, `internal/enrich` for a provider's answer, `internal/scanner` for
-what a file had embedded in it — and a rule or a number restated in one of
-them drifts. For the limits the drift is concrete: a value one writer
-stores but another's validation would reject is a field the app can no
-longer edit. `formats.md` carries what `NormalizeISBN` accepts and why.
-
-`PlainDescription` is here on the same argument, for a different set of
-callers: everything that can be handed a description carrying markup.
-`internal/epub` is one, since `dc:description` legally holds escaped HTML,
-and `internal/googlebooks` is the other, since the Volumes API documents
-its description as HTML. Nothing downstream renders a description as
-markup — `html/template` escapes the detail page's — so a tag left in shows
-a reader a literal `<p>` and then offers them the same markup to hand-fix
-in the edit textarea. Block tags become a line break, every other tag is
-dropped, and character references are decoded only afterwards, so text that
-was itself escaped markup survives as the characters an author wrote. A `<`
-that starts nothing tag-shaped is left alone, which is what lets a book
-about inequalities keep its prose.
-
-Only a reference with a terminating `;` is decoded. `html.UnescapeString`
-alone also decodes HTML's semicolon-less legacy references, which is right
-for a string that is markup and wrong for one that is not: one caller is
-handed prose, where `Rock &copy roll` is a band and a verb, and nothing
-re-reads a file whose bytes have not changed, so there is no second chance
-at the value. A terminated reference that names nothing stays HTML's to
-read — `&notanentity;` really does parse as `¬anentity;`.
-
-Both paths return one shape. The test for markup is a fast path over the
-work and never over the result, since a description whose blank lines were
-capped only when it happened to contain an ampersand would render one way
-from a file and another from a provider.
-
-`internal/enrich`'s `sanitizeValue` deliberately does not call it. Open
-Library's description is plain to begin with, and a strip applied to every
-provider answers for a source that never sends markup.
-
-`CapBlankLines` is the tail of that shape and is here for the same reason,
-with one more caller than its neighbour: `sanitizeValue` caps a provider's
-answer, `PlainDescription` caps what it flattens, and `internal/fb2`'s
-`annotationText` caps what a wrapped `<p>` carried across source lines. A
-person's edit is the one description nothing caps, deliberately — the blank
-lines someone typed are their own. Copies of the rule would be descriptions
-shaped differently by which door they came through.
-
-It is one hand-rolled pass rather than the obvious fold-trim-collapse
-spelling, because it runs on a value that is not yet capped: `internal/epub`
-bounds a package document at 4 MiB and `internal/scanner` cuts a description
-to 64 KiB only afterwards. A test keeps the obvious spelling as its oracle,
-so the two cannot drift. It folds CRLF and a lone CR first, so a
-carriage return is a break the count can see rather than one it cannot, and
-strips each line's trailing whitespace before counting, since `pre-line`
-collapses a line of two spaces while keeping both newlines around it.
-
-Authors are a table with a `book_authors` join, not a comma-separated
-column, so correcting a spelling and browsing by author both stay cheap.
-The join carries `position`: `author_id` order is first-sight-in-the-
-library order, which is not the book's own once an author is shared. A
-name credited twice in one file links once, at its first position, since
-the primary key is `(book_id, author_id)` and a second insert would roll
-the whole book back. `authors.name` has a unique index.
-
-`book_files.book_id` and both `book_authors` keys cascade on delete. A
-book's locations and author links are meaningless without it; the author
-row survives.
-
-Two methods delete locations, and they differ in who is trusted.
-`PruneMissingFiles` deletes exactly the ids it is given and verifies
-nothing, because its caller is the scanner, the only place with live
-filesystem state. `ForgetMissingFile` deletes one row for a person, and so
-carries its own conditions — the row belongs to that book, and is currently
-marked missing — as clauses on the `DELETE` rather than a read before it: a
-sweep clearing `missing_since` inside the window between such a read and
-the delete would forget a path that had just come back. Both then run
-`pruneOrphanedBookTx`, so a bookless book cannot be created either way. A
-row matching neither condition is `(false, false, nil)`, the same
-absent-isn't-an-error contract `DeleteRecipient` holds.
+- **`books` carries identity and metadata and no location fields. Locations live in `book_files`, one row per path.** Content hash is identity and path is a mutable attribute, so byte-identical content at several paths is one book.
+- **`derived_from` is a nullable self-reference reserved for format conversion.** See `docs/notes/design.md`.
+- **`books.sort_title` is derived by `SortTitle` (one leading English article stripped, case folded) and declared `COLLATE NOCASE`.** The scanner and a title edit both derive the column, and a second copy of the rule sorts a library differently by how a title arrived.
+- **`NormalizeISBN`, the `Max*` constants, `FieldLimit` and `CapField` live here as the one copy shared by `internal/scanner`, `internal/enrich` and `internal/importer`. `internal/service` shares `FieldLimit` only.** A limit restated in one writer drifts, and a value one stores but another rejects is a field the app cannot edit. A person's edit is refused rather than rewritten, and a line break they typed is an error, not something collapsed behind them.
+- **`PlainDescription` lives here for `internal/epub` and `internal/googlebooks`, the two callers handed a description that may carry markup. Block tags become a line break, other tags are dropped, character references are decoded afterwards, and a `<` that starts nothing tag-shaped is left alone.** Nothing downstream renders a description as markup, so a tag left in shows a reader a literal `<p>`.
+- **Only a reference terminated by `;` is decoded. A terminated reference that names nothing is left to HTML's reading.** `html.UnescapeString` alone also decodes semicolon-less legacy references, which is wrong for prose such as `Rock &copy roll`.
+- **Both `PlainDescription` paths return one shape. The test for markup is a fast path over the work, never over the result.** A description capped only when it happened to contain an ampersand would render differently from a file and from a provider.
+- **`internal/enrich`'s `sanitizeValue` does not call `PlainDescription`.** Open Library's description is plain, and a blanket strip answers for a source that never sends markup.
+- **`CapBlankLines` lives here and is called by `CapField`, `PlainDescription` and `internal/fb2`'s `annotationText`. A person's edit is the one description nothing caps.** Copies of the rule shape descriptions by which door they came through; the blank lines someone typed are their own.
+- **`CapBlankLines` is one hand-rolled pass, not the obvious fold-trim-collapse spelling, and a test keeps that spelling as its oracle. It folds CRLF and a lone CR first and strips each line's trailing whitespace before counting.** It runs on a value not yet capped, up to the 4 MiB `internal/epub` allows a package document, and `pre-line` collapses a line of two spaces while keeping both newlines around it.
+- **Authors are a table with a `book_authors` join carrying `position`; `authors.name` has a unique index. A name credited twice in one file links once, at its first position.** `author_id` order is first-sight order, not the book's own, and a second insert against the `(book_id, author_id)` key would roll the whole book back.
+- **`book_files.book_id` and both `book_authors` keys cascade on delete; the author row survives.** A book's locations and author links are meaningless without it.
+- **`PruneMissingFiles` deletes exactly the ids it is given and verifies nothing. `ForgetMissingFile`'s guards (the row belongs to that book and is marked missing) are clauses on the `DELETE`, never a read before it. Both run `pruneOrphanedBookTx`.** The scanner is the only caller with live filesystem state, and a sweep clearing `missing_since` between a read and the delete would forget a path that had just come back. A row matching neither condition is `(false, false, nil)`.
 
 ## Provenance
 
-`field_sources` records per field where the current value came from:
-`embedded`, `manual`, or a provider's name. It is written in the same
-transaction as the book itself (`setEmbeddedFieldSourcesTx` inside
-`createBookTx`) and on every edit, so every book carries its markers by
-construction and the resolver can trust an absent row to mean "never
-recorded".
-
-The rule that is easiest to get backwards: **a cleared field stays
-`manual`.** An empty value with a `manual` source is a decision someone
-made, and a resolver that inferred provenance from emptiness would undo it.
-
-`CreateBookWithFile` carries the `manual` fields of a book it is about to
-orphan onto the book replacing it, when the two share the path and the old
-one is left with no locations at all (`inheritFromReplacedBookTx`, the
-reasoning in `scanner.md`). The empty `manual` value comes across with the
-rest, by the rule above: someone who cleared a wrong publisher does not
-want the file's wrong publisher back. `cover` never does, even where a row
-claims to be `manual`, since its value is a path keyed to one book's
-content hash. The stamp is the new book's own `modified_at`, read back
-inside the transaction rather than taken from a clock, so the whole
-creation carries one instant — `createBookTx` leaves that column to its
-schema default and does not insert it.
-
-`cover` is the eighth field and behaves differently from the other seven.
-A `cover` row exists only when a provider supplied the image:
-`setEmbeddedFieldSourcesTx` never writes one for a scanner-extracted
-cover, and `UpdateBookField` refuses `FieldCover`, so `manual` is
-unreachable. The discriminator between a provider's cover and the
-scanner's is therefore "a row exists" versus "no row", never a comparison
-against `embedded`, which matches nothing. `FieldCover` is also absent
-from `metadataFields`, so `ParseMetadataField("cover")` fails. That map
-gates `internal/web`'s per-field edit routes and
-`service.UpdateBookMetadata`, and `cover_path` holds a path
-`internal/cover.Store` produced, not text a person types; accepting the
-name would give the web layer a route that reaches `UpdateBookField`,
-gets `ErrInvalidMetadataField` and answers 500 where it should 404.
-
-`ApplyEnrichedFields` is the only writer that creates a `cover` row.
-`ClearProviderCover` and `UpdateBookCoverPath` remove one, both through
-`forgetCoverTx`. Writing `cover_path` from either side also clears
-`cover_retry`: that marker means "a store failed, try again next sweep"
-and makes the scanner skip its stat check, so leaving it set beside a
-fresh path sends the next sweep past the check with no evidence about the
-file. A book with an embedded cover would then be re-extracted over the
-provider's image, and one without would have a good provider cover
-forgotten.
-
-`ClearProviderCover` and `RecordUnusableCover` take the `cover_path` the
-caller observed and refuse to write if the row now holds a different
-one. The scanner decides from a snapshot and then stats, parses a book
-file and reads provenance before its write lands; an enrichment run that
-finished inside that window would otherwise have its new cover thrown
-away. The returned bool means *cleared*, not *exists*. The `DELETE` is
-scoped to `(book_id, field)`, since dropping the field clause would pass
-every assertion while erasing the book's whole provenance. Neither method
-checks provenance itself: the scanner already has, and a second copy of
-the predicate is how the two drift.
-
-`UpdateBookField` writes one scalar and `UpdateBookAuthors` replaces the
-author list, each updating value, provenance and the FTS row in one
-transaction. `UpdateBookField` refuses `authors` (`ErrInvalidMetadataField`)
-because that lives in the join table. Both return `(false, nil)` for an
-unknown book, the same contract as the finders. Both call the shared
-`updateBookColumnTx`/`updateBookAuthorsTx` with source `manual`, and
-`ApplyEnrichedFields` calls the same helpers with a per-field
-`sourceName` map, so a job that pulled fields from two providers records
-each under the one that answered it.
-
-Before writing each field, `ApplyEnrichedFields` calls
-`fieldIsStillMissingTx` inside its own transaction and skips a field
-that is no longer missing. `Resolve`'s snapshot can be minutes stale by
-the time a provider answers, and with a single write connection any
-concurrent manual edit has already committed, so a provider's late answer
-can never overwrite a value someone filled or deliberately cleared. It
-iterates `metadataFieldOrder` rather than the caller's map so the same
-input reads the same way twice, but still validates every key up front:
-iterating the known fields alone would pass silently over a typo'd
-constant. It returns the fields actually written, which is what
-`enrichment_jobs.updated_fields` records.
+- **`field_sources` is written in the same transaction as the book (`setEmbeddedFieldSourcesTx` inside `createBookTx`) and on every edit.** Every book carries its markers by construction, so an absent row means never recorded.
+- **A cleared field stays `manual`. Never infer provenance from emptiness.** An empty value with a `manual` source is a decision someone made.
+- **`CreateBookWithFile` carries the `manual` fields of a same-path predecessor left with no locations onto the replacement (`inheritFromReplacedBookTx`), empty values included and `cover` excluded. The stamp is the new book's `modified_at` read back inside the transaction, which `createBookTx` leaves to its schema default.** A cleared value is a decision, a cover path is keyed to one book's content hash, and the whole creation carries one instant. Reasoning in `docs/notes/scanner.md`.
+- **A `cover` row exists only for a provider-supplied cover. The scanner-versus-provider test is "row exists", never a comparison against `embedded`.** `setEmbeddedFieldSourcesTx` never writes one for a scanner-extracted cover and `UpdateBookField` refuses `FieldCover`, so `embedded` matches nothing.
+- **`FieldCover` stays out of `metadataFields`, so `ParseMetadataField("cover")` returns false. `UpdateBookField` refuses `FieldCover` and `authors` with `ErrInvalidMetadataField` as a second guard.** `cover_path` is a path `internal/cover.Store` produced, not text a person types, and accepting the name would give the web layer a route answering 500 where it should 404. Authors live in the join table.
+- **`ApplyEnrichedFields` is the only writer creating a `cover` row; `ClearProviderCover` and `UpdateBookCoverPath` remove one through `forgetCoverTx`.**
+- **Writing `cover_path` clears `cover_retry`, from every writer.** The marker makes the scanner skip its stat check, so a fresh path beside it sends the next sweep past the check with no evidence about the file.
+- **`ClearProviderCover` and `RecordUnusableCover` take the `cover_path` the caller observed and refuse to blank anything else. Their bool means cleared, not exists. Their `DELETE` is scoped to `(book_id, field)`. Neither checks provenance itself.** An enrichment run finishing between the scanner's snapshot and its write would otherwise lose its new cover. Dropping the field clause would erase the book's whole provenance while passing every assertion. The scanner has already checked provenance, and a second copy of the predicate drifts.
+- **`UpdateBookField` and `UpdateBookAuthors` update value, provenance and the FTS row in one transaction and return `(false, nil)` for an unknown book. They share `updateBookColumnTx` and `updateBookAuthorsTx` with `ApplyEnrichedFields`, which passes a per-field `sourceName`.** A job that pulled fields from two providers records each under the one that answered it.
+- **`ApplyEnrichedFields` re-checks `fieldIsStillMissingTx` per field inside its own transaction, iterates `metadataFieldOrder` while validating every key up front, and returns only the fields it wrote.** Iterating the fixed order makes the same input read the same way twice. `Resolve`'s snapshot can be minutes stale, so a late answer must never overwrite a value someone filled or cleared. Iterating the known fields alone would pass over a typo'd constant. The return is what `enrichment_jobs.updated_fields` records.
 
 ## Full-text search
 
-`books_fts` is a plain FTS5 table (`title`, `authors`, `description`,
-`isbn`, `tokenize='unicode61 remove_diacritics 2'`), not `content='books'`:
-`authors` is assembled from a join rather than being a books column, and
-a contentless table cannot support delete-by-rowid. Sync is asymmetric on
-purpose. Deletion is a trigger, because books die on several independent
-Go paths and every future one should be covered for free. Insert and
-update go through `syncBookFTSTx`, which recomputes the row via a
-`group_concat` join rather than tracking deltas, and runs inside the same
-transaction as `createBookTx` and the metadata writers.
-
-`SearchBooks` orders by `(sort_title, id)`, not relevance, so a grid
-someone is scanning while they type does not reorder under them. That
-happens to be exactly the total ordering paging needs (below).
-`MatchedSearchFields` reports which columns produced hits in one round
-trip of four `EXISTS`, each scoped with FTS5's `{col} : (expr)` filter;
-the parentheses are load-bearing, since without them the filter binds to
-the first term only.
-
-### Query sanitisation
-
-`SanitizeFTSQuery` is the one place raw input becomes a `MATCH`
-expression. It quotes and prefix-terms every whitespace-separated token,
-so nothing reaches `MATCH` unescaped, and it bounds the input, so a
-future caller (a programmatic API) is bounded by construction rather than
-by remembering to clip.
-
-Two caps, and neither subsumes the other. `MaxSearchBytes` (256) bounds
-the input; `maxSearchTerms` (16) bounds the work, since 256 bytes still
-admits 128 single-letter tokens, and each search spends its expression on
-three queries (`SearchBooks`, `CountSearchBooks`, `MatchedSearchFields`)
-against a read pool of eight. Unbounded, one pasted query of 100,000
-tokens stalled every page of the application. Terms past the sixteenth
-are dropped silently: a search box has nowhere to show a refusal, and
-"the first sixteen words were searched" is a result.
-
-The byte cap is applied by `NormalizeSearchQuery`, exported so
-`internal/web` renders back the string that was searched rather than a
-same-numbered clip made at a different point in the pipeline (the
-handler sees the query before control characters are stripped, so a clip
-there is not the same cut). The cut lands on a rune boundary for the two
-places it is observable: the final term would otherwise search a token
-ending in a byte no title contains, and the same string is rendered into
-the input and every paging URL, where half a character is a U+FFFD. FTS5
-itself accepts a term ending mid-rune and simply matches nothing.
-
-Two query shapes skip the per-word path and become bare digits, matching
-the index's own `replace(replace(isbn, '-', ''), ' ', '')`:
-
-- A **complete** ISBN however punctuated: 10 or 13 characters once
-  hyphens and spaces are stripped, trailing `X` permitted.
-- A **partial hyphenated** ISBN still being typed: digits and hyphens
-  only, at least two hyphens, at least four digits, at most thirteen.
-
-The two lower bounds decide which numeric queries stop being title
-queries. Two hyphens keeps `1984-2001` a phrase that finds *Collected
-Essays 1984–2001*; at one hyphen it would become `"19842001"*` and match
-nothing. Four digits keeps `9-1-1` and `1-2-3`, both of which title
-books, as title queries, and costs an ISBN-13 nothing since `978-0-`
-already carries four. The accepted costs: an ISO date such as
-`2026-09-06` reads as an ISBN, and an ISBN-10 with a two-digit registrant
-(`0-19-`, `0-14-`) reaches its second hyphen three digits in and waits one
-keystroke longer than an ISBN-13. The thirteen-digit cap is observable
-only from above: every thirteen-digit digits-and-hyphens query strips to
-a complete ISBN and takes the first shape, so exactly thirteen never
-reaches the partial one. The partial shape accepts hyphens but not
-spaces, because a space separates tokens for the rest of the search box
-and `1984-85 2000-01` must stay two terms. An unpunctuated partial is a
-single digit token and the per-word path already produces the identical
-prefix term.
+- **`books_fts` is a plain FTS5 table with `tokenize='unicode61 remove_diacritics 2'`, not `content='books'`.** `authors` comes from a join, and a contentless table cannot delete by rowid.
+- **Deletion is a trigger. Insert and update go through `syncBookFTSTx`, which recomputes the row through a `group_concat` join inside the writer's transaction.** Books die on several independent Go paths, and every future one is covered for free.
+- **`SearchBooks` orders by `(sort_title, id)`, not relevance.** A grid someone scans while typing must not reorder under them.
+- **`MatchedSearchFields` is four `EXISTS`, each scoped with `{col} : (expr)`. The parentheses are load-bearing.** Without them the filter binds to the first term only.
+- **`SanitizeFTSQuery` is the one place raw input becomes a `MATCH` expression. It quotes and prefix-terms every token and bounds the input.** A future caller is bounded by construction rather than by remembering to clip.
+- **`MaxSearchBytes` (256) bounds the input and `maxSearchTerms` (16) bounds the work. Neither subsumes the other. Terms past the sixteenth are dropped silently.** 256 bytes still admits 128 single-letter tokens, and a search box has nowhere to show a refusal.
+- **The byte cap is applied by `NormalizeSearchQuery`, exported so `internal/web` renders back the string that was searched, and the cut lands on a rune boundary.** A clip in the handler lands before control characters are stripped and is a different cut. Half a character is a U+FFFD in the input and every paging URL.
+- **Two query shapes become bare digits: a complete ISBN however punctuated (10 or 13 characters once hyphens and spaces are stripped, trailing `X` permitted), and a partial hyphenated one (digits and hyphens only, at least two hyphens, at least four digits, at most thirteen). The partial shape accepts hyphens but not spaces.** Two hyphens keeps `1984-2001` a title query, four digits keeps `9-1-1` one, and a space separates tokens for the rest of the box.
 
 ## Paging cursor
 
-`BookPage` (`AfterTitle`, `AfterID`, `Limit`; zero value is the first
-page) is a keyset cursor shared by `ListBooks` and `SearchBooks`. Keyset
-rather than `LIMIT`/`OFFSET` for a reason specific to this application:
-the library changes underneath the reader. The scanner inserts wherever a
-book's `sort_title` falls, so under `OFFSET` an insert above the reader's
-position repeats a card on the next page and a delete skips one. A
-cursor naming the last row seen has no such window.
-
-`AfterID` is part of the cursor because `sort_title` is not unique: two
-editions of one book collide by construction, and a cursor on a
-non-unique column loops or skips on the collision. The comparison is
-SQLite's row-value form `(sort_title, id) > (?, ?)`, which plans as a
-seek on `books_sort_title_id`; the expanded `a > ? OR (a = ? AND b > ?)`
-plans as a full index scan. The comparison carries **no** explicit
-`COLLATE NOCASE`: the collation is inherited from the column, and
-spelling it out turns the seek back into a scan because an explicitly
-collated expression is no longer the indexed one. Agreement with the
-`ORDER BY` is guaranteed by the schema and pinned by a test whose titles
-differ only in case. `Limit: 0` is unbounded, for the scanner's and the
-tests' whole-library calls.
+- **`BookPage` is a keyset cursor shared by `ListBooks` and `SearchBooks`, not `LIMIT`/`OFFSET`.** The scanner inserts wherever a `sort_title` falls, so under `OFFSET` an insert above the reader repeats a card and a delete skips one.
+- **`AfterID` is part of the cursor.** `sort_title` is not unique, and a cursor on a non-unique column loops or skips on the collision.
+- **The comparison is the row-value form `(sort_title, id) > (?, ?)` with no explicit `COLLATE NOCASE`, pinned by a test whose titles differ only in case.** The row-value form seeks on `books_sort_title_id` where the expanded `OR` form scans, and an explicitly collated expression is not the indexed one.
+- **`Limit: 0` is unbounded.** The scanner and the tests read the whole library.
 
 ## Single-book lookups
 
-`FindBookByID`, `ListBookFiles` and `ListAuthorsForBook` are targeted
-queries for the detail page. `ListFilesUnder("")` and `ListBookAuthors`
-load the whole library and are right for the grid, wrong for one book.
-`ListAuthorsForBook` returns an empty non-nil slice rather than an error
-when a book has no authors. `CountFilesByBook` is one `GROUP BY` over
-`book_files` for the grid's multi-location badge; it counts missing rows
-too, because the detail page lists them for the whole `MISSING_GRACE`
-window and two screens linking to each other must agree. A book absent
-from the map counted zero rows, which the scanner's orphan pruning is
-meant to make unobservable.
+- **`FindBookByID`, `ListBookFiles` and `ListAuthorsForBook` are the detail page's queries; `ListFilesUnder("")` and `ListBookAuthors` load the whole library and are for the grid. `ListAuthorsForBook` returns an empty non-nil slice for a book with no authors.**
+- **`CountFilesByBook` counts missing rows too.** The detail page lists them for the whole `MISSING_GRACE` window, and two screens linking to each other must agree.
 
 ## Recipients and send log
 
-`recipients.address` is `COLLATE NOCASE` with a unique index, so
-`CreateRecipient` (`INSERT … ON CONFLICT DO NOTHING`, then select) is
-idempotent across case: re-adding a known address is a slip, not a
-failure. `ListRecipients` orders `last_used_at DESC, address`; SQLite
-sorts `NULL` first in descending order, so never-used addresses land last
-with no `NULLS LAST` and the picker's default is simply the first row.
-`DeleteRecipient` returns `false` for an unknown address for the same
-reason and never touches `send_log`.
-
-`send_log.book_id` is the schema's one non-cascading foreign key
-(`ON DELETE SET NULL`), with `book_title` denormalised beside it, and
-`recipient_address` is a plain string rather than a key. A send log entry
-is the record that a thing happened, and the scanner deletes books
-routinely; cascading would erase the evidence a book was ever sent, which
-defeats the log's purpose of answering "did I already put this on the
-Kindle?". `ListSendsSince` reads both denormalised columns straight off
-`send_log` rather than joining: a join would silently drop exactly the
-pruned-book and removed-recipient rows the denormalisation exists to
-keep. `status` is CHECK-constrained to the four states, so a typo in a Go
-constant fails at the write rather than producing a job no worker claims.
-
-`book_id` goes `NULL` only when the book is really gone. A same-path
-replacement re-points those rows onto the replacement instead
-(`repointSendLogTx`, called before the orphan is deleted): the book is
-still on the shelf under new bytes, and both the detail page's status box
-and the "did I already send this?" answer read `book_id`. `book_title`
-stays as it was, since it records what was sent rather than what the book
-is called now.
-
-`EnqueueSend` inserts the `queued` row and bumps `recipients.last_used_at`
-in one transaction. The bump belongs at enqueue, not delivery: "most
-recently used" means "the one I last chose", and a failed send must not
-reset the picker's default. The insert is guarded (`INSERT … SELECT …
-WHERE NOT EXISTS`) against a `queued` *or* `sending` row for the same
-`(book_id, recipient_address)`: a `sending` row is a message in flight,
-and a second one queued behind it is exactly the duplicate the guard
-prevents. The address is part of the key because sending one book to two
-devices is legitimate. A blocked call returns the pending row's id with
-`inserted = false`, so the caller can still bump `last_used_at` without
-treating it as a fresh enqueue. The existing `(book_id, queued_at)` index
-already bounds the guard's lookup to one book's sends.
-
-`ClaimNextSend` selects the oldest `queued` row and flips it to `sending`
-in one transaction, atomic even though today's single worker cannot
-contend, because the claim is the one place a second worker would
-corrupt. `MarkSendDelivered` and `MarkSendFailed` scope their `UPDATE` to
-`status = 'sending'`, so a late or duplicate call can never rewrite a
-terminal row; the guard is a silent no-op, not an error.
-`FailInterruptedSends` fails every row still `sending` at startup and
-never requeues: which side of the in-flight request a dead process was on
-is unknowable, and requeueing risks a silent duplicate delivery, while
-failing surfaces the doubt and leaves retry a click away. `send_log_queued_at`
-exists because neither other index serves the history view's unfiltered
-`ORDER BY queued_at DESC`.
+- **`recipients.address` is `COLLATE NOCASE` with a unique index, and `CreateRecipient` is idempotent across case.** Re-adding a known address is a slip, not a failure.
+- **`ListRecipients` orders `last_used_at DESC, address` with no `NULLS LAST`.** SQLite sorts `NULL` first in descending order, so never-used addresses land last and the picker's default is the first row.
+- **`DeleteRecipient` returns false for an unknown address and never touches `send_log`.**
+- **`send_log.book_id` is `ON DELETE SET NULL` with `book_title` denormalised beside it, and `recipient_address` is a plain string. Every other FK cascades. `ListSendsSince` reads those columns and never joins `books` or `recipients`.** The log records that a thing happened after the scanner has deleted the book, and a join would drop exactly those rows.
+- **`status` is CHECK-constrained.** A typo in a Go constant fails at the write rather than producing a job no worker claims.
+- **A same-path replacement re-points `send_log` rows onto the replacement (`repointSendLogTx`, before the orphan is deleted); `book_title` stays as written.** The book is still on the shelf under new bytes, and the status box and the history answer read `book_id`.
+- **`EnqueueSend` inserts the `queued` row and bumps `last_used_at` in one transaction, at enqueue and not delivery. The insert is guarded against a `queued` or `sending` row for the same `(book_id, recipient_address)`, and a blocked call returns the pending id with `inserted = false`.** A failed send must not reset the picker's default, a `sending` row is a message in flight, and one book to two devices is legitimate.
+- **`ClaimNextSend` selects the oldest `queued` row and flips it to `sending` in one transaction.** The claim is the one place a second worker would corrupt.
+- **`Mark*` terminal writes are scoped to the in-progress status and are a silent no-op otherwise.** A late or duplicate call can never rewrite a terminal row.
+- **`FailInterruptedSends` fails every row still `sending` at startup and never requeues.** Which side of the in-flight request a dead process was on is unknowable, and requeueing risks a silent duplicate delivery.
+- **`send_log_queued_at` exists for the history view's unfiltered `ORDER BY queued_at DESC`.** Neither other index serves it.
 
 ## Enrichment jobs
 
-`enrichment_jobs` mirrors `send_log`'s shape (CHECK-constrained `status`,
-oldest-first claim, `WHERE status = 'running'` terminal guards) with two
-deliberate differences.
+- **`enrichment_jobs` mirrors `send_log`'s shape: CHECK-constrained `status`, oldest-first claim, `WHERE status = 'running'` terminal guards.**
+- **`enrichment_jobs.book_id` cascades. `bookGoneReason` exists only for the claim-then-delete race.** An enrichment job is a pending intention about a book and is meaningless once the book is gone.
+- **`RequeueInterruptedEnrichment` puts a `running` row back to `queued` with `queued_at` reset, or deletes it when the book has a fresh `queued` sibling. It never marks it `done`.** Running a job again lands the same values, two queued promises would double the provider calls, and `done` would misreport a crash as a success.
+- **`EnqueueEnrichment` dedups against `queued` only.** A `running` job may already be past the point where a new request could influence it.
+- **`updated_fields` is a comma-separated list, not a join table. `MarkEnrichmentDone` stores it in the same statement as the terminal state, and empty is the ordinary "nothing to add" success.** It is display text for one fragment that is never queried.
+- **`FieldSourcesForBook` reads an absent field as an empty source.** The missing-field rule treats that as not-`manual`.
 
-`book_id` **cascades**. A send log entry must outlive its book; an
-enrichment job is a pending intention about a book and is meaningless
-once the book is gone. The `bookGoneReason` the worker records exists
-only for the narrow claim-then-delete race.
+## storagetest
 
-Startup recovery **requeues** rather than fails
-(`RequeueInterruptedEnrichment`). A send's side effect leaves the process
-and is not repeatable; an enrichment job only writes fields a pure
-function computed from data already in the database, and running it
-again lands the same values. A `running` row goes back to `queued` with
-`queued_at` reset, unless the book already has a fresh `queued` sibling,
-in which case the interrupted row is deleted: requeueing both would give
-the book two queued promises and double the provider calls, while the
-sibling's own run recomputes the missing set from scratch anyway.
-Marking it `done` would misreport a crash as a success.
-
-`EnqueueEnrichment` is idempotent against a `queued` row only. A
-`running` job does not block a fresh promise, since it may already be
-past the point where a new request could influence it.
-
-`updated_fields` is a comma-separated list of the fields a run wrote,
-display text for one fragment that is never queried, which is why it is
-not a join table. `MarkEnrichmentDone` stores it in the same statement as
-the terminal state; empty is the ordinary "nothing to add" success.
-
-`FieldSourcesForBook` is the resolver's read of provenance. A field
-absent from the map reads as an empty source, which the missing-field
-rule treats as not-`manual`.
+- **`storagetest.Open` hands a test a copy of a template migrated once per test binary. Every package above `internal/storage` but `cmd/server` opens its database this way, and `SeedSends` seeds `send_log` directly.** Migrating afresh costs twenty times a copy, and seeding `send_log` alone is faithful because history never joins. See `docs/notes/testing.md`.

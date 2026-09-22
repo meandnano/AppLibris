@@ -1,643 +1,399 @@
 # Metadata enrichment
 
-Rationale for `internal/enrich`, `internal/openlibrary`, `internal/googlebooks`,
-`internal/providers` and the enrichment surface of `internal/service`. The
-package map and the invariants that must hold are in CLAUDE.md.
+Rules for `internal/enrich`, `internal/openlibrary`, `internal/googlebooks`,
+`internal/providers` and the enrichment surface of `internal/service`.
 
 ## Sources, in order
 
-A book's metadata comes from its own file first. The OPF package in an EPUB
-and the description block in an FB2 give title, authors, language, often an
-ISBN and a cover, and many books need nothing further. Providers are the
-second source, chained in the order `METADATA_PROVIDERS` lists them, and
-enrichment never blocks a book from appearing: the scanner and the index are
-the source of truth, and enrichment is a background queue running against
-records that already exist.
-
-Enrichment is per book and on request, from the detail page. Nothing
-enriches on scan or on a schedule, and there is no library-wide run.
+- **A book's file is the first source; providers are the second, chained in
+  the order `METADATA_PROVIDERS` lists them.** The scanner and the index are
+  the source of truth.
+- **Enrichment never blocks a book from appearing.** It is a background queue
+  over records the index already holds.
+- **Enrichment is per book and on request from the detail page.** Nothing
+  enriches on scan or on a schedule; see the last section.
 
 ## The resolver and the missing rule
 
-`Resolve(ctx, book, authors, sources, providers)` takes no database and no
-clock. Everything about the book's current state is passed in, so the merge
-logic is testable against fakes with no real provider anywhere.
-
-A field is worth asking a provider for only when it is **both** empty **and**
-not `manual` (`isMissing`, one function with both halves in one place).
-Dropping the emptiness half makes re-enrichment overwrite good embedded
-metadata with a guess. Dropping the `manual` half refills a field someone
-deliberately cleared. An empty value with a `manual` source is a decision,
-not missing data, and a resolver inferring provenance from emptiness would
-undo it.
-
-Providers are asked in order, each only for what is still missing when its
-turn comes. Once the missing set is empty the loop stops without calling the
-rest. The test for this asserts the un-called provider is never called, not
-merely that its answer goes unused.
-
-The same rule is enforced a second time at the write. `Resolve`'s snapshot
-can be minutes stale by the time a provider answers, and `DB.Write`'s single
-connection means a concurrent manual edit has already committed. So
-`storage.ApplyEnrichedFields` re-reads each field's value and provenance
-inside its own transaction and skips any that is no longer missing. Values
-travel as `map[storage.MetadataField]string`, authors newline-joined, the
-same representation the web layer's author textarea uses, so the join-table
-write is storage's job and not this package's. `Resolution.SourceName`
-carries each field's own answerer, since field-level merging means one job
-can legitimately fill fields from two providers.
+- **`Resolve` takes no database and no clock; the book's state is passed
+  in.** The merge logic is then testable against fakes.
+- **`isMissing` is empty and not `manual`, both halves in one function.**
+  Dropping the emptiness half overwrites embedded metadata with a guess;
+  dropping the `manual` half refills a field someone deliberately cleared.
+- **Providers are asked in order, each only for what is still missing, and
+  the loop stops once the set is empty without calling the rest.** The test
+  asserts the un-called provider is never called, not that its answer goes
+  unused.
+- **`storage.ApplyEnrichedFields` re-checks `fieldIsStillMissingTx` per
+  field inside its own transaction and records only what it wrote.**
+  `Resolve`'s snapshot can be minutes stale, and a manual edit has committed
+  by then.
+- **Values travel as `map[storage.MetadataField]string`, authors
+  newline-joined.** That is the author textarea's representation, so the
+  join-table write is storage's job.
+- **`Resolution.SourceName` carries each field's own answerer.** One job can
+  fill fields from two providers.
 
 ## ISBN versus search
 
-A provider is asked by ISBN when the book has one, by title and author
-otherwise. An ISBN lookup that comes back a clean no-match means that
-catalogue lacks the edition, so the same provider is then asked by title in
-the same iteration. An ISBN lookup that *errors* is not followed up: a 5xx
-says nothing about whether the ISBN is right, and searching on it would
-accept a fuzzy answer because a host was briefly unreachable.
-
-A cover-only reply counts as an answer (`Metadata.IsEmpty` includes
-`CoverURL`), so nothing searches past one. A book with no title never
-searches at all, since the gate below would reject whatever came back.
-
-A `Search`-sourced answer never fills `isbn`, even after clearing the gate.
-An identifier has no partial credit, and it is the lookup key every later
-run would use, so a wrong one compounds instead of sitting still. It is
-withheld by dropping `isbn` from the missing set as soon as the search path
-is taken, which also lets the early stop fire for a book with no ISBN: a
-field that can never be filled would otherwise keep the set non-empty and
-spend a call on every remaining provider, on every run. The consequence
-reads as a bug and is not: enrichment cannot write `isbn` by any route. The
-field is only missing for a book that has none, such a book only reaches a
-provider through `Search`, and there the value is withheld.
+- **A provider is asked by ISBN when the book has one, by title and author
+  otherwise.**
+- **An ISBN no-match falls back to `Search` in the same iteration; an ISBN
+  error does not.** A no-match means that catalogue lacks the edition. A 5xx
+  says nothing about the ISBN, so searching on it accepts a fuzzy answer
+  because a host was briefly unreachable.
+- **A cover-only reply counts as an answer.** `Metadata.IsEmpty` includes
+  `CoverURL`, so nothing searches past one.
+- **A book with no title never searches.** The gate would reject whatever
+  came back.
+- **A `Search` answer never fills `isbn`, so enrichment cannot write `isbn`
+  by any route.** An identifier has no partial credit and is the key every
+  later run uses. It is withheld by dropping `isbn` from the missing set on
+  the search path, which is also what lets the early stop fire for a book
+  with no ISBN.
 
 ## The plausibility gate
 
-A search endpoint answers with a ranking, and a ranking is not an
-identification. The books that reach the search path are the ones with the
-least to match on, and their stored title is frequently the filename. So a
-`Search`-sourced answer must clear `plausibleMatch` (`match.go`) before any
-of it is merged. A `ByISBN` answer never does: an ISBN names one edition, so
-the answer is about this book by construction, and gating it would reject
-correct data over a differing title string.
-
-The gate lives in the resolver, not in the provider clients, because it is
-the one place that knows which path was taken, and because it has to be
-testable against fakes.
-
-**Title match is required; author overlap is a veto, never a pass.** Both
-providers bind the author into the query, so an author match only confirms
-they honoured a constraint this package supplied. "Titles match *or* authors
-match" accepts any Stephen King novel for any Stephen King file. Overlap is
-consulted only when both sides have authors; an authorless answer is silence
-rather than disagreement.
-
-Titles are compared as **delimited segments**. A title is split at
-`:;,()[]{}—–/|`, and at `-.?!` only when the separator also carries
-whitespace, since each of those has a word-internal meaning: `" - "` is a
-dash where `"Twenty-One"` is a compound, `". "` ends a segment where
-`"J.R.R."` does not. The period is there for the Russian `"Series. Title"`
-convention, and its cost is that an abbreviation splits a title, so `"No"`
-matches `"Dr. No"`. Two titles match when their segments agree pairwise, or
-when a one-segment title equals a segment of a title with at most
-`maxSegments` (2) parts. Each of three cheaper rules gets a real case wrong:
-
-- Substring matching lets "It" match "Italy", so words are compared whole.
-- Undelimited containment lets "Dune" match "Dune Messiah": a delimiter is
-  the only thing separating a subtitle from a sequel, since "The Hobbit"
-  stands behind a `:` in "The Hobbit: 75th Anniversary Edition" and behind
-  nothing but a space in "The Hobbit Companion".
-- Matching any delimited segment lets "Hamlet" match "Shakespeare: Hamlet,
-  Othello, Macbeth". A contents list is not a subtitle, and the segment
-  count is what tells them apart.
-
-The author veto rescues none of these: a sequel and a collected edition both
-share their author. One-word and series titles are the shapes to test
-against, since they are common in exactly the sparse population this path
-serves. The matched segment may be either of the two, so a series-prefixed
-answer matches on its last part.
-
-A known limit: a two-segment answer whose second part *describes* the book
-still matches, so "The Hobbit" accepts "The Hobbit: A Study Guide".
-Separating an edition note from a companion volume needs the words' meaning,
-not their punctuation.
-
-Text is case-folded with `cases.Fold` rather than `strings.ToLower`, which
-maps `Σ` to `σ` unconditionally and never matches natively written Greek
-ending in `ς`. It is then NFD with combining marks dropped, so decomposed
-text (what macOS filenames produce) equals composed text and diacritics fold
-away as `books_fts`'s `remove_diacritics 2` does. Spacing marks (`Mc`/`Me`)
-continue a word rather than splitting it, or Indic vowel signs shred a title
-into one-letter fragments. One leading English article is optional per
-segment, not per title, since a segment is not always at its title's edge.
-Neither the folding nor the normalisation can be hand-rolled, which is why
-`match.go` is the one file in the package importing outside the standard
-library; `golang.org/x/text` is already in the module through
-`golang.org/x/image`.
-
-`maxTitleTokens` (64) refuses an absurd title outright. The matcher is
-quadratic and runs on a provider's raw title before `sanitizeValue` caps
-anything, while a provider client bounds only the whole response.
-
-A rejected answer is a no-match, not a failure: the chain continues with the
-missing set intact, no provenance is recorded, no cover is taken, and
-`Failed` is unchanged. The rejection is logged at `Debug` with a `reason`
-(`title_mismatch` or `author_veto`), since an author veto otherwise shows two
-titles that look like a fine match. The accepting `Info` line is emitted
-after the merge and only when the answer contributed something, because it
-exists to explain a field's value.
-
-Most filename-titled books therefore resolve to nothing, and that is the
-intended outcome. An empty field is recoverable; a plausible wrong answer is
-written, provenanced under the provider's name, and by the missing rule
-never reconsidered.
-
-**A `language` from a search answer is accepted**, though the gate says
-nothing about language and a correctly identified volume can carry a wrong
-one — a captured Portuguese *O Alquimista* credited to Paulo Coelho, its
-language `en`. Withholding it the way `isbn` is withheld would drop the
-four correct values measured over the Russian no-ISBN population this path
-exists for to avoid that one. The wrong value is a single visible field,
-it carries the provider marker the detail page renders for any
-provider-supplied value, and correcting it by hand makes it `manual` and
-therefore untouchable afterwards. Refusing the cross-language mismatches
-it *can* see — a transliterated title is a title mismatch — is the gate
-working as designed.
+- **A `Search` answer must pass `plausibleMatch` before any of it is merged;
+  a `ByISBN` answer never does.** A ranking is not an identification, where
+  an ISBN names one edition and gating it would reject correct data over a
+  differing title string.
+- **The gate lives in the resolver, not in the provider clients.** The
+  resolver is the one place that knows which path was taken.
+- **Title match is required; author overlap is a veto and never a pass.**
+  Both providers bind the author into the query, so an author match only
+  confirms a constraint this package supplied. Overlap is consulted only
+  when both sides have authors.
+- **Titles are compared as delimited segments, never as substrings or
+  undelimited runs.** A title is split at `:;,()[]{}—–/|`, and at `-.?!`
+  only beside whitespace, since those have word-internal meanings. Titles
+  match when their segments agree pairwise, or when a one-segment title
+  equals a segment of a title with at most two parts, `maxSegments`, on
+  either side. Substrings let "It" match "Italy", undelimited containment
+  lets "Dune" match "Dune Messiah", and an unbounded segment count lets
+  "Hamlet" match a collected edition; the author veto rescues none of these.
+- **A two-segment answer whose second part describes the book still
+  matches.** "The Hobbit" accepts "The Hobbit: A Study Guide"; telling an
+  edition note from a companion volume needs the words' meaning. A known
+  limit.
+- **Text is case-folded with `cases.Fold`, not `strings.ToLower`.**
+  `ToLower` never matches Greek ending in `ς`.
+- **Text is NFD with combining marks dropped; spacing marks continue a
+  word.** Decomposed text, as macOS filenames produce, then equals composed
+  text, and splitting on Indic vowel signs shreds a title into fragments.
+- **One leading English article is optional per segment, not per title.** A
+  segment is not always at its title's edge.
+- **`match.go` is the one file in the package importing outside the standard
+  library.** Neither the folding nor the normalisation can be hand-rolled.
+- **`maxTitleTokens`, 64, refuses an absurd title outright.** The matcher is
+  quadratic and runs on a raw title before `sanitizeValue` caps anything.
+- **A rejected answer is a no-match, not a failure.** The chain continues
+  with the missing set intact, no provenance is recorded, no cover is taken,
+  and `Failed` is unchanged.
+- **A rejection is logged at Debug with a `reason`; the accepting Info line
+  is emitted after the merge and only when the answer contributed.** An
+  author veto otherwise shows two titles that look like a fine match.
+- **Most filename-titled books resolve to nothing, and that is intended.** An
+  empty field is recoverable; a plausible wrong answer is never reconsidered.
+- **A `language` from a search answer is accepted, not withheld like
+  `isbn`.** Withholding it would drop the correct values measured over the
+  no-ISBN population to avoid one wrong field that is visible, marked and
+  correctable.
 
 ## Sanitising values
 
-Every value a provider supplies passes through `sanitizeValue` before it
-reaches the result map: trimmed, capped, and stripped of line breaks for
-every field but description. `ApplyEnrichedFields` is a second writer to the
-same columns `internal/service`'s `normalizeField` guards for a person's
-edit, and it never passes through that function, so this is the only thing
-bounding what a remote source can store.
-
-`sanitizeValue` is `storage.CapField` under this package's name. The
-derivation lives below every writer of those columns rather than in each of
-them: a person's edit in `internal/service`, a provider's answer here, what
-a file had embedded in it in `internal/scanner`, and what
-`internal/importer` shows of a file before any of that. None of them
-restates a number, because a value one writer stores but another's
-validation would reject is a field the app can no longer edit: opening the
-editor and pressing Save unchanged then fails on a value nobody typed.
-`internal/service` shares the limit and not the derivation, since it refuses
-an over-long edit where the others truncate. Author names are sanitised one
-at a time and re-joined, since the join character is itself a newline.
-
-A description keeps its line breaks — it is the one field that does — and
-is additionally capped at two consecutive newlines: at most one blank line
-between paragraphs. `.detail__description` renders those breaks, so what a
-provider sends is what a reader sees, including the four blank lines a
-scraped blurb arrives with. The cap is `storage.CapBlankLines`, which `CapField` applies to every
-description and `PlainDescription` also ends on, so the property belongs to
-the column rather than to one client — which is where the next provider will
-need it.
-CRLF is folded to LF first, so a Windows-authored description is not left
-with a stray carriage return mid-paragraph.
+- **Every provider value passes through `sanitizeValue`, which is
+  `storage.CapField` under this package's name; no writer restates a
+  number.** A value one writer stores but another's validation rejects is a
+  field the app cannot edit. `internal/service` shares `FieldLimit` only,
+  since it refuses an over-long edit where the others truncate.
+- **Author names are sanitised one at a time and re-joined.** The join
+  character is itself a newline.
+- **A description keeps its line breaks and is capped at two consecutive
+  newlines by `storage.CapBlankLines`, which `CapField` applies.** The same
+  cap runs on the way in, through `PlainDescription` in `internal/epub` and
+  `annotationText` in `internal/fb2`, so the property belongs to the column.
+  A person's edit is not capped: `normalizeField` shapes no further, since
+  the blank lines someone typed are their own.
+- **CRLF is folded to LF first.** A Windows-authored description otherwise
+  keeps a stray carriage return mid-paragraph.
+- **`sanitizeValue` does not flatten markup.** Google's description is HTML
+  and `internal/googlebooks` flattens it through `storage.PlainDescription`
+  before it leaves that package; Open Library's is plain, and a blanket
+  strip would answer for a source that never sends markup.
 
 ## Covers
 
-A cover is resolved like any other field but kept out of the value map.
-`Resolve` returns it separately as `CoverURL`/`CoverSource`, because `Values`
-carries only strings that go straight into a column and a cover's path does
-not exist until the image has been downloaded and stored, I/O `Resolve`
-never performs. Missing-set membership, first-answer-wins and the early stop
-all apply, so a book whose `cover_path` is set is never handed a cover URL
-and nothing is downloaded for it.
-
-The worker fetches through `FetchCover` on its own `*http.Client`
-(`coverFetchTimeout`), since the URL may name a host unrelated to the
-provider that answered (Open Library's covers live on a separate domain).
-The read is capped at `MaxCoverBytes` (512 KiB) before any decoding, and a
-scheme other than `http`/`https` is refused. The client re-applies that check
-on every redirect hop and bounds the hop count (`CheckCoverRedirect`),
-because a redirect's target is chosen by whichever host answered, so
-checking only the first URL guards nothing. The request carries the same
-descriptive `User-Agent` both provider clients set: the answering host is
-most often Open Library's own, and a throttle there would arrive as an
-ordinary fetch failure with nothing naming the cause.
-
-**The fetch refuses private and local addresses**, at dial time, on every
-hop: loopback, RFC 1918 and the IPv6 unique-local range, link-local
-unicast (where a cloud metadata endpoint lives), multicast, and the
-unspecified address (`RefusePrivateAddress`, applied through the cover
-client's `net.Dialer.Control`). A cover URL is chosen by whichever host
-answered a lookup, and each hop after it by whichever host answered the
-one before, so without this the fetch is a blind GET at any address the
-deployment can reach — another container on the same Docker network, a
-router's admin page, the metadata service. Only image bytes are ever kept,
-so the exposure is small; small is not bounded.
-
-At dial rather than on the URL's host, because a URL check catches only
-the literal a provider named. `Control` runs once per candidate address
-after resolution and immediately before the connect, so a hostname that
-resolves to a public address when the URL is inspected and a private one
-when the connection is made is caught, and so is a redirect to a bare
-private IP, without `CheckCoverRedirect` having to parse it. Resolving by
-hand and then dialing the hostname would reopen exactly the window the
-check exists to close. A refused dial surfaces as an ordinary fetch
-failure, which the worker already tolerates, with the address at Debug so
-a deliberate local mirror can be diagnosed.
-
-It is a deny list of the ranges unreachable from the internet rather than
-an allow list of public ones: an allow list needs revising every time IANA
-assigns a block, and a cover host is an ordinary public server. A host
-allowlist was the other candidate and is worse here —
-`covers.openlibrary.org` legitimately redirects to archive.org backends
-and Google's image hosts vary, so it would refuse real covers to close
-what an address check closes precisely.
-
-The `Worker`'s cover tests fetch through its own transport from an
-`httptest.Server` on loopback, which the guard refuses by design, so the
-`Worker` holds the predicate as a field and the tests replace it through a
-helper that only `_test.go` files can reach. A test that needs the fake
-clock instead swaps in an in-memory transport through a second such
-helper; that transport never dials, so the guard never runs, and the guard
-tests use neither. Production has no switch that turns the guard off.
-
-`MaxCoverBytes` here is deliberately smaller than `cover.MaxCoverBytes`
-(8 MiB) and not an alias of it. It is a network bound, and
-`internal/googlebooks` chose which cover size to request by measuring
-against exactly this figure, so raising it would silently make that choice
-wrong. A downloaded cover is under the store's cap by construction.
-
-The image is converted exactly as the scanner converts an embedded one
-(`cover.Store`: resized, JPEG, named by the book's content hash, never by
-the URL) and the path is folded into `Values` under `storage.FieldCover`.
-A fetch or store failure loses only the cover: it is logged and the field
-left out, since it must not fail a job whose text fields resolved.
+- **A cover is resolved like any other field but returned separately as
+  `CoverURL`/`CoverSource`, kept out of `Values`.** `Values` carries only
+  strings that go straight into a column, and a cover's path does not exist
+  until the image is stored, I/O `Resolve` never performs.
+- **A book whose `cover_path` is set is never handed a cover URL.**
+  Missing-set membership and the early stop apply to the cover too.
+- **Providers name a cover URL and never download it; the worker fetches
+  through `FetchCover` on its own client, `coverFetchTimeout`.** Fetching
+  inside the provider would spend a download on every lookup and put image
+  bytes into `WithCache`. The URL may also name a host unrelated to the
+  provider.
+- **The read is capped at `MaxCoverBytes`, 512 KiB, before any decoding, a
+  scheme other than `http`/`https` is refused, and `CheckCoverRedirect`
+  re-applies the scheme check and bounds the hop count on every redirect.**
+  A redirect's target is chosen by whichever host answered, so checking only
+  the first URL guards nothing.
+- **The cover request carries the same descriptive `User-Agent` both
+  provider clients set.** The answering host is most often Open Library's
+  own, and a throttle there arrives as a fetch failure naming no cause.
+- **`RefusePrivateAddress` refuses loopback, private, link-local, multicast
+  and unspecified addresses at dial time, through `net.Dialer.Control`, on
+  every hop.** Without it the fetch is a blind GET at any address the
+  deployment can reach, chosen by whichever host answered the hop before.
+- **The guard runs at dial, not on the URL's host.** `Control` runs per
+  candidate address immediately before the connect, so a hostname resolving
+  to a private address only at connect time is caught, and so is a redirect
+  to a bare private IP.
+- **It is a deny list of the ranges unreachable from the internet, not an
+  allow list of public ranges or hosts.** An allow list needs revising every
+  time IANA assigns a block, and `covers.openlibrary.org` legitimately
+  redirects to archive.org backends.
+- **A refused dial surfaces as an ordinary fetch failure, with the address at
+  Debug.** The worker already tolerates that failure, and a deliberate local
+  mirror can be diagnosed.
+- **The `Worker` holds the guard as a field that only a `_test.go` helper
+  replaces; production has no switch.** The cover tests fetch from an
+  `httptest.Server` on loopback, which the guard refuses by design.
+- **`enrich.MaxCoverBytes` and `cover.MaxCoverBytes` are separate constants,
+  never aliases.** This one is a network bound, and `internal/googlebooks`' cover-size
+  choice is calibrated against exactly this figure.
+- **The image goes through `cover.Store`, named by the book's content hash,
+  and the path is folded into `Values` under `storage.FieldCover`.**
+- **A fetch or store failure loses only the cover.** It is logged and the
+  field left out; it must not fail a job whose text fields resolved.
 
 ## Job outcomes
 
-`failed` is reserved for the job itself going wrong: the book vanished
-between enqueue and claim, a write failed, no provider the run asked could
-answer, or a run whose only result was a cover it could not save. A provider
-having nothing to say is the ordinary case for most books against most
-providers and is a `done` job with an empty field list, which the UI renders
-as "Nothing to add". Rendering that as a failure would train people to
-distrust a working feature.
-
-**Every provider asked failed** is `failed` with `allProvidersFailedReason`.
-`Resolve` returns `Asked` (providers actually called, not configured, since
-the early stop routinely skips some) and `Failed`, and the worker's rule is
-`Asked > 0 && Failed == Asked`. `Failed == Asked` rather than `Failed > 0`
-because one throttled provider beside one that answered cleanly and had
-nothing is still a run that learned something. `Asked > 0` keeps the two
-honest zero-provider successes (nothing missing, and `METADATA_PROVIDERS=`)
-out of it. Without this rule a run in which every provider answered 429 is
-stored identically to an honest no-match and shown in the success
-treatment, a false statement to the one person who asked.
-
-**A lost cover fails the job only when nothing else was written**
-(`coverLostReason`, which names the cover rather than reusing the
-all-providers reason, since a provider did answer and the failure is on this
-side). A run that resolved text fields and lost its cover stays `done`. For
-a book whose only missing field was the cover there are no text fields to
-protect, so the tolerance above would report "Nothing to add" for a cover
-the run found and dropped. The check sits after the store, because a
-successful store has just put `FieldCover` into `Values`.
-
-A step failing while `ctx` is already cancelled is an abandoned attempt, not
-a verdict. The worker leaves the row `running` for
-`storage.RequeueInterruptedEnrichment` to requeue at startup, the inverse of
-`internal/sender`'s recovery. An enrichment job's only effect is writing
-fields a pure function computed from data already in the database, so
-running it again lands the same values, where a send's effect is not
-repeatable. A permanent `failed` row here has no "retry is a new row"
-affordance behind it and would leave a book silently never reconsidered.
-The all-providers-failed branch guards itself with its own `ctx.Err()` check
-for the same reason: during a shutdown every provider fails, which is
-indistinguishable from every provider being unable to answer.
-
-**A panic inside `process` is recovered and recorded as `failed`** with
-`crashedReason`, the panic value and `debug.Stack()` going to the log at
-Error. The row must not stay `running`: `RequeueInterruptedEnrichment`
-puts a running job back on the queue at the next start and `Run` drains
-immediately, so the same input panics again — under a container restart
-policy, a loop with no exit but editing the row by hand. `failed` breaks
-that and puts Retry on the page, which is where the decision belongs once
-the log has said why. The reason is a sentence rather than the panic's own
-text, which carries a Go type name and sometimes a URL or a key fragment
-and never anything a person can act on.
-
-Recovered per job rather than in `Run`'s loop, where the job id is no
-longer in hand and the row would be left in exactly the state the requeue
-turns into the loop. `internal/sender` carries the same guard against a
-smaller version of the same shape (`sending.md`).
-
-`enrichment_jobs.book_id` cascades on delete, unlike `send_log.book_id`. A
-job is a pending intention about a book and is meaningless once the book is
-gone, where a send log entry is the record that a thing happened. The
-`bookGoneReason` the worker records exists only for the narrow race where a
-claim and the deletion interleave.
+- **`failed` means the job itself went wrong: the book gone, a write failed,
+  `Asked > 0 && Failed == Asked`, a lost cover with nothing else written, or
+  a recovered panic. "Nothing to add" is `done`.** A provider having nothing
+  to say is the ordinary case, and rendering it as a failure teaches people
+  to distrust a working feature.
+- **`Asked` counts providers actually called, not configured; the rule is
+  `Failed == Asked`, not `Failed > 0`, and `Asked > 0` keeps the
+  zero-provider successes out.** One throttled provider beside one that
+  answered cleanly is still a run that learned something, where a run in
+  which every provider answered 429 must not read as an honest no-match.
+- **A lost cover fails the job with `coverLostReason` only when nothing else
+  was written, and the check sits after the store.** For a book whose only
+  missing field was the cover, tolerating the loss would report "Nothing to
+  add" for a cover the run found and dropped.
+- **A step failing with `ctx` already cancelled leaves the row `running` for
+  `storage.RequeueInterruptedEnrichment`; never `MarkEnrichmentFailed`
+  there.** Running the job again lands the same values, where a send's
+  effect is not repeatable.
+- **Every terminal branch, the all-providers-failed one included, guards
+  itself with its own `ctx.Err()` check.** During a shutdown every provider
+  fails, which is indistinguishable from every provider being unable to
+  answer.
+- **A panic inside `process` is recovered and the row written `failed` with
+  `crashedReason`; the panic value and stack go to the log at Error, never
+  the status box.** A row left `running` is requeued at the next start and
+  drained immediately, so the same input panics again in a loop with no
+  exit. The panic's own text can carry a URL or a key fragment.
+- **The recover is per job, in `process`, not in `Run`'s loop.** In the loop
+  the job id is out of hand and the row is left in exactly the state the
+  requeue turns into the loop. `internal/sender` carries the same guard
+  (`docs/notes/sending.md`).
+- **`enrichment_jobs.book_id` cascades on delete.** A job is a pending
+  intention about a book and is meaningless once the book is gone;
+  `bookGoneReason` exists only for the claim-versus-delete race.
 
 ## Providers: Open Library
 
-Open Library models a **work** (the book as written) separately from an
-**edition** (one publication of it), and the two lookup paths hit different
-endpoints because of it. An ISBN names one edition, so `ByISBN` uses the
-edition-scoped Read API (`/api/volumes/brief/isbn/{isbn}.json`) and reads
-both blocks of its response: `data` is the only place author names appear,
-`details.details` the only place language and description do.
-
-`Search` stays on `/search.json`, which answers about works, and therefore
-returns **neither language nor publication date**. That endpoint's `language`
-is every language any edition was ever published in (31 of them, starting
-`bul`, for an English printing of *The Hobbit*), and its date is the work's
-first publication. Leaving both empty keeps them missing, so the chain offers
-them to the next provider and a person can still fill them by hand. A wrong
-value reads as answered and is never reconsidered.
-
-Two response shapes are easy to get wrong. An unknown ISBN is answered with a
-bare `[]`, a JSON array where a match is an object, so the body is checked
-before unmarshalling: decoding it into the response struct fails with a type
-error, and reporting the ordinary no-match as a parse failure would make an
-obscure book look like a broken provider. And `description` is either a
-`{"type", "value"}` object or a bare string in the same position
-(`textValue` tries both).
-
-MARC three-letter language codes are mapped to ISO 639-1 (`marcToISO639`),
-listing only the languages this library plausibly contains and passing
-anything else through unchanged, so the column does not hold `eng` for one
-book and `en` for the next. This does not make the column consistent on its
-own: `internal/epub` and `internal/fb2` pass a file's own value through, and
-EPUB's `dc:language` is BCP-47 by specification.
-
-Both cover URLs are built by one `coverURL` helper and carry
-`?default=false`, so a cover id with no image behind it is a `404` rather
-than a `200` and a stand-in. Measured against id 999999999: bare, it
-answers `200` and 43 bytes of 1x1 GIF; with the parameter, `404`. Nothing
-downstream can tell a stand-in from a cover — `FetchCover` sees a 200 and
-some bytes, and whatever survives `cover.Store` is written under this
-provider's name and, by the missing rule, never reconsidered — while a 404
-is a failed fetch the worker already handles, leaving the book an honest
-empty cover and a place in the next provider's missing set. A stale
-`cover_i` is ordinary in search results, so this is the common case rather
-than a corner. One helper for both call sites, or the parameter goes on one
-path and not the other.
-
-The client sets a descriptive `User-Agent`. Open Library's terms ask for one
-and throttle the generic Go default, and a block there is indistinguishable
-from any other transient failure, so the resolver would silently skip the
-provider for every book.
+- **`ByISBN` uses the edition-scoped Read API and reads both `data` and
+  `details.details`.** An ISBN names one edition; `data` is the only place
+  author names appear, `details.details` the only place language and
+  description do.
+- **`Search` stays on `/search.json`, which answers about works, and returns
+  neither language nor publication date.** That endpoint's `language` is
+  every language any edition was published in and its date is the work's
+  first; a wrong value reads as answered and is never reconsidered.
+- **An unknown ISBN is a bare `[]`, checked before unmarshalling.** Decoding
+  it into the response struct fails with a type error, which would make an
+  obscure book look like a broken provider.
+- **`description` is a `{"type", "value"}` object or a bare string in the
+  same position; `textValue` tries both.**
+- **MARC language codes are mapped to ISO 639-1 by `marcToISO639`; a code it
+  does not list passes through unchanged.** The column otherwise holds `eng`
+  for one book and `en` for the next.
+- **Both cover URLs come from one `coverURL` helper and carry
+  `?default=false`.** Without it a stale `cover_i` answers `200` and a
+  placeholder nothing downstream can tell from a cover, stored under this
+  provider's name and never reconsidered; with it, a `404` the worker already
+  handles.
+- **The client sets a descriptive `User-Agent`.** Open Library throttles the
+  generic Go default, and a block there is indistinguishable from any other
+  transient failure.
 
 ## Providers: Google Books
 
-The list endpoint (`GET /volumes?q=`) names only `smallThumbnail` and
-`thumbnail` however large the volume's art is, and `thumbnail` is about
-195px on the long edge, under `internal/cover`'s 400px target, which never
-upscales. The sizes `small` through `extraLarge` exist only on
-`GET /volumes/{id}`, so `enrichVolume` makes a second request for any volume
-that matched and named an id, refusing a reply whose own `id` is not that
-one (an absent `id` included, since letting `""` pass would make the check
-opt-out by the party being checked). It takes the detail response's
-description while it is there: the list endpoint's description arrives with
-its markup already flattened, paragraph breaks and all, where the detail
-endpoint's is fuller text. It fails silently, leaving the list answer's
-thumbnail and description as they were, since a lookup holding six good text
-fields must not fail over a nicety.
-
-Two costs are priced in. The second request is made before `plausibleMatch`
-sees the answer, so a rejected hit has already paid for it, and it is made
-whether or not the resolver needs a cover or description, since a provider
-has no view of the missing set. `WithRateLimit` gates the method, not the
-HTTP call, so one token covers two requests; the worst case for one book is
-three requests on two tokens, times `DefaultRetryAttempts` on a 429.
-
-`best()` prefers `medium`, then `large`, then `small`, then `thumbnail`, and
-`extraLarge` is absent from the struct. Every size from `medium` (~880px) up
-clears the 400px target, so a bigger one only decides how many pixels
-`cover.Store` throws away, while `extraLarge` runs 350 to 800 KB against
-`enrich.MaxCoverBytes`' 512 KiB ceiling, where a cover past the cap is
-refused rather than downsized. Taking the largest link turns a good cover
-into no cover. Rewriting the thumbnail URL's `zoom` parameter is the other
-shortcut to avoid: for a size a volume lacks, Google answers `200
-image/jpeg` with an "image not available" placeholder that nothing
-downstream can tell from a cover. Only a URL Google itself named is safe to
-fetch. Open Library has the same placeholder in a form it can be asked not
-to send, which is what `?default=false` does there.
-
-Status classification is measured rather than read from the docs: a
-**rejected key is 400** (`API_KEY_INVALID`), an **exhausted quota is 429**
-for both the per-day and per-minute limits, and **403 is the service not
-being enabled** for the project. 400 and 403 are configuration and are not
-retried; 429, 5xx and transport failures wrap `enrich.ErrRetryable`. A
-per-day 429 is therefore retried three times over a quota that will not
-clear for hours; Google names the limit in the body and sends no
-`Retry-After`, so telling the two apart is possible and left to whatever
-revisits `WithRetry`.
-
-`intitle:`/`inauthor:` values are quoted, which is load-bearing: the API
-binds a qualifier to the single token after it, so an unquoted multi-word
-title constrains only its first word. BCP-47 tags are cut to their primary
-subtag (`baseLanguage`), since the API answers `pt-BR` and `zh-CN` and the
-primary subtag is already ISO 639-1 in every observed value. That drops
-script and variant too, so `zh-Hant` and `zh-Hans` both become `zh`, accepted
-because the column is one short code that three other writers fill without
-any subtag.
-
-Google's description is HTML on the detail endpoint and is rendered to plain
-text through `storage.PlainDescription` before it leaves the package: block
-tags become line breaks, inline ones are dropped, entities are unescaped only
-afterwards so text that was itself escaped markup survives as the characters
-an author wrote. Nothing downstream treats a description as markup, so a tag
-left in shows a reader a literal `<p>` and offers it back in the edit
-textarea. The derivation sits in `internal/storage` because `internal/epub`
-needs the same one for `dc:description`; `storage.md` carries why, and it is
-called here rather than in `sanitizeValue` because Open Library's edition
-description is plain to begin with and a strip applied to every provider
-answers for a source that never sends markup. Paragraph breaks reach the
-column and the page alike: `.detail__description` renders with
-`white-space: pre-line`.
-
-A detail-request failure leaves the list answer exactly as it was and marks
-it `Metadata.Partial`. `WithCache` declines to store a partial answer, so
-the next lookup for that key asks again and the second request gets another
-chance. Without the mark one transient failure would be remembered as a
-complete answer for the life of the process, costing that book its larger
-cover and fuller description until a restart. Every failure counts — a
-non-200, a malformed body, a body naming another volume — because each
-leaves the same two fields unfilled and each might not happen next time.
-Nothing else reads `Partial`: `Resolve` counts the answer as answered, so
-it lands in `Asked` and not in `Failed`.
-
-The optional `apiKey` travels in the query string and is scrubbed from every
-returned error's text (`redactKey`), in raw and percent-encoded form, since
-a transport error embeds the full request URL. The redacting error keeps an
-`Unwrap`, so `errors.Is(err, context.Canceled)` works whether or not a key is
-configured. The same credential is the stronger of the two reasons the
-shared redirect policy refuses a hop that **leaves the host the lookup
-started against**: net/http sets `Referer` on every hop from the previous
-request's full URL, suppressing it only on https→http, so an ordinary
-https→https redirect hands `?key=…` to whichever host answered. Moving the
-key to a header would not substitute, since Go forwards non-sensitive
-headers across hosts. The weaker reason applies to both clients and is
-under Shared provider contract.
-
-`GOOGLE_BOOKS_API_KEY` is optional in the sense that startup only warns
-without it, but the anonymous quota is shared across every keyless caller
-and has been observed exhausted on every attempt. A keyless deployment should
-expect this provider to answer 429 and be skipped; it degrades quietly
-because Open Library still answers. The key never reaches a log line.
+- **`enrichVolume` makes a second request to `/volumes/{id}` for any matched
+  volume naming an id, and refuses a reply whose own `id` is not that one,
+  an absent `id` included.** The list endpoint's `thumbnail` is about 195px,
+  under `internal/cover`'s 400px target, and the larger sizes and the fuller
+  description exist only on the detail endpoint. Letting `""` pass makes the
+  check opt-out by the party being checked.
+- **A detail-request failure marks the answer `Metadata.Partial` and leaves
+  the list answer standing; it never fails the lookup.** A lookup holding six
+  good text fields must not fail over a nicety.
+- **`Metadata.Partial` describes the answer, not the book; only `WithCache`
+  reads it, and only to decline storing.** Without the mark one transient
+  failure is remembered as a complete answer for the life of the process.
+  `Resolve` and `IsEmpty` ignore it, so a partial answer lands in `Asked`.
+- **`WithRateLimit` gates the method, not the HTTP call.** One token covers
+  both requests, and the second is made before `plausibleMatch` sees the
+  answer, so a rejected hit has already paid for it.
+- **`best()` prefers `medium`, then `large`, `small`, `thumbnail`, and omits
+  `extraLarge`.** Every size from `medium` up clears the 400px target, while
+  `extraLarge` runs 350 to 800 KB against `enrich.MaxCoverBytes`, where a
+  cover past the cap is refused rather than downsized.
+- **Never rewrite a thumbnail URL's `zoom` parameter.** For a size a volume
+  lacks, Google answers `200 image/jpeg` with a placeholder nothing
+  downstream can tell from a cover.
+- **A rejected key is 400, an exhausted quota is 429, a service not enabled
+  is 403; 400 and 403 are not retried, while 429, 5xx and transport failures
+  wrap `enrich.ErrRetryable`.** These are the observed answers, not the documented ones.
+  A per-day 429 is therefore retried over a quota that will not clear for
+  hours; Google sends no `Retry-After`, and telling the two apart is left to
+  whatever revisits `WithRetry`.
+- **`intitle:`/`inauthor:` values are quoted.** The API binds a qualifier to
+  the single token after it.
+- **BCP-47 tags are cut to their primary subtag by `baseLanguage`.** The API
+  answers `pt-BR` and `zh-CN`, and the column is one short code that three
+  other writers fill without any subtag.
+- **The description is HTML and is flattened through
+  `storage.PlainDescription` before it leaves the package.** Nothing
+  downstream treats a description as markup, so a tag left in shows a reader
+  a literal `<p>`. The derivation lives in `internal/storage` because
+  `internal/epub` needs the same one.
+- **`apiKey` is scrubbed from every returned error's text by `redactKey`, in
+  raw and percent-encoded form, and the redacting error keeps `Unwrap`.** A
+  transport error embeds the full request URL, and `errors.Is(err,
+  context.Canceled)` must work whether or not a key is configured.
+- **The shared redirect policy refuses a hop leaving the starting host; on
+  Google that guards the key.** net/http sets `Referer` from the previous
+  request's full URL on every hop but https to http, so an ordinary redirect
+  hands `?key=` to whichever host answered. A header would not substitute,
+  since Go forwards non-sensitive headers across hosts.
+- **`GOOGLE_BOOKS_API_KEY` is optional: startup only warns without it, and
+  the key never reaches a log line.** The anonymous quota is shared across
+  every keyless caller and is routinely exhausted, so a keyless deployment
+  sees this provider answer 429 and be skipped.
 
 ## Shared provider contract
 
-Both clients build their own `*http.Client` with an 8-second `Timeout`,
-sized short because enrichment is a background nicety nobody is waiting
-on. `ByISBN` normalises its argument exactly as `internal/epub` normalises
-a stored ISBN so the lookup key round-trips. Both return their **top hit
-unchecked**: judging whether a ranking's first result is the book in hand is
-the resolver's `plausibleMatch`.
-
-Both implement the same four-case contract. A 200 with no results and a
-defensive 404 are a zero `Metadata` with a nil error, since a missing record
-is an answer and the common case. A 429, any 5xx and a transport failure are
-errors wrapping `enrich.ErrRetryable`. Folding the first two into the third
-would turn "this book is obscure" into a logged error on most books, and an
-error log that fires constantly is one nobody reads.
-
-Both carry the same redirect policy, and it is one function rather than a
-copy each: `enrich.CheckLookupRedirect`, over `enrich.SameHost`. Two copies
-of a check that decides whether a credential leaves the host is not a thing
-to let drift. It bounds the hops, checks every hop's scheme rather than
-only the first URL's, and refuses a hop that leaves the starting host or
-drops off TLS. A same-host downgrade is a clause of its own, because a
-`Location` writing the port out on both sides compares equal under
-`SameHost`'s default-port normalisation.
-
-`SameHost` compares as a host and not as a string: case-insensitively, with
-the scheme's default port and an explicit one treated alike, and a fully
-qualified trailing dot ignored. A byte compare admits nothing wrong, but a
-refusal is a lookup failure, so a `Location` that merely spells the same
-host differently would leave enrichment quietly answering nothing for that
-book.
-
-The host clause earns its place twice over, once per client. On Google it
-guards the credential above. On Open Library there is none to guard, and
-the reason is the other one the clause closes for both: a cross-host hop
-makes the client adopt the answering host's whole response, gated by title
-and author on the search path and by nothing at all on the ISBN path.
-Following redirects is not optional there — an ISBN is frequently an alias
-for the canonical edition key — but every hop that API was observed to
-issue stays on `openlibrary.org`: the Read API answers ISBNs directly, and
-the `/isbn/{isbn}` aliases hop once or twice, same-host each time. The
-check costs nothing that was ever seen to work.
-
-**A refused redirect is not retryable**, on either client. Every return in
-the policy wraps `enrich.ErrRedirectRefused`, and each lookup path tests
-for it before the retryable wrap that would otherwise catch it along with
-real transport failures — a refusal arrives as a transport error, since it
-comes back from `Do`. The classification follows from the policy being a
-pure function of URLs that do not change between attempts: a second attempt
-reaches the identical refusal, the same argument already written beside 400
-and 403. Retrying one spends three lookups to be told the same thing three
-times.
-
-A matched result's cover is **named, not downloaded**: it comes back as
-`Metadata.CoverURL` and the fetch is the worker's. Fetching inside the
-provider would spend a round trip and up to `MaxCoverBytes` on every lookup,
-including the common case of a book whose embedded cover makes the answer
-discarded, and would put image bytes into `WithCache`'s map, where 512
-entries times two providers is hundreds of megabytes held for the process's
-lifetime. A `Metadata` of nothing but strings keeps that cache kilobytes.
+- **Both clients build their own `*http.Client` with an 8-second
+  `Timeout`.** Enrichment is a background nicety nobody is waiting on.
+- **`ByISBN` normalises its argument through `storage.NormalizeISBN`.** The
+  stored ISBN is normalised the same way, so the lookup key round-trips.
+- **Both return their top hit unchecked.** Judging whether a ranking's first
+  result is the book in hand is the resolver's `plausibleMatch`.
+- **A 200 with no results and a 404 are a zero `Metadata` with a nil error; a
+  429, any 5xx and a transport failure wrap `enrich.ErrRetryable`.** A
+  missing record is an answer and the common case, and an error log that
+  fires on most books is one nobody reads.
+- **Both carry one redirect policy, `enrich.CheckLookupRedirect` over
+  `enrich.SameHost`, never a copy per package.** It bounds the hops, checks
+  every hop's scheme, and refuses a hop that leaves the starting host or
+  drops off TLS; a check deciding whether a credential leaves the host is
+  not a thing to let drift. The same-host downgrade is a clause of its own
+  because a `Location` writing the port out compares equal under
+  `SameHost`'s port normalisation.
+- **`SameHost` compares as a host, not a string: case-insensitively, with the
+  scheme's default port and an explicit one alike, and a trailing dot
+  ignored.** A refusal is a lookup failure, so a `Location` that merely
+  spells the same host differently would leave enrichment answering nothing.
+- **The host clause holds on Open Library too, where there is no key.** A
+  cross-host hop makes the client adopt the answering host's whole response,
+  gated by nothing at all on the ISBN path. Redirects are still followed,
+  since an ISBN is often an alias for the canonical edition key, and every
+  hop that API issues stays on `openlibrary.org`.
+- **A refused redirect is not retryable: every return in the policy wraps
+  `enrich.ErrRedirectRefused`, and each client tests for it before its
+  retryable wrap.** A refusal comes back from `Do` as a transport error, and
+  the policy is a pure function of URLs that do not change between attempts.
 
 ## Decorators and registry
 
-The three decorators in `decorator.go` wrap a `Provider` and satisfy
-`Provider` themselves, so the resolver cannot tell they are there and each is
-tested against a fake with no HTTP. `WithRateLimit` spaces `ByISBN`/`Search`
-calls at least `DefaultRateLimitInterval` apart across both methods (one a
-second, conservative since Open Library's limit is a courtesy ask) by
-handing each caller the next free slot, and honours `ctx` while waiting
-rather than blocking a shutdown; a caller that gives up hands its slot back.
-Nothing runs between calls, since nothing that builds a limiter ever stops
-one. `WithCache` serves a repeat
-lookup out of a bounded LRU (`DefaultCacheSize`), caching a no-match too,
-since a shelf of obscure books would otherwise re-ask the same negative on
-every run; an error is never cached, since the contract treats it as
-transient. `WithRetry` retries only `ErrRetryable`, up to
-`DefaultRetryAttempts` total with doubling backoff and a `ctx` check between
-attempts. A no-match is never retried, since it is an answer.
-
-`internal/providers` is the compile-time name to constructor map. It lives
-outside `internal/enrich` because both provider packages import that package
-for `Provider` and `Metadata`, so a registry there importing them back would
-be a cycle. Each provider is composed once as
-`WithCache(WithRetry(WithRateLimit(client)))`, and the order reads
-outermost-first because the outermost wrapper is what a call reaches first.
-**Cache outermost**, so an answer already in memory spends neither a
-rate-limit token nor a retry attempt. **Rate limit innermost**, so every
-attempt `WithRetry` makes takes a token of its own. Rate limiting outside
-would make a cached hit wait a full interval, and would leave retries paced
-only by their backoff, sending a provider that just answered 429 three
-requests inside one token.
-
-`METADATA_PROVIDERS` (default `openlibrary,googlebooks`) lists names in
-order. An unknown name **fails startup**, naming it and listing the valid
-ones, where a missing `RESEND_API_KEY` only warns: an unset key means "not
-set up yet", a misspelled provider means "asked for something specific and
-did not get it", and running with fewer providers than configured is the
-kind of shortfall nobody notices for months. A repeated name is kept once at
-its first position, since two chains would mean two caches and two
-rate-limit budgets. `METADATA_PROVIDERS=` resolves to an empty, non-nil
-slice and is the documented way to disable enrichment and make no outbound
-requests; the worker still runs, every job a no-op, the same way an unset
-Resend key makes the sender one.
+- **The three decorators in `decorator.go` satisfy `Provider` themselves.**
+  The resolver cannot tell they are there, and each is tested against a fake
+  with no HTTP.
+- **`WithRateLimit` spaces `ByISBN`/`Search` calls at least
+  `DefaultRateLimitInterval` apart across both methods, honours `ctx` while
+  waiting, hands back a slot a caller abandons, and runs nothing between
+  calls.** Nothing that builds a limiter ever stops one.
+- **`WithCache` is a bounded LRU, `DefaultCacheSize`, that caches a no-match
+  and never an error.** A shelf of obscure books would otherwise re-ask the
+  same negative on every run; an error is transient by contract.
+- **`WithRetry` retries only `ErrRetryable`, up to `DefaultRetryAttempts`
+  total with doubling backoff and a `ctx` check between attempts.** A
+  no-match is an answer and is never retried.
+- **`internal/providers` lives outside `internal/enrich`.** Both provider
+  packages import `internal/enrich`, so a registry there importing them
+  back is a cycle.
+- **Each provider is composed as `WithCache(WithRetry(WithRateLimit(p)))`:
+  cache outermost, rate limit innermost.** A cached answer then spends
+  neither a token nor a retry attempt, and every attempt `WithRetry` makes
+  takes a token of its own rather than sending a provider that just answered
+  429 three requests inside one token.
+- **An unknown `METADATA_PROVIDERS` name fails startup, naming it and
+  listing the valid ones.** Running with fewer providers than configured is
+  a shortfall nobody notices for months; an unset `RESEND_API_KEY` only
+  warns because it means "not set up yet".
+- **A repeated name is kept once, at its first position.** Two chains would
+  mean two caches and two rate-limit budgets.
+- **`METADATA_PROVIDERS=` resolves to an empty, non-nil slice and disables
+  enrichment with no outbound requests.** The worker still runs with every
+  job a no-op, the way an unset Resend key makes the sender one.
 
 ## The service surface
 
-`internal/service` mirrors its send trio: `EnrichBook` enqueues, pokes the
-worker through `NotifyEnrichment` and reads the state back rather than
-synthesising it, since `EnqueueEnrichment` is idempotent while a job is
-queued and what the caller wants either way is the job the book actually
-has. `EnrichmentState` and `LatestEnrichment` shape through
-`enrichmentStateFrom`, collapsing when-did-this-happen to one `At` field the
-same way `sendAt` does. `NotifyEnrichment` is a second function field beside
-`Notify` rather than one multiplexed hook: two queues, two workers, and
-poking the wrong one leaves a job waiting for its poll tick.
-
-The symmetry with sending stays as two parallel surfaces on purpose. An
-abstraction over exactly two cases has no third instance to test its shape
-against, and the two differ in precisely the part that would have to be
-generic: a send's terminal detail is an address and a failure reason, an
-enrichment's is the list of fields it wrote.
-
-`enrichEnabled`, whether any provider resolved, is what the UI receives
-rather than a config flag of its own. A control offering to fetch metadata
-from nowhere cannot do what it says, so with no providers the enrichment
-control renders the same disabled treatment the send control shows without
-Resend, and `NotifyEnrichment` is left nil.
+- **`EnrichBook` enqueues, pokes the worker through `NotifyEnrichment`, and
+  reads the state back rather than synthesising it.** `EnqueueEnrichment` is
+  idempotent while a job is queued, and the caller wants the job the book
+  actually has either way.
+- **`EnrichmentState` and `LatestEnrichment` shape through
+  `enrichmentStateFrom`, collapsing time to one `At` field as `sendAt`
+  does.**
+- **`NotifyEnrichment` is a second function field beside `Notify`, not one
+  multiplexed hook.** Poking the wrong worker leaves a job waiting for its
+  poll tick.
+- **Sending and enrichment stay two parallel surfaces; do not abstract over
+  exactly two cases.** They differ in precisely the part that would have to
+  be generic: a send's terminal detail is an address and a reason, an
+  enrichment's is the list of fields it wrote.
+- **`enrichEnabled` is whether any provider resolved, not a config flag of
+  its own; without one the control renders disabled and `NotifyEnrichment`
+  is nil.** A control offering to fetch metadata from nowhere cannot do what
+  it says.
 
 ## Test fixtures
 
-Every fixture under `internal/googlebooks/testdata` and the two
-`edition_*.json` under `internal/openlibrary/testdata` are live captures of
-the real APIs, including the three Google error bodies that settle the
-status classification above and the same volume captured from both
-endpoints. Only `internal/openlibrary`'s `search_*.json` are shaped after
-the documented response format. Each `_test.go` names which of its fixtures
-is which. Nothing is hand-edited to fit a change: a fixture adjusted until
-the code passes tests the parser against its author's expectations rather
-than against the API, which is how an edition lookup can be years and a
-language wrong with every test green.
+- **Every fixture is a live capture except `internal/openlibrary`'s
+  `search_*.json`, and each test file says which; never hand-edit a fixture
+  to make a test pass.** A fixture adjusted until the code passes tests the
+  parser against its author's expectations rather than the API.
 
 ## What is deliberately absent
 
-- **Automatic enrichment**, on scan or on a schedule. The first thing a
-  person sees should be enrichment they asked for, on a book they chose. It
-  is much easier to add than to take back, and it needs a ceiling on how
-  many times a book is asked about, which does not exist yet
+- **Automatic enrichment, on scan or on a schedule.** It is easier to add
+  than to take back, and it needs a ceiling on how many times a book is asked
+  about, which does not exist
   (`docs/backlog/2026090402-enrichment-has-no-attempt-ceiling.md`).
-- **A library-wide enrich.** The queue supports it; the missing piece is an
-  honest progress display for something that takes hours behind a rate
-  limiter.
-- **An enrichment history page.** `/history` exists for sends because a send
-  is an irreversible outbound act you may need to prove happened. Enrichment
-  is repeatable and its result is visible in the fields themselves.
+- **A library-wide enrich.** The missing piece is an honest progress display
+  for something that takes hours behind a rate limiter.
+- **An enrichment history page.** A send is an irreversible outbound act you
+  may need to prove happened; enrichment is repeatable and its result is
+  visible in the fields.
 - **Editing provenance.** A source is a fact about where a value came from,
   not a setting.
-- **Provenance markers for `embedded` and `manual`.** Every field has a
-  source, and rendering all of them would say "embedded" seven times to
-  convey nothing. A marker is a caveat, and only a third-party guess changes
-  how much to trust a value.
+- **Provenance markers for `embedded` and `manual`.** A marker is a caveat,
+  and only a third-party guess changes how much to trust a value.
