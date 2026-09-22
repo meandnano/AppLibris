@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/url"
+	"strings"
 
 	"library/internal/importer"
 )
@@ -14,6 +17,29 @@ import (
 // Notify follows. The routes stay registered so a stale tab gets this
 // explanation rather than a 404.
 var ErrImportDisabled = errors.New("service: import is not available")
+
+var (
+	// ErrUnsupportedLink is a link StageURL will not try: not http or
+	// https, no host, credentials in it, or too long
+	ErrUnsupportedLink = errors.New("service: not a supported link")
+	// ErrDownloadBusy is a link refused because another is still
+	// downloading
+	ErrDownloadBusy = errors.New("service: another link is still downloading")
+	// ErrWebPage wraps importer.ErrUnsupportedFormat when the link answered
+	// with an HTML page, the usual result of pasting the page a download
+	// button sits on rather than the button's own link
+	ErrWebPage = errors.New("service: the link opens a web page")
+)
+
+// maxLinkBytes bounds a pasted link. A real download link, signed query
+// and all, fits well inside it
+const maxLinkBytes = 2 << 10
+
+// LinkFetcher downloads a link without reading the body.
+// *importer.Fetcher is the one production implementation
+type LinkFetcher interface {
+	Fetch(ctx context.Context, rawURL string) (importer.Download, error)
+}
 
 // ImportPreview is one staged import as the import page needs it.
 //
@@ -54,6 +80,67 @@ func (s *Service) StageImport(ctx context.Context, name string, r io.Reader) (*I
 		return nil, err
 	}
 	return &staged, nil
+}
+
+// StageURL downloads a pasted link into staging and previews it, the same
+// preview StageImport answers for an upload. The download runs inside ctx,
+// so the caller's deadline bounds it and a closed tab cancels it
+func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, error) {
+	if s.importer == nil || s.fetcher == nil {
+		return nil, ErrImportDisabled
+	}
+	link, err := validLink(rawURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Refused rather than queued: a wait here would hold the request open
+	// behind a download of unknown length
+	select {
+	case s.downloads <- struct{}{}:
+		defer func() { <-s.downloads }()
+	default:
+		return nil, ErrDownloadBusy
+	}
+
+	d, err := s.fetcher.Fetch(ctx, link)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Body.Close()
+
+	staged, err := s.importer.Stage(ctx, d.Name, d.Body)
+	// A body cut short by the deadline can read as a clean end, and the
+	// truncated bytes then fail as not a book, which would blame the file
+	// for what was the wait
+	if err != nil && ctx.Err() != nil {
+		return nil, fmt.Errorf("%w: %v", context.Cause(ctx), err)
+	}
+	if errors.Is(err, importer.ErrUnsupportedFormat) && d.HTML {
+		return nil, fmt.Errorf("%w: %w", ErrWebPage, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &staged, nil
+}
+
+func validLink(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if len(raw) > maxLinkBytes {
+		return "", ErrUnsupportedLink
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", ErrUnsupportedLink
+	}
+	// url.Parse lowercases the scheme, so HTTPS:// passes as it should.
+	// Credentials are refused because a link that needs a session is not a
+	// direct link to a file, and a password has no business in a log line
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+		return "", ErrUnsupportedLink
+	}
+	return raw, nil
 }
 
 // StagedImport returns one staged import, or nil, nil when it has expired

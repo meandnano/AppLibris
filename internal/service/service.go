@@ -47,6 +47,18 @@ type Service struct {
 	// chosen at runtime, and internal/importer depends on storage and the
 	// scanner while this package depends on neither of those through it.
 	importer *importer.Stager
+
+	// fetcher downloads a pasted link for StageURL. nil wherever importer
+	// is, and in tests about uploads alone. An interface where importer is
+	// a concrete type, because the production Fetcher's transport is
+	// guarded and can only be swapped inside its own package, so a test
+	// here stands in a fetcher that reaches an in-memory server
+	fetcher LinkFetcher
+
+	// downloads holds one token per link being downloaded. The staging
+	// budget bounds bytes at rest, not outbound connections held open, so
+	// this bounds those
+	downloads chan struct{}
 }
 
 // Option configures a Service at construction. Functional options rather
@@ -61,9 +73,15 @@ func WithImporter(stager *importer.Stager) Option {
 	return func(s *Service) { s.importer = stager }
 }
 
+// WithFetcher gives the Service what downloads a pasted link. Without it,
+// or without an importer, StageURL answers ErrImportDisabled
+func WithFetcher(f LinkFetcher) Option {
+	return func(s *Service) { s.fetcher = f }
+}
+
 // New returns a Service backed by db.
 func New(db *storage.DB, opts ...Option) *Service {
-	s := &Service{db: db, now: time.Now}
+	s := &Service{db: db, now: time.Now, downloads: make(chan struct{}, 1)}
 	for _, opt := range opts {
 		opt(s)
 	}

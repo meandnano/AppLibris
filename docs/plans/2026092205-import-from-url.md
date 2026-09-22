@@ -311,11 +311,11 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 - Modify: `internal/service/import_test.go`
 - Modify: `cmd/server/main.go` (wiring the `Fetcher`, if the service does not build it itself)
 
-- [ ] add `ErrUnsupportedLink`, `ErrDownloadBusy`, the URL validation and the one-download limit
-- [ ] implement `StageURL`: `Fetch`, `Stage`, preview; wrap a not-a-book refusal when `HTML` is set
-- [ ] write tests for success: a book lands as a preview carrying the fetched name
-- [ ] write error-case tests: each validation refusal; nil `Stager`; a second concurrent call refused; an over-cap body without a length ends in the too-large error and leaves the staging directory empty; a slow drip hits the deadline under `synctest`
-- [ ] run tests - must pass before task 4
+- [x] add `ErrUnsupportedLink`, `ErrDownloadBusy`, the URL validation and the one-download limit
+- [x] implement `StageURL`: `Fetch`, `Stage`, preview; wrap a not-a-book refusal when `HTML` is set
+- [x] write tests for success: a book lands as a preview carrying the fetched name
+- [x] write error-case tests: each validation refusal; nil `Stager`; a second concurrent call refused; an over-cap body without a length ends in the too-large error and leaves the staging directory empty; a slow drip hits the deadline under `synctest`
+- [x] run tests - must pass before task 4
 
 ### Task 4: Add `POST /import/url`
 
