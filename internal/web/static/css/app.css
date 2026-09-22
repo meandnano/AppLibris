@@ -483,6 +483,58 @@ a.masthead__link:hover {
   text-wrap: pretty;
 }
 
+/* Above the sticky masthead, since a drop anywhere on the page counts */
+.drop__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  outline: 2px dashed var(--fg-muted);
+  outline-offset: -16px;
+  pointer-events: none;
+}
+
+.drop__overlay[hidden] {
+  display: none;
+}
+
+.drop__prompt {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 26px;
+  text-align: center;
+}
+
+/* The refusal stands in for the overlay it hides, so it is pinned where the
+   overlay was rather than left in the flow at the top of a page the grid has
+   been scrolled down. Same band as the overlay; the two never show at once */
+.drop__errors {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  pointer-events: none;
+}
+
+.drop__error {
+  margin: 0;
+  max-width: 46ch;
+  padding: 12px 16px;
+  border: 1px solid var(--err);
+  border-radius: 3px;
+  background: var(--err-soft);
+  color: var(--err);
+  font-size: 13px;
+  text-align: center;
+}
+
 /* ---------- book detail ---------- */
 
 /* SCREENS.md 03 gives this page its own page padding (40px 44px 48px),

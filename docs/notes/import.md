@@ -323,10 +323,51 @@ than read as "no limit": the cap is what bounds an upload into temporary
 space, and a deployment that means to disable importing takes away write
 access to the library, which is the thing the app actually checks.
 
+## Dropping a file on the library page
+
+A file dropped anywhere on the library page is the upload form's own post.
+`drop.js` puts it into a hidden plain form — `action="/import/file"`,
+`enctype="multipart/form-data"`, no `hx-post` — and calls `form.submit()`,
+so the route answers exactly as it answers with JavaScript off: a 303 to
+`/import/{id}` whose page shows the verdict, or a 422 carrying the Import
+page with the refusal and the file input. There is no second upload path,
+no second preview and no second response shape to keep in step with the
+first, and every bound above applies unchanged. A fetch or an htmx request
+would need its own answer for each of those; a native submit needs none.
+
+The script refuses two things before a byte is sent. Several files, or a
+folder, because a stage holds one book and its page shows one verdict. And
+a file over the cap, since a body far past the limit is the one case whose
+422 can be lost while the rest of it is still in flight (see above). The
+cap and both sentences come from the page: the too-large one is
+`importFailureLine`'s, so a drop stopped early reads exactly as one the
+importer stopped. The server's count remains the check; the script's only
+spares the upload. The filename is not examined — `detectSuffix` decides,
+and its refusal already says what the file is not.
+
+The target is the library page alone, rendered only when a `Stager`
+exists, and from `library.html` rather than the `book-grid` fragment a
+search swaps in. On a book's own page a drop would read as replacing that
+book's file, which is not what it does.
+
+Both refusals are shown where the overlay they replace was: `drop__errors`
+is fixed to the viewport, so a refusal reaches the person whatever the grid
+has been scrolled to, and an announcement reaches a screen reader because
+the live region is that wrapper rather than the sentences inside it — one
+that appears is not reliably read, one whose contents change is. There is
+nothing else to see: the drop is stopped before a request, so no page
+arrives to carry the refusal the way the Import form's 422 does.
+
+`uploading` locks out every later drag and holds the veil up, and two
+things take it down. A bfcache `pageshow` covers Back from the preview. A
+submit the person cancels covers the rest: aborting a navigation leaves the
+document loaded and fires nothing at all, so Escape clears it, whether the
+upload was stopped with Escape or with the browser's own Stop.
+
 ## What is deliberately absent
 
-- **Importing from a URL, and drag and drop.** Both reuse this machinery
-  unchanged and are their own steps.
+- **Importing from a URL.** It reuses this machinery unchanged and is its
+  own step.
 - **A programmatic API.** Deferred; the obstacle is in
   `docs/notes/design.md`. Every state-changing route refuses a request
   carrying no `Sec-Fetch-Site`, which a non-browser client never sends.

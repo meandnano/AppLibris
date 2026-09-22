@@ -140,6 +140,12 @@ JavaScript. A read affordance is an `<a>` carrying both `href` and
 the plain-navigation response is a whole page or a `303` back to it, and
 the htmx response is a fragment. There is no separate no-JS path to drift.
 
+Dropping a file on the library page is the one affordance that cannot
+exist without JavaScript, and it is an enhancement over the Import page
+rather than a path of its own: `drop.js` fills a hidden plain upload form
+and submits it natively, bypassing htmx, so the answer is the no-JS
+upload's redirect or 422 page. See `docs/notes/import.md`.
+
 Whether a request gets a fragment is decided by `isHTMXFragment`:
 `HX-Request` present **and** `HX-History-Restore-Request` absent. htmx
 keeps no copy of the pages it pushes, so Back onto any entry it pushed

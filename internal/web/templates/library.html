@@ -6,6 +6,7 @@
 {{template "search-bar" .}}
 
 <main class="page">
+{{with .ImportDrop}}{{template "import-drop" .}}{{end}}
 {{template "search-status" .}}
 {{template "book-grid" .}}
 </main>
