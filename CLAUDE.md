@@ -47,8 +47,9 @@ here. See Documentation below for what these files may and may not say.
 - `internal/scanner` — walks `LIBRARY_DIR`, syncs it into storage
   (`Scan`), indexes one path on demand (`IndexFile`, the importer's way
   in), reconciles missing files in two phases, regenerates covers, and
-  hosts the fsnotify watcher (`watcher.go`) plus the startup mount and
-  delivery checks. Note: `docs/notes/scanner.md`.
+  hosts the fsnotify watcher (`watcher.go`, reached through `watchSet` so
+  tests can drive its debounce) plus the startup mount and delivery
+  checks. Note: `docs/notes/scanner.md`.
 - `internal/resend` — one-attachment `Client.Send` against Resend's API.
   `internal/sender` — the single `Worker` over `send_log`. Note:
   `docs/notes/sending.md`.
@@ -89,6 +90,8 @@ here. See Documentation below for what these files may and may not say.
   rules, the conversion model behind `derived_from`, and the deferred list.
 - `docs/notes/import.md` — where an import lands, the staging model, the
   three verdicts and the order confirm writes in.
+- `docs/notes/testing.md` — the fake clock, the in-memory test server, and
+  what still runs on real time.
 - `docs/plans/`, `docs/backlog/` — see Planning and Backlog below.
 
 Logging is `log/slog` on stderr through the package-level functions,
@@ -488,9 +491,18 @@ tidy-up would break. The note named in the heading carries the reasoning.
   `enrichmentResultLine`, `historyStatus`), never formatted in a template.
 - Absent is not an error: finders return `nil, nil`, updates return
   `(false, nil)`, for an unknown id. The transport turns that into a 404.
-- Tests for the provider clients run against `httptest.Server` with
-  fixtures under `testdata`. A fixture is a live capture or is labelled
-  otherwise at the top of its test file.
+- A test that waits on time runs in `synctest.Test`, and a test server is
+  `httptest.NewTestServer` on its in-memory network
+  (`docs/notes/testing.md`). Inside a bubble the database is opened with
+  the bubble's `t`, and code a bubble runs owns no goroutine that outlives
+  its caller. The server's `Client()` sends every host to it, so tests
+  never read `URL` before `Client()`, name fixed hosts under `.test`, keep
+  one server per client dispatching on `r.Host`, and hand a production
+  client `server.Client().Transport` itself, never a clone. Only a test
+  about the socket — the cover address guard, the import refusals — calls
+  `Start`.
+- Provider-client fixtures live under `testdata`. A fixture is a live
+  capture or is labelled otherwise at the top of its test file.
 - `go test ./...` must pass; CI also runs `go vet` with `-race` and builds
   the image.
 - A `v*` tag publishes: `.github/workflows/publish.yaml` runs the tests, builds

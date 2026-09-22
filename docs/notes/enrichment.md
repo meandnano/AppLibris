@@ -248,10 +248,13 @@ allowlist was the other candidate and is worse here —
 and Google's image hosts vary, so it would refuse real covers to close
 what an address check closes precisely.
 
-Every cover test in `internal/enrich` runs an `httptest.Server` on
-loopback, which the guard refuses by design, so the `Worker` holds the
-predicate as a field and the tests replace it through a helper that only
-`_test.go` files can reach. Production has no switch that turns it off.
+The `Worker`'s cover tests fetch through its own transport from an
+`httptest.Server` on loopback, which the guard refuses by design, so the
+`Worker` holds the predicate as a field and the tests replace it through a
+helper that only `_test.go` files can reach. A test that needs the fake
+clock instead swaps in an in-memory transport through a second such
+helper; that transport never dials, so the guard never runs, and the guard
+tests use neither. Production has no switch that turns the guard off.
 
 `MaxCoverBytes` here is deliberately smaller than `cover.MaxCoverBytes`
 (8 MiB) and not an alias of it. It is a network bound, and
@@ -543,10 +546,13 @@ lifetime. A `Metadata` of nothing but strings keeps that cache kilobytes.
 
 The three decorators in `decorator.go` wrap a `Provider` and satisfy
 `Provider` themselves, so the resolver cannot tell they are there and each is
-tested against a fake with no HTTP. `WithRateLimit` gates `ByISBN`/`Search`
-on a shared ticker-fed token (`DefaultRateLimitInterval`, one call a second,
-conservative since Open Library's limit is a courtesy ask) and honours `ctx`
-while waiting rather than blocking a shutdown. `WithCache` serves a repeat
+tested against a fake with no HTTP. `WithRateLimit` spaces `ByISBN`/`Search`
+calls at least `DefaultRateLimitInterval` apart across both methods (one a
+second, conservative since Open Library's limit is a courtesy ask) by
+handing each caller the next free slot, and honours `ctx` while waiting
+rather than blocking a shutdown; a caller that gives up hands its slot back.
+Nothing runs between calls, since nothing that builds a limiter ever stops
+one. `WithCache` serves a repeat
 lookup out of a bounded LRU (`DefaultCacheSize`), caching a no-match too,
 since a shelf of obscure books would otherwise re-ask the same negative on
 every run; an error is never cached, since the contract treats it as

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"library/internal/enrich"
@@ -124,32 +125,43 @@ func TestComposeCachesRepeatLookups(t *testing.T) {
 // return promptly rather than taking two full DefaultRateLimitInterval
 // waits between them.
 func TestComposeCachedHitCostsNoRateLimitToken(t *testing.T) {
-	p := compose(&countingProvider{})
+	synctest.Test(t, func(t *testing.T) {
+		p := compose(&countingProvider{})
 
-	start := time.Now()
-	for range 3 {
-		if _, err := p.ByISBN(context.Background(), "9780262011532"); err != nil {
-			t.Fatal(err)
+		start := time.Now()
+		for range 3 {
+			if _, err := p.ByISBN(context.Background(), "9780262011532"); err != nil {
+				t.Fatal(err)
+			}
 		}
-	}
-	if elapsed := time.Since(start); elapsed >= enrich.DefaultRateLimitInterval {
-		t.Errorf("three repeat lookups took %s, want well under one rate-limit interval (%s)", elapsed, enrich.DefaultRateLimitInterval)
-	}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("three repeat lookups took %s, want no wait at all", elapsed)
+		}
+	})
 }
 
 // A retryable failure must reach the wrapped provider DefaultRetryAttempts
 // times, and must not be cached: the four-case contract treats an error as
 // transient, so a later lookup asks again.
 func TestComposeRetriesAndNeverCachesAnError(t *testing.T) {
-	inner := &countingProvider{answer: func(int) (enrich.Metadata, error) {
-		return enrich.Metadata{}, fmt.Errorf("503: %w", enrich.ErrRetryable)
-	}}
-	p := compose(inner)
+	synctest.Test(t, func(t *testing.T) {
+		inner := &countingProvider{answer: func(int) (enrich.Metadata, error) {
+			return enrich.Metadata{}, fmt.Errorf("503: %w", enrich.ErrRetryable)
+		}}
+		p := compose(inner)
 
-	if _, err := p.ByISBN(context.Background(), "9780262011532"); err == nil {
-		t.Fatal("want an error")
-	}
-	if inner.calls != enrich.DefaultRetryAttempts {
-		t.Errorf("inner calls = %d, want %d", inner.calls, enrich.DefaultRetryAttempts)
-	}
+		if _, err := p.ByISBN(context.Background(), "9780262011532"); err == nil {
+			t.Fatal("want an error")
+		}
+		if inner.calls != enrich.DefaultRetryAttempts {
+			t.Errorf("inner calls = %d, want %d", inner.calls, enrich.DefaultRetryAttempts)
+		}
+
+		if _, err := p.ByISBN(context.Background(), "9780262011532"); err == nil {
+			t.Fatal("want an error from the second lookup too")
+		}
+		if want := 2 * enrich.DefaultRetryAttempts; inner.calls != want {
+			t.Errorf("inner calls after a second lookup = %d, want %d (an error must never be served from the cache)", inner.calls, want)
+		}
+	})
 }

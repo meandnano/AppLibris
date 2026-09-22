@@ -5,55 +5,108 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 func TestWithRateLimitPacesCalls(t *testing.T) {
-	const every = 50 * time.Millisecond
-	fake := &fakeProvider{name: "fake"}
-	p := WithRateLimit(fake, every)
+	synctest.Test(t, func(t *testing.T) {
+		const every = 50 * time.Millisecond
+		fake := &fakeProvider{name: "fake"}
+		p := WithRateLimit(fake, every)
 
-	start := time.Now()
-	if _, err := p.ByISBN(context.Background(), "1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := p.ByISBN(context.Background(), "2"); err != nil {
-		t.Fatal(err)
-	}
-	if elapsed := time.Since(start); elapsed < every {
-		t.Errorf("second call returned after %v, want at least %v", elapsed, every)
-	}
-	if fake.calls != 2 {
-		t.Fatalf("calls = %d, want 2", fake.calls)
-	}
+		start := time.Now()
+		mustByISBN(t, p, context.Background(), "1")
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("first call waited %v, want no wait", elapsed)
+		}
+		mustByISBN(t, p, context.Background(), "2")
+		if elapsed := time.Since(start); elapsed != every {
+			t.Errorf("second call returned after %v, want exactly %v", elapsed, every)
+		}
+		if fake.calls != 2 {
+			t.Fatalf("calls = %d, want 2", fake.calls)
+		}
+	})
+}
+
+// A call after a quiet spell goes at once, and the next is spaced from it
+// rather than from where a fixed schedule would have put the next slot:
+// "at most one every interval" holds between any two calls
+func TestWithRateLimitSpacesFromTheLastCallNotAFixedSchedule(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const every = time.Second
+		p := WithRateLimit(&fakeProvider{name: "fake"}, every)
+		ctx := context.Background()
+
+		mustByISBN(t, p, ctx, "1")
+		time.Sleep(1700 * time.Millisecond)
+
+		start := time.Now()
+		mustByISBN(t, p, ctx, "2")
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("a call after a quiet spell waited %v, want no wait", elapsed)
+		}
+		time.Sleep(100 * time.Millisecond)
+		start = time.Now()
+		mustByISBN(t, p, ctx, "3")
+		if elapsed := time.Since(start); elapsed != 900*time.Millisecond {
+			t.Errorf("the next call waited %v, want 900ms so it lands a full interval after the one before", elapsed)
+		}
+	})
 }
 
 func TestWithRateLimitReturnsPromptlyOnCancellation(t *testing.T) {
-	const every = time.Hour // long enough the token never refills during this test
-	fake := &fakeProvider{name: "fake"}
-	p := WithRateLimit(fake, every)
+	synctest.Test(t, func(t *testing.T) {
+		const every = time.Hour
+		fake := &fakeProvider{name: "fake"}
+		p := WithRateLimit(fake, every)
 
-	// Consume the pre-loaded token so the next call has to wait.
-	if _, err := p.ByISBN(context.Background(), "1"); err != nil {
-		t.Fatal(err)
-	}
+		// Take the free slot so the next call has to wait
+		mustByISBN(t, p, context.Background(), "1")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
+		const deadline = 20 * time.Millisecond
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		defer cancel()
 
-	start := time.Now()
-	_, err := p.ByISBN(ctx, "2")
-	elapsed := time.Since(start)
+		start := time.Now()
+		_, err := p.ByISBN(ctx, "2")
+		elapsed := time.Since(start)
 
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
-	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("returned after %v, want promptly after the context deadline", elapsed)
-	}
-	if fake.calls != 1 {
-		t.Errorf("calls = %d, want 1 (the second call must never reach the provider)", fake.calls)
-	}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+		}
+		if elapsed != deadline {
+			t.Errorf("returned after %v, want exactly the context deadline, %v", elapsed, deadline)
+		}
+		if fake.calls != 1 {
+			t.Errorf("calls = %d, want 1 (the second call must never reach the provider)", fake.calls)
+		}
+	})
+}
+
+// A caller that gives up hands its slot back, so the next caller is paced
+// from the last call that actually ran rather than pushed a further
+// interval out by one that never did
+func TestWithRateLimitGivesACancelledSlotBack(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const every = 50 * time.Millisecond
+		p := WithRateLimit(&fakeProvider{name: "fake"}, every)
+
+		start := time.Now()
+		mustByISBN(t, p, context.Background(), "1")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		if _, err := p.ByISBN(ctx, "2"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+		}
+
+		mustByISBN(t, p, context.Background(), "3")
+		if elapsed := time.Since(start); elapsed != every {
+			t.Errorf("the call after a cancelled one ran at %v, want %v", elapsed, every)
+		}
+	})
 }
 
 func TestWithCacheServesRepeatWithoutSecondCall(t *testing.T) {
@@ -162,17 +215,47 @@ func retryableError(text string) error {
 }
 
 func TestWithRetryRetriesServerError(t *testing.T) {
-	fake := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		return Metadata{}, retryableError("503")
-	}}
-	p := WithRetry(fake, 3)
+	synctest.Test(t, func(t *testing.T) {
+		fake := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			return Metadata{}, retryableError("503")
+		}}
+		p := WithRetry(fake, 3)
 
-	if _, err := p.ByISBN(context.Background(), "1"); err == nil {
-		t.Fatal("want error")
-	}
-	if fake.calls != 3 {
-		t.Errorf("calls = %d, want 3", fake.calls)
-	}
+		start := time.Now()
+		if _, err := p.ByISBN(context.Background(), "1"); err == nil {
+			t.Fatal("want error")
+		}
+		if fake.calls != 3 {
+			t.Errorf("calls = %d, want 3", fake.calls)
+		}
+		if elapsed, want := time.Since(start), retryBaseDelay+2*retryBaseDelay; elapsed != want {
+			t.Errorf("three attempts took %v, want %v of backoff", elapsed, want)
+		}
+	})
+}
+
+// The backoff doubles from retryBaseDelay and stops growing at
+// retryMaxDelay, so a provider having a long bad moment is asked at a
+// steady pace rather than one that runs away
+func TestWithRetryBackoffDoublesUpToItsCap(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var at []time.Duration
+		start := time.Now()
+		fake := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			at = append(at, time.Since(start))
+			return Metadata{}, retryableError("503")
+		}}
+
+		if _, err := WithRetry(fake, 6).ByISBN(context.Background(), "1"); err == nil {
+			t.Fatal("want error")
+		}
+
+		want := []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond,
+			3500 * time.Millisecond, 7500 * time.Millisecond, 11500 * time.Millisecond}
+		if fmt.Sprint(at) != fmt.Sprint(want) {
+			t.Errorf("attempts ran at %v, want %v", at, want)
+		}
+	})
 }
 
 // A 400, a rejected API key or a malformed body fails identically however
@@ -196,17 +279,19 @@ func TestWithRetryDoesNotRetryANonRetryableError(t *testing.T) {
 // without an ISBN takes, which is the common FB2 case rather than the rare
 // one.
 func TestWithRetryRetriesSearchToo(t *testing.T) {
-	fake := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
-		return Metadata{}, retryableError("503")
-	}}
-	p := WithRetry(fake, 3)
+	synctest.Test(t, func(t *testing.T) {
+		fake := &fakeProvider{name: "fake", search: func(ctx context.Context, title string, authors []string) (Metadata, error) {
+			return Metadata{}, retryableError("503")
+		}}
+		p := WithRetry(fake, 3)
 
-	if _, err := p.Search(context.Background(), "Dune", nil); err == nil {
-		t.Fatal("want error")
-	}
-	if fake.calls != 3 {
-		t.Errorf("calls = %d, want 3", fake.calls)
-	}
+		if _, err := p.Search(context.Background(), "Dune", nil); err == nil {
+			t.Fatal("want error")
+		}
+		if fake.calls != 3 {
+			t.Errorf("calls = %d, want 3", fake.calls)
+		}
+	})
 }
 
 // WithRetry(p, 0) must still make one attempt: zero tries would silently
@@ -234,69 +319,80 @@ func TestWithRetryDoesNotRetryNoMatch(t *testing.T) {
 }
 
 func TestWithRetrySucceedsAfterTransientError(t *testing.T) {
-	fake := &fakeProvider{name: "fake"}
-	fake.byISBN = func(ctx context.Context, isbn string) (Metadata, error) {
-		if fake.calls < 2 {
-			return Metadata{}, retryableError("503")
+	synctest.Test(t, func(t *testing.T) {
+		fake := &fakeProvider{name: "fake"}
+		fake.byISBN = func(ctx context.Context, isbn string) (Metadata, error) {
+			if fake.calls < 2 {
+				return Metadata{}, retryableError("503")
+			}
+			return Metadata{Title: "Recovered"}, nil
 		}
-		return Metadata{Title: "Recovered"}, nil
-	}
-	p := WithRetry(fake, 3)
+		p := WithRetry(fake, 3)
 
-	m, err := p.ByISBN(context.Background(), "1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.Title != "Recovered" {
-		t.Errorf("title = %q, want %q", m.Title, "Recovered")
-	}
-	if fake.calls != 2 {
-		t.Errorf("calls = %d, want 2", fake.calls)
-	}
+		start := time.Now()
+		m, err := p.ByISBN(context.Background(), "1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.Title != "Recovered" {
+			t.Errorf("title = %q, want %q", m.Title, "Recovered")
+		}
+		if fake.calls != 2 {
+			t.Errorf("calls = %d, want 2", fake.calls)
+		}
+		if elapsed := time.Since(start); elapsed != retryBaseDelay {
+			t.Errorf("recovering on the second attempt took %v, want one backoff, %v", elapsed, retryBaseDelay)
+		}
+	})
 }
 
 func TestWithRetryStopsOnCancellation(t *testing.T) {
-	fake := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		return Metadata{}, retryableError("503")
-	}}
-	p := WithRetry(fake, 5)
+	synctest.Test(t, func(t *testing.T) {
+		fake := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			return Metadata{}, retryableError("503")
+		}}
+		p := WithRetry(fake, 5)
 
-	// Cancellation lands during the first backoff (retryBaseDelay is 500ms,
-	// well past this), so exactly one attempt is made. Asserting the exact
-	// number rather than "fewer than 5" is the point: a bound that loose
-	// passes even when four of five attempts run, i.e. when cancellation is
-	// very nearly ignored.
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		cancel()
-	}()
+		// Cancellation lands during the first backoff, so exactly one attempt
+		// is made. Asserting the exact number rather than "fewer than 5" is
+		// the point: a bound that loose passes even when four of five
+		// attempts run, i.e. when cancellation is very nearly ignored
+		const cancelAfter = 10 * time.Millisecond
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(cancelAfter, cancel)
 
-	_, err := p.ByISBN(ctx, "1")
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
-	}
-	if fake.calls != 1 {
-		t.Errorf("calls = %d, want 1 (cancellation must cut the backoff short)", fake.calls)
-	}
+		start := time.Now()
+		_, err := p.ByISBN(ctx, "1")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		if fake.calls != 1 {
+			t.Errorf("calls = %d, want 1 (cancellation must cut the backoff short)", fake.calls)
+		}
+		if elapsed := time.Since(start); elapsed != cancelAfter {
+			t.Errorf("returned after %v, want the moment it was cancelled, %v", elapsed, cancelAfter)
+		}
+	})
 }
 
 // WithRateLimit's doc claims ByISBN and Search share one budget; nothing
 // asserted it, and Search is the path every book without an ISBN takes.
 func TestWithRateLimitSharesOneBudgetAcrossBothMethods(t *testing.T) {
-	const every = 50 * time.Millisecond
-	fake := &fakeProvider{name: "fake"}
-	p := WithRateLimit(fake, every)
-	ctx := context.Background()
+	synctest.Test(t, func(t *testing.T) {
+		const every = 50 * time.Millisecond
+		fake := &fakeProvider{name: "fake"}
+		p := WithRateLimit(fake, every)
+		ctx := context.Background()
 
-	start := time.Now()
-	mustByISBN(t, p, ctx, "1")
-	if _, err := p.Search(ctx, "Dune", nil); err != nil {
-		t.Fatal(err)
-	}
-	if elapsed := time.Since(start); elapsed < every {
-		t.Errorf("ByISBN then Search took %s, want at least one interval (%s) — the budget is shared", elapsed, every)
-	}
+		start := time.Now()
+		mustByISBN(t, p, ctx, "1")
+		if _, err := p.Search(ctx, "Dune", nil); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed != every {
+			t.Errorf("ByISBN then Search took %s, want exactly one interval (%s) — the budget is shared", elapsed, every)
+		}
+	})
 }
 
 func TestWithRateLimitReturnsPromptlyOnACancelledContextInSearch(t *testing.T) {
@@ -304,8 +400,8 @@ func TestWithRateLimitReturnsPromptlyOnACancelledContextInSearch(t *testing.T) {
 	p := WithRateLimit(fake, time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// The pre-loaded token covers the first call; the second would wait an
-	// hour, so cancellation is the only thing that can end it.
+	// The first call goes at once; the second would wait an hour, so
+	// cancellation is the only thing that can end it
 	if _, err := p.Search(ctx, "Dune", nil); err != nil {
 		t.Fatal(err)
 	}

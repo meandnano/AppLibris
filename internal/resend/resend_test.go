@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -26,46 +27,48 @@ func TestNewClientLeavesTheDeadlineToTheCaller(t *testing.T) {
 // errors.Is(err, context.DeadlineExceeded), so the wrapping here has to
 // preserve that through the url.Error net/http returns.
 func TestSendExpiredContextIsDeadlineExceeded(t *testing.T) {
-	// The handler drains the body before waiting: the server only starts
-	// watching for the client's disconnect once the body is consumed, and
-	// it has to notice, or Close in the cleanup waits on it forever. The
-	// release channel is the belt to that brace — registered after
-	// testClient so that, cleanups running last-in-first-out, it fires
-	// before the server's Close rather than behind a Close that is waiting
-	// on this very handler.
-	release := make(chan struct{})
-	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
-		select {
-		case <-r.Context().Done():
-		case <-release:
+	synctest.Test(t, func(t *testing.T) {
+		// The handler drains the body before waiting: the server only starts
+		// watching for the client's disconnect once the body is consumed, and
+		// it has to notice, or Close in the cleanup waits on it forever. The
+		// release channel is the belt to that brace — registered after
+		// testClient so that, cleanups running last-in-first-out, it fires
+		// before the server's Close rather than behind a Close that is waiting
+		// on this very handler.
+		release := make(chan struct{})
+		client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+			io.ReadAll(r.Body)
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		})
+		t.Cleanup(func() { close(release) })
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+
+		_, err := client.Send(ctx, "reader@kindle.com", Attachment{Filename: "b.epub", Content: []byte("x")})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want one wrapping context.DeadlineExceeded", err)
 		}
 	})
-	t.Cleanup(func() { close(release) })
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	_, err := client.Send(ctx, "reader@kindle.com", Attachment{Filename: "b.epub", Content: []byte("x")})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want one wrapping context.DeadlineExceeded", err)
-	}
 }
 
+// testClient is NewClient's client over an in-memory server. The base URL
+// sits under .test, which never resolves, so a client that somehow missed
+// the in-memory transport fails rather than reaching the real Resend
 func testClient(t *testing.T, handler http.HandlerFunc) (*Client, *int) {
 	t.Helper()
 	hits := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		handler(w, r)
 	}))
-	t.Cleanup(server.Close)
 
-	return &Client{
-		apiKey:     "test-key",
-		from:       "kindle@example.com",
-		baseURL:    server.URL,
-		httpClient: server.Client(),
-	}, &hits
+	client := NewClient("test-key", "kindle@example.com")
+	client.httpClient.Transport = server.Client().Transport
+	client.baseURL = "https://api.resend.test"
+	return client, &hits
 }
 
 func TestSendSuccess(t *testing.T) {
