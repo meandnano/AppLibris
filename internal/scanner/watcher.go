@@ -50,7 +50,11 @@ const (
 // size and mtime, the next sweep re-hashes, and CreateBookWithFile's
 // orphan-pruning replaces the partial book in the same transaction.
 type Watcher struct {
-	fsw        *fsnotify.Watcher
+	fsw watchSet
+	// events and errs are fsw's channels, held apart from it because
+	// fsnotify exposes them as fields rather than methods
+	events     <-chan fsnotify.Event
+	errs       <-chan error
 	libraryDir string
 	settle     time.Duration
 	// maxDelay is watchMaxDelay, and recheck is watchRecheckInterval, as
@@ -68,6 +72,16 @@ type Watcher struct {
 	mu sync.Mutex
 	// registered records which directory each watch is actually attached to.
 	registered map[string]watchKey
+}
+
+// watchSet is the part of *fsnotify.Watcher that Refresh and Run manage
+// watches through. It is an interface so the debounce can be driven by
+// events a test sends, on synctest's clock, rather than by the kernel's
+type watchSet interface {
+	Add(path string) error
+	Remove(path string) error
+	WatchList() []string
+	Close() error
 }
 
 // watchKey identifies the directory a watch really covers. inotify watches
@@ -103,13 +117,23 @@ func NewWatcher(libraryDir string, settle time.Duration, trigger chan<- struct{}
 	if err != nil {
 		return nil, fmt.Errorf("create watcher: %w", err)
 	}
-	if err := fsw.Add(libraryDir); err != nil {
+	w, err := newWatcher(fsw, fsw.Events, fsw.Errors, libraryDir, settle, trigger)
+	if err != nil {
 		fsw.Close()
+		return nil, err
+	}
+	return w, nil
+}
+
+func newWatcher(fsw watchSet, events <-chan fsnotify.Event, errs <-chan error, libraryDir string, settle time.Duration, trigger chan<- struct{}) (*Watcher, error) {
+	if err := fsw.Add(libraryDir); err != nil {
 		return nil, fmt.Errorf("watch %s: %w", libraryDir, err)
 	}
 
 	w := &Watcher{
 		fsw:        fsw,
+		events:     events,
+		errs:       errs,
 		libraryDir: libraryDir,
 		settle:     settle,
 		maxDelay:   watchMaxDelay,
@@ -295,7 +319,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	}
 	for {
 		select {
-		case event, ok := <-w.fsw.Events:
+		case event, ok := <-w.events:
 			if !ok {
 				return
 			}
@@ -328,7 +352,7 @@ func (w *Watcher) Run(ctx context.Context) {
 				// unindexed, so sweep rather than wait for the next event.
 				fire()
 			}
-		case err, ok := <-w.fsw.Errors:
+		case err, ok := <-w.errs:
 			if !ok {
 				return
 			}
@@ -426,7 +450,7 @@ func (w *Watcher) probe(ctx context.Context) (pending bool) {
 	defer deadline.Stop()
 	for {
 		select {
-		case event, ok := <-w.fsw.Events:
+		case event, ok := <-w.events:
 			if !ok {
 				return pending
 			}
@@ -437,7 +461,7 @@ func (w *Watcher) probe(ctx context.Context) (pending bool) {
 			if w.qualifies(event) {
 				pending = true
 			}
-		case err, ok := <-w.fsw.Errors:
+		case err, ok := <-w.errs:
 			if !ok {
 				return pending
 			}

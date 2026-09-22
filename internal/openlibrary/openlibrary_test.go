@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"library/internal/enrich"
@@ -40,38 +41,52 @@ import (
 // URL with ?default=false answers 404 and the body "404 Not Found". A
 // thirteen-byte capture of that would be a file no test reads.
 
-// testClient wires coverBaseURL to its own isolated server that 404s by
-// default, kept separate from the search server and its hits counter: a
-// match fixture carrying a cover_i (search_match.json does) would otherwise
-// make every test using it fire a second, uncounted request at the same
-// handler search assertions (query params, hit counts) don't expect. Tests
-// that care about the cover fetch itself override client.coverBaseURL
-// after the fact.
+// The hosts a test client talks to. They sit under .test, which never
+// resolves, so a client that somehow missed the in-memory transport fails
+// rather than reaching the real Open Library
+const (
+	testHost      = "openlibrary.test"
+	testCoverHost = "covers.openlibrary.test"
+)
+
+// testClient serves handler at the API host and counts its requests. The
+// covers host 404s and is kept out of hits: a match fixture carrying a
+// cover_i (search_match.json does) would otherwise make every test using it
+// fire a second, uncounted request at the handler search assertions (query
+// params, hit counts) don't expect
 func testClient(t *testing.T, handler http.HandlerFunc) (*Client, *int) {
 	t.Helper()
 	hits := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		handler(w, r)
+	client := hostsClient(t, map[string]http.HandlerFunc{
+		testHost: func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			handler(w, r)
+		},
+	})
+	return client, &hits
+}
+
+// hostsClient is New's client over an in-memory server that answers each
+// host from its own handler and 404s any other. One server stands in for
+// every host because its transport sends every request to it whatever the
+// URL names, so a test about which host was asked dispatches on r.Host.
+// Building through New keeps the production Timeout and redirect policy
+// under test rather than a copy of them
+func hostsClient(t *testing.T, hosts map[string]http.HandlerFunc) *Client {
+	t.Helper()
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handler, ok := hosts[r.Host]; ok {
+			handler(w, r)
+			return
+		}
+		http.NotFound(w, r)
 	}))
-	t.Cleanup(server.Close)
 
-	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(coverServer.Close)
-
-	httpClient := server.Client()
-	// The production redirect policy, not net/http's default: without it
-	// the redirect tests below would assert the standard library's
-	// behaviour rather than the shared policy's.
-	httpClient.CheckRedirect = enrich.CheckLookupRedirect
-
-	return &Client{
-		baseURL:      server.URL,
-		coverBaseURL: coverServer.URL,
-		httpClient:   httpClient,
-	}, &hits
+	client := New()
+	client.httpClient.Transport = server.Client().Transport
+	client.baseURL = "https://" + testHost
+	client.coverBaseURL = "https://" + testCoverHost
+	return client
 }
 
 func readFixture(t *testing.T, name string) []byte {
@@ -229,17 +244,21 @@ func TestByISBN5xxIsAnError(t *testing.T) {
 }
 
 func TestByISBNTransportErrorIsAnError(t *testing.T) {
-	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(50 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		// The handler never answers, so only the caller's deadline ends the
+		// request
+		client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		defer cancel()
+
+		_, err := client.ByISBN(ctx, "9780262011532")
+		if err == nil {
+			t.Fatal("ByISBN: want error on a timed-out request, got nil")
+		}
 	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
-
-	_, err := client.ByISBN(ctx, "9780262011532")
-	if err == nil {
-		t.Fatal("ByISBN: want error on a timed-out request, got nil")
-	}
 }
 
 func TestByISBNMalformedBodyIsAnError(t *testing.T) {
@@ -356,22 +375,21 @@ func isZeroMetadata(m enrich.Metadata) bool {
 // names the URL and downloads nothing: the fetch is internal/enrich's
 // Worker's, so it only happens for a book that actually needs a cover.
 func TestByISBNNamesCoverURLWithoutFetchingIt(t *testing.T) {
-	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write(readFixture(t, "edition_match.json"))
-	})
-
 	coverHits := 0
-	coverServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		coverHits++
-	}))
-	t.Cleanup(coverServer.Close)
-	client.coverBaseURL = coverServer.URL
+	client := hostsClient(t, map[string]http.HandlerFunc{
+		testHost: func(w http.ResponseWriter, r *http.Request) {
+			w.Write(readFixture(t, "edition_match.json"))
+		},
+		testCoverHost: func(w http.ResponseWriter, r *http.Request) {
+			coverHits++
+		},
+	})
 
 	got, err := client.ByISBN(context.Background(), "9780547928227")
 	if err != nil {
 		t.Fatalf("ByISBN: %v", err)
 	}
-	want := coverServer.URL + "/b/id/12003329-L.jpg?default=false"
+	want := "https://" + testCoverHost + "/b/id/12003329-L.jpg?default=false"
 	if got.CoverURL != want {
 		t.Errorf("CoverURL = %q, want %q", got.CoverURL, want)
 	}
@@ -641,13 +659,16 @@ func TestRefusedRedirectIsNotRetryable(t *testing.T) {
 // openlibrary.org: the Read API answers ISBNs directly, and the
 // /isbn/{isbn} aliases hop once or twice, same-host each time.
 func TestByISBNRefusesARedirectOffHost(t *testing.T) {
-	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"records":{"x":{"data":{"title":"Not This Book"}}}}`))
-	}))
-	t.Cleanup(foreign.Close)
-
-	client, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, foreign.URL+"/record.json", http.StatusFound)
+	const foreignHost = "foreign.test"
+	foreignHits := 0
+	client := hostsClient(t, map[string]http.HandlerFunc{
+		testHost: func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://"+foreignHost+"/record.json", http.StatusFound)
+		},
+		foreignHost: func(w http.ResponseWriter, r *http.Request) {
+			foreignHits++
+			w.Write([]byte(`{"records":{"x":{"data":{"title":"Not This Book"}}}}`))
+		},
 	})
 
 	got, err := client.ByISBN(context.Background(), "9780547928227")
@@ -656,6 +677,9 @@ func TestByISBNRefusesARedirectOffHost(t *testing.T) {
 	}
 	if got.Title != "" {
 		t.Errorf("Title = %q, want nothing adopted from the answering host", got.Title)
+	}
+	if foreignHits != 0 {
+		t.Errorf("the foreign host was asked %d times, want the hop refused before it is made", foreignHits)
 	}
 }
 

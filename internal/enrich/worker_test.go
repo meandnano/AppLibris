@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"library/internal/storage"
@@ -51,7 +52,7 @@ func openTestDB(t *testing.T) *storage.DB {
 
 // newTestWorker wires a fresh, per-test covers directory — tests that don't
 // exercise the cover path never need to know it exists — and opts the
-// worker out of the address guard, since every cover server here listens on
+// worker out of the address guard, since the cover servers here listen on
 // loopback and RefusePrivateAddress refuses that by design. A test about
 // the guard itself builds its worker with New directly.
 func newTestWorker(t *testing.T, db *storage.DB, providers []Provider) *Worker {
@@ -306,48 +307,44 @@ func TestWorkerOneProviderFailedOneAnsweredNothingMarksJobDone(t *testing.T) {
 // Notify must wake a worker idling in Run's select, without waiting for
 // the once-a-minute pollInterval tick.
 func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
-	db := openTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		db := openTestDB(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	w := newTestWorker(t, db, nil)
-	done := make(chan struct{})
-	go func() {
-		w.Run(ctx)
-		close(done)
-	}()
+		w := newTestWorker(t, db, nil)
+		done := make(chan struct{})
+		go func() {
+			w.Run(ctx)
+			close(done)
+		}()
+		// Run drains once as it starts. Let that find nothing and park, so
+		// the job below can only be reached by Notify
+		synctest.Wait()
 
-	id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-5", Title: "Book", SortTitle: "book"}, nil)
-	if err != nil {
-		t.Fatalf("CreateBook: %v", err)
-	}
-	if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
-		t.Fatalf("EnqueueEnrichment: %v", err)
-	}
-	w.Notify()
+		id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-5", Title: "Book", SortTitle: "book"}, nil)
+		if err != nil {
+			t.Fatalf("CreateBook: %v", err)
+		}
+		if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
+			t.Fatalf("EnqueueEnrichment: %v", err)
+		}
+		w.Notify()
+		// The clock does not move while the worker has work, so the
+		// pollInterval tick cannot be what reaches the job
+		synctest.Wait()
 
-	deadline := time.After(3 * time.Second)
-	for {
 		var status string
 		if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status); err != nil {
 			t.Fatalf("query status: %v", err)
 		}
-		if status == string(storage.EnrichmentDone) {
-			break
+		if status != string(storage.EnrichmentDone) {
+			t.Fatalf("status = %q once the worker went idle again, want done: Notify isn't waking the worker", status)
 		}
-		select {
-		case <-deadline:
-			t.Fatalf("job did not reach done within 3s of Notify (status = %q); pollInterval is 1m, so this means Notify isn't waking the worker", status)
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return within 2s of cancellation")
-	}
+		cancel()
+		<-done
+	})
 }
 
 // A job in flight when ctx is cancelled is left running, not failed — the
@@ -359,64 +356,57 @@ func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
 // classification with Failed == Asked and nothing found — the one path
 // that could turn a shutdown into a permanent failed row.
 func TestWorkerCancellationLeavesJobRunningForRecovery(t *testing.T) {
-	db := openTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		db := openTestDB(t)
+		ctx, cancel := context.WithCancel(context.Background())
 
-	id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-6", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
-	if err != nil {
-		t.Fatalf("CreateBook: %v", err)
-	}
-	if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
-		t.Fatalf("EnqueueEnrichment: %v", err)
-	}
+		id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-6", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
+		if err != nil {
+			t.Fatalf("CreateBook: %v", err)
+		}
+		if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
+			t.Fatalf("EnqueueEnrichment: %v", err)
+		}
 
-	entered := make(chan struct{})
-	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		close(entered)
-		<-ctx.Done()
-		return Metadata{}, ctx.Err()
-	}}
-	w := newTestWorker(t, db, []Provider{p})
+		entered := make(chan struct{})
+		p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			close(entered)
+			<-ctx.Done()
+			return Metadata{}, ctx.Err()
+		}}
+		w := newTestWorker(t, db, []Provider{p})
 
-	done := make(chan struct{})
-	go func() {
-		w.Run(ctx)
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			w.Run(ctx)
+			close(done)
+		}()
 
-	select {
-	case <-entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("provider was never called")
-	}
-	cancel()
+		<-entered
+		cancel()
+		<-done
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return within 2s of cancellation")
-	}
+		var status string
+		if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != string(storage.EnrichmentRunning) {
+			t.Fatalf("status = %q, want running (the row a crash mid-job leaves behind)", status)
+		}
 
-	var status string
-	if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != string(storage.EnrichmentRunning) {
-		t.Fatalf("status = %q, want running (the row a crash mid-job leaves behind)", status)
-	}
+		n, err := db.RequeueInterruptedEnrichment(context.Background(), time.Now())
+		if err != nil {
+			t.Fatalf("RequeueInterruptedEnrichment: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("RequeueInterruptedEnrichment resolved %d rows, want 1", n)
+		}
 
-	n, err := db.RequeueInterruptedEnrichment(context.Background(), time.Now())
-	if err != nil {
-		t.Fatalf("RequeueInterruptedEnrichment: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("RequeueInterruptedEnrichment resolved %d rows, want 1", n)
-	}
-
-	recovered, err := db.ClaimNextEnrichment(context.Background(), time.Now())
-	if err != nil || recovered == nil {
-		t.Fatalf("ClaimNextEnrichment after recovery: %+v, %v", recovered, err)
-	}
+		recovered, err := db.ClaimNextEnrichment(context.Background(), time.Now())
+		if err != nil || recovered == nil {
+			t.Fatalf("ClaimNextEnrichment after recovery: %+v, %v", recovered, err)
+		}
+	})
 }
 
 // A job that pulls fields from two different providers must apply each
@@ -476,11 +466,13 @@ func jobStatus(t *testing.T, db *storage.DB, bookID int64) string {
 func coverServer(t *testing.T, img []byte) (url string, requests *int) {
 	t.Helper()
 	count := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count++
 		w.Write(img)
 	}))
-	t.Cleanup(srv.Close)
+	// A real socket: the worker fetches through its own transport, which
+	// dials, and the guard tests are about that dial
+	srv.Start()
 	return srv.URL + "/cover.jpg", &count
 }
 
@@ -806,54 +798,47 @@ func TestWorkerRecordsNoFieldsWhenNothingWasMissing(t *testing.T) {
 // the cancelled context and returns before any verdict is written, so it
 // passes with this guard deleted.
 func TestWorkerCancellationIsNotRecordedAsAVerdict(t *testing.T) {
-	db := openTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		db := openTestDB(t)
+		ctx, cancel := context.WithCancel(context.Background())
 
-	id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-7", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
-	if err != nil {
-		t.Fatalf("CreateBook: %v", err)
-	}
-	if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
-		t.Fatalf("EnqueueEnrichment: %v", err)
-	}
+		id, err := db.CreateBook(context.Background(), storage.Book{ContentHash: "worker-7", Title: "Book", SortTitle: "book", ISBN: "9780000000001"}, nil)
+		if err != nil {
+			t.Fatalf("CreateBook: %v", err)
+		}
+		if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
+			t.Fatalf("EnqueueEnrichment: %v", err)
+		}
 
-	entered := make(chan struct{})
-	a := &fakeProvider{name: "provider-a", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		return Metadata{}, nil
-	}}
-	b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		close(entered)
-		<-ctx.Done()
-		return Metadata{}, ctx.Err()
-	}}
-	w := newTestWorker(t, db, []Provider{a, b})
+		entered := make(chan struct{})
+		a := &fakeProvider{name: "provider-a", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			return Metadata{}, nil
+		}}
+		b := &fakeProvider{name: "provider-b", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			close(entered)
+			<-ctx.Done()
+			return Metadata{}, ctx.Err()
+		}}
+		w := newTestWorker(t, db, []Provider{a, b})
 
-	done := make(chan struct{})
-	go func() {
-		w.Run(ctx)
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			w.Run(ctx)
+			close(done)
+		}()
 
-	select {
-	case <-entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("provider-b was never called")
-	}
-	cancel()
+		<-entered
+		cancel()
+		<-done
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return within 2s of cancellation")
-	}
-
-	var status string
-	if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != string(storage.EnrichmentRunning) {
-		t.Fatalf("status = %q, want running — an abandoned run is not a verdict", status)
-	}
+		var status string
+		if err := db.Read().QueryRow(`SELECT status FROM enrichment_jobs WHERE book_id = ?`, id).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != string(storage.EnrichmentRunning) {
+			t.Fatalf("status = %q, want running — an abandoned run is not a verdict", status)
+		}
+	})
 }
 
 // Decision 3: a run whose only result was a cover it could not save is a
@@ -1004,56 +989,49 @@ func TestWorkerCoverOnlyRunFailsForTheCoverNotTheProvider(t *testing.T) {
 // cover-only shape; the cover server then blocks until the run is
 // cancelled, which is what puts the cancellation inside the fetch.
 func TestWorkerCoverOnlyCancellationLeavesJobRunning(t *testing.T) {
-	db := openTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		db := openTestDB(t)
+		ctx, cancel := context.WithCancel(context.Background())
 
-	id, err := db.CreateBook(context.Background(), storage.Book{
-		ContentHash: "worker-cover-cancel", Title: "Book", SortTitle: "book",
-		Publisher: "Press", PublishedDate: "2020", Language: "en",
-		ISBN: "9780000000001", Description: "Text",
-	}, []string{"An Author"})
-	if err != nil {
-		t.Fatalf("CreateBook: %v", err)
-	}
-	if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
-		t.Fatalf("EnqueueEnrichment: %v", err)
-	}
+		id, err := db.CreateBook(context.Background(), storage.Book{
+			ContentHash: "worker-cover-cancel", Title: "Book", SortTitle: "book",
+			Publisher: "Press", PublishedDate: "2020", Language: "en",
+			ISBN: "9780000000001", Description: "Text",
+		}, []string{"An Author"})
+		if err != nil {
+			t.Fatalf("CreateBook: %v", err)
+		}
+		if _, err := db.EnqueueEnrichment(context.Background(), id, time.Now()); err != nil {
+			t.Fatalf("EnqueueEnrichment: %v", err)
+		}
 
-	entered := make(chan struct{})
-	var once sync.Once
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		once.Do(func() { close(entered) })
-		<-r.Context().Done()
-	}))
-	t.Cleanup(server.Close)
+		entered := make(chan struct{})
+		var once sync.Once
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			once.Do(func() { close(entered) })
+			<-r.Context().Done()
+		}))
 
-	p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
-		return Metadata{CoverURL: server.URL + "/cover.jpg"}, nil
-	}}
-	worker := newTestWorker(t, db, []Provider{p})
+		p := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
+			return Metadata{CoverURL: testCoverURL}, nil
+		}}
+		worker := newTestWorker(t, db, []Provider{p})
+		useCoverTransport(worker, server.Client().Transport)
 
-	done := make(chan struct{})
-	go func() {
-		worker.Run(ctx)
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			worker.Run(ctx)
+			close(done)
+		}()
 
-	select {
-	case <-entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the cover fetch was never reached")
-	}
-	cancel()
+		<-entered
+		cancel()
+		<-done
 
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Run did not return within 3s of cancellation")
-	}
-
-	if got := jobStatus(t, db, id); got != string(storage.EnrichmentRunning) {
-		t.Errorf("status = %q, want running — an abandoned fetch is not a verdict", got)
-	}
+		if got := jobStatus(t, db, id); got != string(storage.EnrichmentRunning) {
+			t.Errorf("status = %q, want running — an abandoned fetch is not a verdict", got)
+		}
+	})
 }
 
 // A panic in a job must not take the process with it, and must not leave
@@ -1197,11 +1175,11 @@ func TestWorkerRefusesAnHTTPSCoverOnALoopbackAddress(t *testing.T) {
 	}
 
 	requests := 0
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		w.Write(solidPNG(t))
 	}))
-	t.Cleanup(server.Close)
+	server.StartTLS()
 
 	p := &fakeProvider{name: "fake", byISBN: func(context.Context, string) (Metadata, error) {
 		return Metadata{Publisher: "Ace Books", CoverURL: server.URL + "/cover.jpg"}, nil

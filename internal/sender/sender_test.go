@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"library/internal/resend"
@@ -301,123 +302,115 @@ func TestWorkerPrunedBookFails(t *testing.T) {
 // Notify must wake a worker that is already idle in Run's select, without
 // waiting for the once-a-minute pollInterval tick.
 func TestWorkerNotifyWakesIdleWorker(t *testing.T) {
-	libraryDir := t.TempDir()
-	db := openTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		libraryDir := t.TempDir()
+		db := openTestDB(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	stub := &stubTransport{sendFunc: func(ctx context.Context, to string, a resend.Attachment) (string, error) {
-		return "msg_1", nil
-	}}
-	w := New(db, stub, libraryDir)
+		stub := &stubTransport{sendFunc: func(ctx context.Context, to string, a resend.Attachment) (string, error) {
+			return "msg_1", nil
+		}}
+		w := New(db, stub, libraryDir)
 
-	done := make(chan struct{})
-	go func() {
-		w.Run(ctx)
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			w.Run(ctx)
+			close(done)
+		}()
+		// Run drains once as it starts. Let that find nothing and park, so
+		// the send below can only be reached by Notify
+		synctest.Wait()
 
-	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
-	sendID, _, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
-	if err != nil {
-		t.Fatalf("EnqueueSend: %v", err)
-	}
-	w.Notify()
+		bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
+		sendID, _, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
+		if err != nil {
+			t.Fatalf("EnqueueSend: %v", err)
+		}
+		w.Notify()
+		// The clock does not move while the worker has work, so the
+		// pollInterval tick cannot be what reaches the send
+		synctest.Wait()
 
-	deadline := time.After(3 * time.Second)
-	for {
 		got, err := db.GetSend(context.Background(), sendID)
 		if err != nil {
 			t.Fatalf("GetSend: %v", err)
 		}
-		if got.Status == storage.SendDelivered {
-			break
+		if got.Status != storage.SendDelivered {
+			t.Fatalf("status = %q once the worker went idle again, want delivered: Notify isn't waking the worker", got.Status)
 		}
-		select {
-		case <-deadline:
-			t.Fatalf("send did not reach delivered within 3s of Notify (status = %q); pollInterval is 1m, so this means Notify isn't waking the worker", got.Status)
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
 
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return within 2s of cancellation")
-	}
+		cancel()
+		<-done
+	})
 }
 
 // A job in flight when Run's context is cancelled is left in the sending
 // state rather than guessed at — the recovery contract that
 // storage.FailInterruptedSends resolves at next startup.
 func TestWorkerCancellationLeavesRowSendingForRecovery(t *testing.T) {
-	libraryDir := t.TempDir()
-	db := openTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		libraryDir := t.TempDir()
+		db := openTestDB(t)
+		ctx, cancel := context.WithCancel(context.Background())
 
-	bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
-	sendID, _, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
-	if err != nil {
-		t.Fatalf("EnqueueSend: %v", err)
-	}
+		bookID := setupBookWithFile(t, db, libraryDir, "book.epub", []byte("x"))
+		sendID, _, err := db.EnqueueSend(context.Background(), bookID, "Book", "reader@kindle.com", time.Now())
+		if err != nil {
+			t.Fatalf("EnqueueSend: %v", err)
+		}
 
-	entered := make(chan struct{})
-	stub := &stubTransport{sendFunc: func(ctx context.Context, to string, a resend.Attachment) (string, error) {
-		close(entered)
-		<-ctx.Done()
-		// Deliberately DeadlineExceeded rather than ctx.Err(): a parent
-		// cancellation must win over the timeout classification whatever
-		// the transport's error says, or a shutdown landing during a slow
-		// upload writes a permanent failed row instead of leaving the
-		// unknown for FailInterruptedSends. This is what pins the order
-		// of the two checks in process.
-		return "", fmt.Errorf("send request: %w", context.DeadlineExceeded)
-	}}
-	w := New(db, stub, libraryDir)
+		entered := make(chan struct{})
+		stub := &stubTransport{sendFunc: func(ctx context.Context, to string, a resend.Attachment) (string, error) {
+			close(entered)
+			<-ctx.Done()
+			// Deliberately DeadlineExceeded rather than ctx.Err(): a parent
+			// cancellation must win over the timeout classification whatever
+			// the transport's error says, or a shutdown landing during a slow
+			// upload writes a permanent failed row instead of leaving the
+			// unknown for FailInterruptedSends. This is what pins the order
+			// of the two checks in process.
+			return "", fmt.Errorf("send request: %w", context.DeadlineExceeded)
+		}}
+		w := New(db, stub, libraryDir)
 
-	done := make(chan struct{})
-	go func() {
-		w.Run(ctx)
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			w.Run(ctx)
+			close(done)
+		}()
 
-	select {
-	case <-entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("transport was never called")
-	}
-	cancel()
+		// Cancel straight away: the transport is parked on a context that
+		// also carries the send's own deadline, and the clock would run on
+		// to it if this goroutine blocked first
+		<-entered
+		cancel()
+		<-done
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return within 2s of cancellation")
-	}
+		got, err := db.GetSend(context.Background(), sendID)
+		if err != nil || got == nil {
+			t.Fatalf("GetSend: %+v, %v", got, err)
+		}
+		if got.Status != storage.SendSending {
+			t.Fatalf("Status = %q, want sending (the row a crash mid-send leaves behind)", got.Status)
+		}
 
-	got, err := db.GetSend(context.Background(), sendID)
-	if err != nil || got == nil {
-		t.Fatalf("GetSend: %+v, %v", got, err)
-	}
-	if got.Status != storage.SendSending {
-		t.Fatalf("Status = %q, want sending (the row a crash mid-send leaves behind)", got.Status)
-	}
+		n, err := db.FailInterruptedSends(context.Background(), "interrupted by a restart", time.Now())
+		if err != nil {
+			t.Fatalf("FailInterruptedSends: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("FailInterruptedSends resolved %d rows, want 1", n)
+		}
 
-	n, err := db.FailInterruptedSends(context.Background(), "interrupted by a restart", time.Now())
-	if err != nil {
-		t.Fatalf("FailInterruptedSends: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("FailInterruptedSends resolved %d rows, want 1", n)
-	}
-
-	recovered, err := db.GetSend(context.Background(), sendID)
-	if err != nil || recovered == nil {
-		t.Fatalf("GetSend after recovery: %+v, %v", recovered, err)
-	}
-	if recovered.Status != storage.SendFailed {
-		t.Errorf("Status after recovery = %q, want failed", recovered.Status)
-	}
+		recovered, err := db.GetSend(context.Background(), sendID)
+		if err != nil || recovered == nil {
+			t.Fatalf("GetSend after recovery: %+v, %v", recovered, err)
+		}
+		if recovered.Status != storage.SendFailed {
+			t.Errorf("Status after recovery = %q, want failed", recovered.Status)
+		}
+	})
 }
 
 func TestWorkerRecordsDeliveryEvenIfCancelledOnTheWayBack(t *testing.T) {
@@ -502,42 +495,48 @@ func TestWorkerStorageFailureDoesNotClaimTheFileIsGone(t *testing.T) {
 // says so, rather than with the raw error's URL and "context deadline
 // exceeded", and the log carries the send id.
 func TestWorkerTimeoutIsRecordedAsUnknownOutcome(t *testing.T) {
-	libraryDir := t.TempDir()
-	db := openTestDB(t)
-	ctx := context.Background()
+	synctest.Test(t, func(t *testing.T) {
+		libraryDir := t.TempDir()
+		db := openTestDB(t)
+		ctx := context.Background()
 
-	var logged bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+		var logged bytes.Buffer
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+		t.Cleanup(func() { slog.SetDefault(previous) })
 
-	bookID := setupBookWithFile(t, db, libraryDir, "slow.epub", []byte("x"))
-	sendID, _, err := db.EnqueueSend(ctx, bookID, "Slow", "reader@kindle.com", time.Now())
-	if err != nil {
-		t.Fatalf("EnqueueSend: %v", err)
-	}
+		bookID := setupBookWithFile(t, db, libraryDir, "slow.epub", []byte("x"))
+		sendID, _, err := db.EnqueueSend(ctx, bookID, "Slow", "reader@kindle.com", time.Now())
+		if err != nil {
+			t.Fatalf("EnqueueSend: %v", err)
+		}
 
-	stub := &stubTransport{sendFunc: func(ctx context.Context, to string, a resend.Attachment) (string, error) {
-		<-ctx.Done()
-		return "", fmt.Errorf("send request: %w", ctx.Err())
-	}}
-	w := New(db, stub, libraryDir)
-	w.sendTimeout = 50 * time.Millisecond
-	w.drain(ctx)
+		stub := &stubTransport{sendFunc: func(ctx context.Context, to string, a resend.Attachment) (string, error) {
+			<-ctx.Done()
+			return "", fmt.Errorf("send request: %w", ctx.Err())
+		}}
+		w := New(db, stub, libraryDir)
+		w.sendTimeout = 50 * time.Millisecond
+		start := time.Now()
+		w.drain(ctx)
+		if elapsed := time.Since(start); elapsed != w.sendTimeout {
+			t.Errorf("the send was abandoned after %v, want its own deadline, %v", elapsed, w.sendTimeout)
+		}
 
-	got, err := db.GetSend(ctx, sendID)
-	if err != nil || got == nil {
-		t.Fatalf("GetSend: %+v, %v", got, err)
-	}
-	if got.Status != storage.SendFailed {
-		t.Fatalf("Status = %q, want failed — a timeout has no restart coming to resolve a sending row", got.Status)
-	}
-	if got.FailureReason != timedOutReason {
-		t.Errorf("FailureReason = %q, want %q", got.FailureReason, timedOutReason)
-	}
-	if !strings.Contains(logged.String(), "send timed out") || !strings.Contains(logged.String(), fmt.Sprintf("send_id=%d", sendID)) {
-		t.Errorf("log does not name the timeout and the send:\n%s", logged.String())
-	}
+		got, err := db.GetSend(ctx, sendID)
+		if err != nil || got == nil {
+			t.Fatalf("GetSend: %+v, %v", got, err)
+		}
+		if got.Status != storage.SendFailed {
+			t.Fatalf("Status = %q, want failed — a timeout has no restart coming to resolve a sending row", got.Status)
+		}
+		if got.FailureReason != timedOutReason {
+			t.Errorf("FailureReason = %q, want %q", got.FailureReason, timedOutReason)
+		}
+		if !strings.Contains(logged.String(), "send timed out") || !strings.Contains(logged.String(), fmt.Sprintf("send_id=%d", sendID)) {
+			t.Errorf("log does not name the timeout and the send:\n%s", logged.String())
+		}
+	})
 }
 
 // The per-send deadline grows with the attachment: a small file keeps the
