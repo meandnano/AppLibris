@@ -950,6 +950,43 @@ func TestLibraryPageOffersNoPastingWhenImportIsDisabled(t *testing.T) {
 	if strings.Contains(body, "paste-link.js") {
 		t.Errorf("a read-only library loads paste-link.js:\n%s", body)
 	}
+	if strings.Contains(body, "data-paste-button") || strings.Contains(body, "search__paste") {
+		t.Errorf("a read-only library renders the Paste button:\n%s", body)
+	}
+}
+
+// The script reveals the button, so with JS off it never offers a paste
+// nothing would answer
+func TestLibraryPageRendersThePasteButtonHidden(t *testing.T) {
+	handler, _, _ := newImportHandler(t, 1<<20)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+
+	button := openTag(t, body, "paste-button")
+	for _, want := range []string{
+		`type="button"`,
+		`title="Paste a link from the clipboard"`,
+		`data-paste-button`,
+		"hidden",
+	} {
+		if !strings.Contains(button, want) {
+			t.Errorf("the Paste button lacks %s: %s", want, button)
+		}
+	}
+	if !strings.Contains(body, "data-paste-hint") {
+		t.Errorf("the Paste button has no hint for the script to fill:\n%s", body)
+	}
+	// Inside the search row, not the grid fragment a search swaps
+	at := strings.Index(body, `class="search__row"`)
+	if at < 0 {
+		t.Fatalf("the library page has no search row:\n%s", body)
+	}
+	row := body[at:]
+	if end := strings.Index(row, "</form>"); end < 0 || !strings.Contains(row[:end], "data-paste-button") {
+		t.Errorf("the Paste button is not in the search toolbar row:\n%s", body)
+	}
 }
 
 // On the Import page a paste would compete with its own link form
@@ -977,7 +1014,7 @@ func TestLibraryGridFragmentCarriesNoDropTarget(t *testing.T) {
 		if strings.Contains(body, "data-import-drop") {
 			t.Errorf("the %s fragment carries the drop target:\n%s", path, body)
 		}
-		if strings.Contains(body, "data-paste-link") || strings.Contains(body, "paste-link.js") {
+		if strings.Contains(body, "data-paste-link") || strings.Contains(body, "paste-link.js") || strings.Contains(body, "data-paste-button") {
 			t.Errorf("the %s fragment carries the paste dialog:\n%s", path, body)
 		}
 	}

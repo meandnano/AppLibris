@@ -368,11 +368,11 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 - Modify: `internal/web/static/css/app.css`
 - Modify: `internal/web/web_test.go`
 
-- [ ] add the control group (rule plus button) at the right end of the search toolbar row; the button renders `hidden`, with its title and a hint element
-- [ ] add the rest, hover and handing-off styles per the Paste button look
-- [ ] in `paste-link.js`: reveal the button, set the platform hint, and read the clipboard on click, opening the dialog prefilled or empty
-- [ ] write tests: the button is rendered `hidden` with its title only when importing is enabled
-- [ ] run tests - must pass before task 8
+- [x] add the control group (rule plus button) at the right end of the search toolbar row; the button renders `hidden`, with its title and a hint element
+- [x] add the rest, hover and handing-off styles per the Paste button look
+- [x] in `paste-link.js`: reveal the button, set the platform hint, and read the clipboard on click, opening the dialog prefilled or empty
+- [x] write tests: the button is rendered `hidden` with its title only when importing is enabled
+- [x] run tests - must pass before task 8
 
 ### Task 8: Verify acceptance criteria
 

@@ -114,6 +114,18 @@
     {{/* Hidden until search.js binds the shortcut — a hint for a key that
          does nothing would be worse than no hint. */}}
     <kbd class="search__shortcut" data-search-shortcut hidden>/</kbd>
+    {{/* Hidden until paste-link.js can answer it: with JS off the Import
+         page's link form is the way in. type="button" keeps it from
+         submitting the search, and the title names links only, since the
+         clipboard API reads text and never a file */}}
+    {{if .ImportDrop}}<div class="search__paste">
+      <span class="search__rule" aria-hidden="true"></span>
+      <button class="paste-button" type="button" title="Paste a link from the clipboard" data-paste-button hidden>
+        <span class="paste-button__label">Paste</span>
+        <kbd class="paste-button__hint" data-paste-hint></kbd>
+        <span class="paste-button__spinner" aria-hidden="true"></span>
+      </button>
+    </div>{{end}}
   </div>
 </form>
 {{end}}

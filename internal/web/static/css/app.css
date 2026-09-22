@@ -280,6 +280,77 @@ a.masthead__link:hover {
   padding: 4px 7px;
 }
 
+.search__paste {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+/* The rule belongs to the button, so it goes with it until the script
+   reveals the button */
+.search__paste:has(> [data-paste-button][hidden]) {
+  display: none;
+}
+
+.search__rule {
+  width: 1px;
+  height: 26px;
+  background: var(--rule);
+}
+
+.paste-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 16px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.paste-button:hover {
+  border-color: var(--fg);
+  color: var(--fg);
+}
+
+.paste-button__label {
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.paste-button__hint {
+  font: inherit;
+  color: var(--fg-faint);
+  letter-spacing: 0.04em;
+}
+
+.paste-button__spinner {
+  display: none;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--rule);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+}
+
+.paste-button[aria-busy="true"] .paste-button__label {
+  color: var(--fg-faint);
+}
+
+.paste-button[aria-busy="true"] .paste-button__hint {
+  display: none;
+}
+
+.paste-button[aria-busy="true"] .paste-button__spinner {
+  display: block;
+  animation: search-spin 0.7s linear infinite;
+}
+
 /* "filtering …" and the results count are the same line in the same box —
    only ever one of them at a time, with identical metrics, so a search
    starting doesn't move the grid under the reader's eyes. */
