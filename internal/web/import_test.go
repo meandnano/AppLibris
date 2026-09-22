@@ -142,7 +142,8 @@ func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.
 	// cmd/server builds one only when its probe succeeds.
 	var stager *importer.Stager
 	if writable {
-		s, err := importer.New(db, importer.Options{
+		var err error
+		stager, err = importer.New(db, importer.Options{
 			LibraryDir: libraryDir,
 			CoversDir:  coversDir,
 			TempDir:    filepath.Join(root, "staging"),
@@ -151,7 +152,6 @@ func newImportHandlerWritable(t *testing.T, maxSize int64, writable bool) (http.
 		if err != nil {
 			t.Fatalf("importer.New: %v", err)
 		}
-		stager = s
 	}
 
 	svc := service.New(db, service.WithImporter(stager))

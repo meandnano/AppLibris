@@ -17,43 +17,31 @@ import (
 	"library/internal/storage"
 )
 
-var (
-	templateOnce  sync.Once
-	templateBytes []byte
-	templateErr   error
-)
-
 // template returns the bytes of a database with every migration applied,
 // building it on the first call. Holding the bytes rather than a path
 // leaves nothing on disk for a TestMain to clean up, and building it from
 // the migrations the binary was compiled with means it can never go stale
 // the way a committed fixture would.
-func template() ([]byte, error) {
-	templateOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "applibris-storagetest")
-		if err != nil {
-			templateErr = err
-			return
-		}
-		defer os.RemoveAll(dir)
+var template = sync.OnceValues(func() ([]byte, error) {
+	dir, err := os.MkdirTemp("", "applibris-storagetest")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
 
-		path := filepath.Join(dir, "library.db")
-		db, err := storage.Open(path)
-		if err != nil {
-			templateErr = err
-			return
-		}
-		// Close is what checkpoints the WAL into the main file, so the read
-		// has to follow it: the -wal file goes with the directory, and bytes
-		// read before the checkpoint would carry none of the schema.
-		if err := db.Close(); err != nil {
-			templateErr = err
-			return
-		}
-		templateBytes, templateErr = os.ReadFile(path)
-	})
-	return templateBytes, templateErr
-}
+	path := filepath.Join(dir, "library.db")
+	db, err := storage.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	// Close is what checkpoints the WAL into the main file, so the read has
+	// to follow it: the -wal file goes with the directory, and bytes read
+	// before the checkpoint would carry none of the schema.
+	if err := db.Close(); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+})
 
 // Open returns a database migrated to the current schema, closed when the
 // test ends. storage.Open still runs migrate over the copy, which finds
@@ -99,7 +87,7 @@ func SeedSends(t testing.TB, db *storage.DB, bookID int64, title string, at []ti
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO send_log (book_id, book_title, recipient_address, status, queued_at)
 				VALUES (?, ?, ?, ?, ?)`,
-				bookID, title, address, "queued", when.UTC().Format(sqliteTimeLayout)); err != nil {
+				bookID, title, address, string(storage.SendQueued), when.UTC().Format(sqliteTimeLayout)); err != nil {
 				return err
 			}
 		}
@@ -111,7 +99,8 @@ func SeedSends(t testing.TB, db *storage.DB, bookID int64, title string, at []ti
 }
 
 // sqliteTimeLayout is storage's own timestamp format, which is unexported
-// there. A row written in any other shape would sort and compare wrongly
-// against the rows EnqueueSend writes, which is what this package's test
-// pins.
+// there. queued_at is text and history orders on it, so only a fixed-width
+// layout sorts chronologically; a row written in any other shape would
+// interleave wrongly against the rows EnqueueSend writes. This package's
+// tests pin both halves — the text itself, and the order it produces.
 const sqliteTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"

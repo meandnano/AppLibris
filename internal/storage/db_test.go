@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 	"testing/synctest"
@@ -49,6 +51,74 @@ func TestOpen(t *testing.T) {
 			t.Errorf("table %q not found: %v", table, err)
 		}
 	}
+}
+
+// templateDB has to carry the schema itself, not merely open into one:
+// Open migrates whatever it is given, so a template read before its WAL was
+// checkpointed opens into a correct database that every test then migrates
+// from scratch — the cost the template exists to remove, and invisible
+// through Open. So this reads the bytes with a bare driver handle, which
+// runs no migrations.
+func TestTemplateCarriesTheMigratedSchema(t *testing.T) {
+	migrated, err := templateDB()
+	if err != nil {
+		t.Fatalf("build template database: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "template.db")
+	if err := os.WriteFile(path, migrated, 0o644); err != nil {
+		t.Fatalf("write template database: %v", err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open template database: %v", err)
+	}
+	defer raw.Close()
+
+	fresh, err := Open(filepath.Join(t.TempDir(), "library.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer fresh.Close()
+
+	const versions = `SELECT version FROM schema_migrations ORDER BY version`
+	freshVersions := queryStrings(t, fresh.Read(), versions)
+	if len(freshVersions) == 0 {
+		t.Fatal("a freshly migrated database reports no applied migrations")
+	}
+	if got := queryStrings(t, raw, versions); fmt.Sprint(got) != fmt.Sprint(freshVersions) {
+		t.Errorf("template applied migrations = %v, want %v", got, freshVersions)
+	}
+
+	const schema = `SELECT type || ' ' || name || ': ' || IFNULL(sql, '') FROM sqlite_master ORDER BY type, name`
+	freshSchema := queryStrings(t, fresh.Read(), schema)
+	if len(freshSchema) == 0 {
+		t.Fatal("a freshly migrated database reports no schema objects")
+	}
+	if got := queryStrings(t, raw, schema); fmt.Sprint(got) != fmt.Sprint(freshSchema) {
+		t.Errorf("template schema = %v, want %v", got, freshSchema)
+	}
+}
+
+func queryStrings(t *testing.T, db *sql.DB, query string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), query)
+	if err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	defer rows.Close()
+
+	var values []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			t.Fatalf("scan %s: %v", query, err)
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return values
 }
 
 func TestOpenBoundsReadPool(t *testing.T) {

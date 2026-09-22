@@ -13,8 +13,8 @@ Four rules come with the bubble.
 
 - **Everything the test runs is built inside it, with the bubble's `t`.**
   `database/sql` starts a connection opener per pool, which `db.Close`
-  stops, and `t.Cleanup` runs inside the bubble, so `openTestDB` there is
-  correct. A handle opened outside and used inside is not: the pool
+  stops, and `t.Cleanup` runs inside the bubble, so `storagetest.Open`
+  there is correct. A handle opened outside and used inside is not: the pool
   answers a request channel the bubble made from a goroutine the bubble
   does not own, which is a fatal error.
 - **Nothing a bubble runs may own a goroutine that outlives its caller.**
@@ -73,35 +73,45 @@ network.
 ## The database
 
 A test's database is `storagetest.Open(t)`: a copy of a template the test
-binary migrated once, opened from `t.TempDir()`. Running every migration
-again per test costs twenty times what copying the file does, and a suite
-of around 450 such tests spends most of its CPU there rather than on
-anything it asserts. `storage.Open` still runs `migrate` over the copy,
-which finds every migration applied.
+binary migrated once, opened from `t.TempDir()`. Some four hundred tests
+open one, and running every migration again for each costs twenty times
+what copying the file does under `-race` — most of what those tests spend,
+on nothing any of them asserts. `storage.Open` still runs `migrate` over
+the copy, which finds every migration applied.
 
 The template is built from the migrations the binary was compiled with, so
 it cannot go stale the way a committed fixture would, and it is held as
 bytes rather than a path, so nothing needs a `TestMain` to clean it up.
-`storagetest`'s own test is what pins it: it reads the template with a bare
-driver handle, which runs no migrations, and compares its
-`schema_migrations` and `sqlite_master` with a database migrated the long
-way. `Close` is what checkpoints the WAL into the main file, and only a
-test that looks at the template directly can see a template read before
-that checkpoint — through `storage.Open` an empty one is silently migrated
-and looks identical.
+That is also what makes it legal inside a bubble: the build opens *and*
+closes within the one call that first needs it, so it leaves no connection
+opener behind.
 
-Only tests about opening a database migrate from scratch: `storage`'s own
-`db_test.go`, and `cmd/server`, whose tests open a second handle on the
-file `run()` created. `storage`'s in-package tests cannot use
-`storagetest` at all, since it imports `storage`, so `books_test.go`
-carries its own copy of the same few lines.
+A test pins the template, because `Close` is what checkpoints the WAL into
+the main file and a template read before that checkpoint is invisible
+through `storage.Open` — an empty one is silently migrated and looks
+identical. So the test reads the bytes with a bare driver handle, which
+runs no migrations, and compares `schema_migrations` and `sqlite_master`
+with a database migrated the long way.
+
+Three kinds of test migrate from scratch instead:
+
+- Tests about opening a database — `storage`'s own `db_test.go`.
+- `cmd/server`, which stays on `storage.Open` throughout. Two of its opens
+  are second handles on the file `run()` created, which no template can
+  supply, and the rest keep the package on one way of opening.
+- `storage`'s own tests, which cannot import `storagetest` — it imports
+  them. The cycle rules out the import, not the technique, so
+  `books_test.go` carries the template itself and the two change together.
 
 `storagetest.SeedSends` writes `send_log` rows directly, in one
 transaction, for the two tests that need the history cap's worth of them.
 Seeding that table alone is faithful because history reads send_log's
 denormalised `book_title` and `recipient_address` and never joins `books`
-or `recipients`; the helper's test pins that a seeded row and an
-`EnqueueSend` row read back identically.
+or `recipients`. Its tests pin the row against an `EnqueueSend` one:
+identical columns and byte-identical `queued_at` text for the same instant,
+and, with an enqueued row timestamped between two seeded ones, the order
+`ListSendsSince` puts the three in — which is what the fixed-width
+timestamp exists for, and what a comparison of parsed times cannot see.
 
 ## What runs on real time
 

@@ -5,18 +5,52 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 )
 
-// The same few lines as storagetest.Open, minus the template: this package
-// is what storagetest imports, so reaching for it here would be a cycle.
+// templateDB is storagetest's template, built here as well because this
+// package is what storagetest imports: the cycle rules out the import, not
+// the technique, and these tests are the largest single population of it.
 // Change the two together.
+var templateDB = sync.OnceValues(func() ([]byte, error) {
+	dir, err := os.MkdirTemp("", "applibris-storage")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+
+	path := filepath.Join(dir, "library.db")
+	db, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	// Close is what checkpoints the WAL into the main file, so the read has
+	// to follow it: the -wal file goes with the directory, and bytes read
+	// before the checkpoint would carry none of the schema.
+	if err := db.Close(); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+})
+
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "library.db"))
+
+	migrated, err := templateDB()
+	if err != nil {
+		t.Fatalf("build template database: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "library.db")
+	if err := os.WriteFile(path, migrated, 0o644); err != nil {
+		t.Fatalf("write template database: %v", err)
+	}
+
+	db, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -1270,7 +1304,8 @@ func TestPruneMissingFilesHandlesMoreIDsThanOneSQLChunk(t *testing.T) {
 	var fileIDs []int64
 	// One transaction for the lot: a CreateBookWithFile and a FindFileByPath
 	// each would be two per row, and this test is about the chunking, not
-	// about how the rows arrive.
+	// about how the rows arrive. These books carry no books_fts row, since
+	// that is the one thing CreateBookWithFile does that this skips.
 	if err := db.Write(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		for i := 0; i < total; i++ {
 			path := fmt.Sprintf("book-%d.epub", i)
