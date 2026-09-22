@@ -123,15 +123,17 @@ library page, or pasting a copied one there with Cmd/Ctrl+V, does the same.
 A link to a book file works too: paste it on the library page, use its
 Paste button, or type it into the Import page's link field, and the server
 downloads it to the same preview. Only publicly reachable addresses are
-downloaded, so a book on your own network is dropped or uploaded instead. The file is held in `applibris-imports` under
-`TMPDIR` (`/tmp` in the container) while you look at the preview, and is
-copied into the root of `/library` under its own name only when you press
-Import. An unconfirmed upload is discarded after thirty minutes, and the
-directory is emptied on every restart. Several uploads may wait at once, so
-size `TMPDIR` for four times `MAX_IMPORT_SIZE` (256 MiB at the default);
-`/tmp` in a container is often a tmpfs in RAM. A `TMPDIR` the server cannot
-write disables importing with a startup warning and changes nothing else,
-so a `--read-only` container needs a tmpfs at `/tmp` or another `TMPDIR`.
+downloaded, so a book on your own network is dropped or uploaded instead.
+
+The file is held in `applibris-imports` under `TMPDIR` (`/tmp` in the
+container) while you look at the preview, and is copied into the root of
+`/library` under its own name only when you press Import. An unconfirmed
+upload is discarded after thirty minutes, and the directory is emptied on
+every restart. Several uploads may wait at once, so size `TMPDIR` for four
+times `MAX_IMPORT_SIZE` (256 MiB at the default); `/tmp` in a container is
+often a tmpfs in RAM. A `TMPDIR` the server cannot write disables importing
+with a startup warning and changes nothing else, so a `--read-only`
+container needs a tmpfs at `/tmp` or another `TMPDIR`.
 
 The file's content decides how it is saved: an FB2 named `.epub` is saved
 as `.fb2`, and the preview shows the name it will get. A file the library
@@ -172,13 +174,13 @@ working directory, which is `/` in the container.
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN` or `ERROR`. Logs go to stderr. |
 | `SCAN_INTERVAL` | `1h` | How often the library is rescanned regardless of filesystem events. |
 | `MISSING_GRACE` | `24h` | How long a file must stay missing before its record is removed. Must not be negative. |
-| `MAX_IMPORT_SIZE` | `64MiB` | Largest file the Import page accepts. A byte count, optionally suffixed `B`, `K`/`M`/`G` or `KB`/`MB`/`GB` (powers of ten), or `Ki`/`Mi`/`Gi` or `KiB`/`MiB`/`GiB` (powers of two), in any case. Must be positive. |
+| `MAX_IMPORT_SIZE` | `64MiB` | Largest file an import accepts, uploaded or downloaded from a link. A byte count, optionally suffixed `B`, `K`/`M`/`G` or `KB`/`MB`/`GB` (powers of ten), or `Ki`/`Mi`/`Gi` or `KiB`/`MiB`/`GiB` (powers of two), in any case. Must be positive. |
 | `WATCH_ENABLED` | `true` | Watch the library directory for changes. `false` relies on the rescan alone. |
 | `WATCH_SETTLE` | `5s` | How long the directory must be quiet after a change before a rescan runs. |
 | `REQUIRE_FETCH_METADATA` | `true` | Refuse state-changing requests that carry no `Sec-Fetch-Site` header. `false` admits them and logs a warning instead. |
 | `RESEND_API_KEY` | unset | Resend API key. Sending is disabled while unset. |
 | `RESEND_FROM` | unset | Sender address for Kindle mail. Sending is disabled while unset. |
-| `METADATA_PROVIDERS` | `openlibrary,googlebooks` | Providers to ask, in order. An unknown name fails startup. Set it empty (`METADATA_PROVIDERS=`) to disable enrichment and make no outbound requests. |
+| `METADATA_PROVIDERS` | `openlibrary,googlebooks` | Providers to ask, in order. An unknown name fails startup. Set it empty (`METADATA_PROVIDERS=`) to disable enrichment; the server then makes no outbound request except to download a link you paste to import. |
 | `GOOGLE_BOOKS_API_KEY` | unset | API key for Google Books. Without one the shared anonymous quota is used, which is routinely exhausted, so expect that provider to answer nothing. |
 
 ## Development

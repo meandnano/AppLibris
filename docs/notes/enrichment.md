@@ -355,7 +355,8 @@ Rules for `internal/enrich`, `internal/openlibrary`, `internal/googlebooks`,
 - **A repeated name is kept once, at its first position.** Two chains would
   mean two caches and two rate-limit budgets.
 - **`METADATA_PROVIDERS=` resolves to an empty, non-nil slice and disables
-  enrichment with no outbound requests.** The worker still runs with every
+  enrichment, and the enrichment worker then makes no outbound requests.**
+  The worker still runs with every
   job a no-op, the way an unset Resend key makes the sender one.
 
 ## The service surface

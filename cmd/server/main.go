@@ -143,14 +143,10 @@ func run(ctx context.Context) error {
 	// it is off, and no request has to rediscover it.
 	importDir := filepath.Join(os.TempDir(), "applibris-imports")
 	stager := newStager(db, libraryDir, coversDir, importDir, maxImportSize)
-	serviceOpts := []service.Option{service.WithImporter(stager)}
-	// Only beside a Stager, and never as a nil pointer: a nil
-	// *importer.Fetcher in the interface would read as a fetcher present
-	if stager != nil {
-		serviceOpts = append(serviceOpts, service.WithFetcher(importer.NewFetcher(maxImportSize)))
-	}
-
-	svc := service.New(db, serviceOpts...)
+	svc := service.New(db,
+		service.WithImporter(stager),
+		service.WithFetcher(importer.NewFetcher(maxImportSize)),
+	)
 	importEnabled := svc.ImportEnabled()
 
 	// Both RESEND_API_KEY and RESEND_FROM must be set to send anything —

@@ -1,6 +1,8 @@
 package importer
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +12,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
+
+	"library/internal/storage/storagetest"
 )
 
 // testFetcher builds the production Fetcher and hands it the in-memory
@@ -162,21 +168,53 @@ func TestFetchRefusesANonOKStatus(t *testing.T) {
 
 // The handler declares a length past the cap and then holds the body back
 // until the request is abandoned, so a Fetch that read a byte of it would
-// never return
+// block the bubble, which synctest reports as a deadlock at once
 func TestFetchRefusesADeclaredLengthPastTheCapWithoutReadingTheBody(t *testing.T) {
-	const maxSize = 1024
-	f := testFetcher(t, maxSize, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", strconv.Itoa(maxSize+1))
-		w.WriteHeader(http.StatusOK)
-		w.(http.Flusher).Flush()
-		<-r.Context().Done()
+	synctest.Test(t, func(t *testing.T) {
+		const maxSize = 1024
+		f := testFetcher(t, maxSize, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", strconv.Itoa(maxSize+1))
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		})
+		d, err := f.Fetch(context.Background(), "https://books.test/huge.epub")
+		if !errors.Is(err, ErrTooLarge) {
+			t.Fatalf("Fetch error = %v, want ErrTooLarge", err)
+		}
+		if d.Body != nil {
+			t.Error("Body is set on a refused download")
+		}
 	})
-	d, err := f.Fetch(context.Background(), "https://books.test/huge.epub")
-	if !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("Fetch error = %v, want ErrTooLarge", err)
+}
+
+// The transport decompresses a gzip body and drops its length, so a small
+// response inflating past the cap reaches Stage undeclared, and Stage's
+// count of the inflated bytes is what stops it
+func TestACompressedDownloadPastTheCapIsStoppedByStage(t *testing.T) {
+	const maxSize = 64 << 10
+	var packed bytes.Buffer
+	zw := gzip.NewWriter(&packed)
+	zw.Write(make([]byte, 16*maxSize))
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip: %v", err)
 	}
-	if d.Body != nil {
-		t.Error("Body is set on a refused download")
+	f := testFetcher(t, maxSize, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(packed.Bytes())
+	})
+	stager, _ := testStager(t, storagetest.Open(t), maxSize)
+
+	d, err := f.Fetch(context.Background(), "https://books.test/bomb.epub")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	defer d.Body.Close()
+	if _, err := stager.Stage(context.Background(), d.Name, d.Body); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Stage error = %v, want ErrTooLarge", err)
+	}
+	if names := stagingNames(t, stager); len(names) != 0 {
+		t.Errorf("staging holds %v, want nothing", names)
 	}
 }
 
@@ -195,21 +233,17 @@ func TestFetchAcceptsADeclaredLengthAtTheCap(t *testing.T) {
 }
 
 func TestFetchStopsAfterFiveRedirects(t *testing.T) {
-	var mu sync.Mutex
-	requests := 0
+	var requests atomic.Int32
 	f := testFetcher(t, 1<<20, func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		requests++
-		n := requests
-		mu.Unlock()
+		n := requests.Add(1)
 		http.Redirect(w, r, fmt.Sprintf("https://books.test/hop/%d", n), http.StatusFound)
 	})
 	_, err := f.Fetch(context.Background(), "https://books.test/start")
 	if err == nil || !strings.Contains(err.Error(), "stopped after 5 redirects") {
 		t.Fatalf("Fetch error = %v, want the redirect cap", err)
 	}
-	if requests != 6 {
-		t.Errorf("requests = %d, want the first plus five hops", requests)
+	if n := requests.Load(); n != 6 {
+		t.Errorf("requests = %d, want the first plus five hops", n)
 	}
 }
 
@@ -249,6 +283,7 @@ func TestFetchRefusesARedirectToAnotherScheme(t *testing.T) {
 // A hop to another host carries neither the previous URL, which can hold a
 // signed token, nor a cookie the first host set
 func TestFetchSendsNoRefererOrCookieOnARedirectedHop(t *testing.T) {
+	var mu sync.Mutex
 	var referer, cookie string
 	cdnRequests := 0
 	f := testFetcher(t, 1<<20, func(w http.ResponseWriter, r *http.Request) {
@@ -257,9 +292,11 @@ func TestFetchSendsNoRefererOrCookieOnARedirectedHop(t *testing.T) {
 			http.Redirect(w, r, "https://cdn.test/files/dune.epub", http.StatusFound)
 			return
 		}
+		mu.Lock()
 		cdnRequests++
 		referer = r.Header.Get("Referer")
 		cookie = r.Header.Get("Cookie")
+		mu.Unlock()
 		io.WriteString(w, "book")
 	})
 	d, err := f.Fetch(context.Background(), "https://books.test/download?token=abc")
@@ -267,6 +304,8 @@ func TestFetchSendsNoRefererOrCookieOnARedirectedHop(t *testing.T) {
 		t.Fatalf("Fetch: %v", err)
 	}
 	d.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
 	if cdnRequests != 1 {
 		t.Fatalf("cdn requests = %d, want 1", cdnRequests)
 	}
@@ -282,9 +321,9 @@ func TestFetchSendsNoRefererOrCookieOnARedirectedHop(t *testing.T) {
 // socket: the in-memory transport never dials, and the guard hangs on the
 // dial
 func TestFetchRefusesALoopbackAddress(t *testing.T) {
-	requests := 0
+	var requests atomic.Int32
 	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		requests.Add(1)
 		io.WriteString(w, "book")
 	}))
 	server.Start()
@@ -293,17 +332,17 @@ func TestFetchRefusesALoopbackAddress(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "is loopback") {
 		t.Fatalf("Fetch error = %v, want the loopback address refused", err)
 	}
-	if requests != 0 {
-		t.Errorf("requests = %d, want 0 — the dial must be refused before any bytes move", requests)
+	if n := requests.Load(); n != 0 {
+		t.Errorf("requests = %d, want 0 — the dial must be refused before any bytes move", n)
 	}
 }
 
 // https reaches the guard only because DialTLSContext is unset, so the
 // transport connects through DialContext and then wraps
 func TestFetchRefusesAnHTTPSLoopbackAddress(t *testing.T) {
-	requests := 0
+	var requests atomic.Int32
 	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		requests.Add(1)
 		io.WriteString(w, "book")
 	}))
 	server.StartTLS()
@@ -312,8 +351,8 @@ func TestFetchRefusesAnHTTPSLoopbackAddress(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "is loopback") {
 		t.Fatalf("Fetch error = %v, want the loopback address refused", err)
 	}
-	if requests != 0 {
-		t.Errorf("requests = %d, want 0 — the dial is refused before the TLS handshake", requests)
+	if n := requests.Load(); n != 0 {
+		t.Errorf("requests = %d, want 0 — the dial is refused before the TLS handshake", n)
 	}
 }
 
@@ -322,9 +361,9 @@ func TestFetchRefusesAnHTTPSLoopbackAddress(t *testing.T) {
 // again on the hop's dial, which is why the target is refused with no
 // request reaching it
 func TestFetchRefusesARedirectToAPrivateAddress(t *testing.T) {
-	inner := 0
+	var inner atomic.Int32
 	internal := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		inner++
+		inner.Add(1)
 		io.WriteString(w, "secret")
 	}))
 	internal.Start()
@@ -349,7 +388,7 @@ func TestFetchRefusesARedirectToAPrivateAddress(t *testing.T) {
 			}
 		})
 	}
-	if inner != 0 {
-		t.Errorf("the internal server saw %d requests, want 0", inner)
+	if n := inner.Load(); n != 0 {
+		t.Errorf("the internal server saw %d requests, want 0", n)
 	}
 }

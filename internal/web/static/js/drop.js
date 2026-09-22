@@ -103,8 +103,8 @@
     submitFiles(event.dataTransfer);
   });
 
-  // paste-link.js hands a pasted file here, and holds drops off while a
-  // pasted link is on its way to the server
+  // paste-link.js hands a pasted file here, holds drops off while a pasted
+  // link is on its way to the server, and lets go when its Cancel stops one
   window.importDrop = {
     submitFiles: submitFiles,
     busy: function () {

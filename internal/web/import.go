@@ -43,17 +43,6 @@ const responseWindow = 30 * time.Second
 // to triple it
 const linkFormLimit = 8 << 10
 
-// linkStartWindow is the time a download is given before its first body
-// byte: the fetcher's own dial, TLS handshake and response header timeouts
-// summed, so the handler never gives up on a download the fetcher is still
-// allowed to be starting
-const linkStartWindow = 35 * time.Second
-
-// downloadFailedLine covers every way a link can fail to connect. A refused
-// private address is deliberately among them: a sentence of its own would
-// confirm to whoever pasted the link that an internal hostname resolves
-const downloadFailedLine = "Couldn't download that link."
-
 // importPage is the data import.html and its fragments render against.
 // Preview nil is the idle state, where the panel shows the file input;
 // non-nil is a staged file waiting on a decision. Failure is the sentence a
@@ -247,23 +236,25 @@ func importURLHandler(svc *service.Service) http.HandlerFunc {
 			return
 		}
 
-		// The read deadline is extended with the write one because Go's
-		// server cancels the request's context when a read deadline passes
-		// mid-handler, which would cut off a download the window still
-		// allows
-		window := downloadWindow(svc.MaxImportBytes())
-		extendDeadlines(w, window+responseWindow, window+responseWindow)
-		ctx, cancel := context.WithTimeout(r.Context(), window)
-		defer cancel()
-
 		r.Body = http.MaxBytesReader(w, r.Body, linkFormLimit)
 		rawURL := r.PostFormValue("url")
+
+		// Only the write half: the form is read under cmd/server's own
+		// deadline, so a body trickled in is given no longer than any other
+		// request's, and once it is read the server clears the read
+		// deadline itself
+		window := downloadWindow(svc.MaxImportBytes())
+		extendDeadlines(w, 0, window+responseWindow)
+		ctx, cancel := context.WithTimeout(r.Context(), window)
+		defer cancel()
 
 		preview, err := svc.StageURL(ctx, rawURL)
 		if err != nil {
 			page.Failure = importFailureLine(err, svc.MaxImportBytes())
 			if page.Failure == "" {
-				page.Failure = downloadFailedLine
+				slog.Error("stage import from link failed", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
 			}
 			page.Link = rawURL
 			logLinkFailure(rawURL, err)
@@ -278,27 +269,18 @@ func importURLHandler(svc *service.Service) http.HandlerFunc {
 // sized at the upload's rate so a link is allowed what the same file
 // uploaded would be
 func downloadWindow(maxBytes int64) time.Duration {
-	return linkStartWindow + uploadWindow(maxBytes)
+	return importer.FetchStartTimeout + uploadWindow(maxBytes)
 }
 
 // logLinkFailure names the link by scheme, host and path only: its query
-// and fragment routinely carry a signed token, and the log outlives it
+// and fragment routinely carry a signed token, its userinfo a password, and
+// the log outlives both
 func logLinkFailure(rawURL string, err error) {
-	attrs := []any{"error", redactedLinkError(err)}
+	attrs := []any{"error", err}
 	if u, perr := url.Parse(rawURL); perr == nil {
 		attrs = append(attrs, "scheme", u.Scheme, "host", u.Host, "path", u.Path)
 	}
 	slog.Info("import from link failed", attrs...)
-}
-
-// redactedLinkError drops the URL an *url.Error prints in full, which is
-// the requested link or a redirect hop and so carries the same tokens
-func redactedLinkError(err error) string {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return urlErr.Op + ": " + urlErr.Err.Error()
-	}
-	return err.Error()
 }
 
 // importPreviewHandler serves GET /import/{id}: the staged file's preview,
@@ -609,6 +591,11 @@ func importFailureLine(err error, maxBytes int64) string {
 		return "The server answered " + strconv.Itoa(status.Code) + "."
 	case errors.Is(err, context.DeadlineExceeded):
 		return "The download took too long."
+	case errors.Is(err, service.ErrDownloadFailed):
+		// A refused private address is deliberately among these: a
+		// sentence of its own would confirm to whoever pasted the link
+		// that an internal hostname resolves
+		return "Couldn't download that link."
 	case errors.Is(err, service.ErrDownloadBusy):
 		return "Another link is still downloading."
 	case errors.Is(err, service.ErrImportDisabled):

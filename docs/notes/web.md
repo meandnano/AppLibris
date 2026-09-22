@@ -10,8 +10,8 @@ Rules for `internal/service` and `internal/web`.
 /books/{id}/enrich`, `GET /books/{id}/enrichment/{jobID}`, `POST
 /recipients/remove`, `GET /history`, `GET /import`, `POST /import/file`,
 `POST /import/url`, `GET /import/{id}`, `GET /import/{id}/cover`, `POST
-/import/{id}/confirm`, `POST /import/{id}/discard`, `/static/`, `/covers/`. The import routes are
-governed by `docs/notes/import.md`.
+/import/{id}/confirm`, `POST /import/{id}/discard`, `/static/`,
+`/covers/`. The import routes are governed by `docs/notes/import.md`.
 
 ## Service layer
 
@@ -110,13 +110,6 @@ governed by `docs/notes/import.md`.
   `drop.js` fills a hidden plain form and calls `form.submit()`, never a
   fetch or an htmx request.** The drop relies on the redirect and the 422
   page; see `docs/notes/import.md`.
-- **The Import page's link form and the library page's paste dialog are
-  plain posts to `/import/url` carrying no htmx setting.** The route
-  answers a 303 for every caller, and only a whole-page navigation puts
-  the preview's URL in the address bar.
-- **`paste-link.js` and the Paste button are rendered only on the full
-  library page, only when a `Stager` exists, the script after `drop.js`.**
-  It hands a pasted file to the drop's script, which exists nowhere else.
 - **A fragment is answered when `HX-Request` is present and
   `HX-History-Restore-Request` absent (`isHTMXFragment`).** Back issues a
   GET marked with the second header and swaps the answer into the whole
@@ -321,14 +314,15 @@ governed by `docs/notes/import.md`.
 
 ## Upload bodies
 
-- **The upload, link and confirm routes extend their own deadlines
-  through `http.NewResponseController`, both halves; `cmd/server`'s timeouts are
-  never loosened for other routes.** Go installs the write deadline once,
-  when the headers are read, so a widened read window alone sits inside a
-  write deadline that expired while the body arrived, and the import lands
-  with its answer never reaching the browser. Extended rather than removed,
-  so a stalled upload still ends. `confirmWindow` is derived from
-  `importer.IndexTimeout`, never restated.
+- **The upload route extends both halves of its deadline through
+  `http.NewResponseController`, the link and confirm routes the write half
+  alone; `cmd/server`'s timeouts are never loosened for other routes.** Go
+  installs the write deadline once, when the headers are read, so a
+  widened read window alone sits inside a write deadline that expired
+  while the body arrived, and the import lands with its answer never
+  reaching the browser. Extended rather than removed, so a stalled upload
+  still ends. `confirmWindow` is derived from `importer.IndexTimeout`,
+  never restated.
 - **`http.MaxBytesReader` bounds the body at the cap plus multipart
   overhead and is installed before any refusal; the number a refusal names
   is the importer's own count of the file part.** The read-only refusal

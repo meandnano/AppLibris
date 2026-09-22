@@ -38,8 +38,8 @@ for what these files may and may not say.
   Note: `docs/notes/enrichment.md`.
 - `internal/importer` — staging, previewing and landing an upload:
   `Stager`, the three `Verdict`s, `detectSuffix`, the library-name
-  derivation, and the `Fetcher` that downloads a pasted link. Indexes through `scanner.IndexFile`. Note:
-  `docs/notes/import.md`.
+  derivation, and the `Fetcher` that downloads a pasted link. Indexes
+  through `scanner.IndexFile`. Note: `docs/notes/import.md`.
 - `internal/netguard` — the address guard every outbound fetch of a
   user- or remote-chosen URL dials through. Notes:
   `docs/notes/enrichment.md`, `docs/notes/import.md`.

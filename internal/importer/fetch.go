@@ -23,6 +23,11 @@ const (
 	maxFetchRedirects = 5
 )
 
+// FetchStartTimeout is the longest one connection may take to reach its
+// first body byte, so a caller's deadline can leave room for it on top of
+// the body's own time
+const FetchStartTimeout = fetchDialTimeout + fetchTLSHandshakeTimeout + fetchResponseHeaderTimeout
+
 // fetchUserAgent is the agent every outbound client of this app sends, so
 // a host that throttles Go's generic default treats a download no worse
 // than a cover fetch

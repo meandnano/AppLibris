@@ -15,7 +15,6 @@
   var importButton = dialog.querySelector("[data-paste-import]");
   var downloading = dialog.querySelector("[data-paste-downloading]");
   var button = document.querySelector("[data-paste-button]");
-  var handingOff = false;
 
   function parseLink(text) {
     text = text.trim();
@@ -28,6 +27,17 @@
     }
   }
 
+  // A copied image rides on the clipboard as a file too, and handing it to
+  // the drop would navigate to a refusal for a paste nobody meant as an
+  // import. A file with no type goes through, since the server decides by
+  // content anyway
+  function mayBeABook(file) {
+    if (/\.(epub|fb2|fb2\.zip)$/i.test(file.name)) return true;
+    var type = file.type;
+    if (!type) return true;
+    return type === "application/epub+zip" || /fictionbook|fb2/i.test(type);
+  }
+
   // The host line is the one part of the question worth reading, so it
   // follows the input as the link is edited
   function showHost() {
@@ -36,22 +46,16 @@
     host.parentElement.hidden = !url;
   }
 
-  // A pasted file is the drop's upload, so the button answers for both
-  function showBusy() {
-    if (!button) return;
-    if (handingOff || drop.busy()) button.setAttribute("aria-busy", "true");
-    else button.removeAttribute("aria-busy");
-  }
-
+  // Only the dialog's own UI: drop.js lets go of its hold itself on Escape
+  // and on a bfcache restore
   function reset() {
-    handingOff = false;
     downloading.hidden = true;
     importButton.removeAttribute("aria-disabled");
-    showBusy();
+    if (button) button.removeAttribute("aria-busy");
   }
 
   function openDialog(link) {
-    if (handingOff || drop.busy()) return;
+    if (drop.busy()) return;
     input.value = link;
     showHost();
     if (!dialog.open) dialog.showModal();
@@ -66,14 +70,14 @@
   }
 
   document.addEventListener("paste", function (event) {
-    if (isEditable(event.target) || handingOff || drop.busy()) return;
+    if (isEditable(event.target) || drop.busy()) return;
     var clipboard = event.clipboardData;
     if (!clipboard) return;
 
-    if (clipboard.files && clipboard.files.length > 0) {
+    var files = clipboard.files ? Array.prototype.slice.call(clipboard.files) : [];
+    if (files.some(mayBeABook)) {
       event.preventDefault();
       drop.submitFiles(clipboard);
-      showBusy();
       return;
     }
     var url = parseLink(clipboard.getData("text/plain"));
@@ -84,7 +88,15 @@
 
   input.addEventListener("input", showHost);
 
+  // close() fires no cancel event, so a download under way is stopped here
+  // rather than left to land on the preview behind a dialog that looked
+  // cancelled
   dialog.querySelector("[data-paste-cancel]").addEventListener("click", function () {
+    if (drop.busy()) {
+      window.stop();
+      drop.release();
+      reset();
+    }
     dialog.close();
   });
 
@@ -92,22 +104,17 @@
   // download is under way would start a second one the server refuses as busy
   form.addEventListener("submit", function (event) {
     event.preventDefault();
-    if (handingOff) return;
-    handingOff = true;
+    if (drop.busy()) return;
     drop.hold();
     downloading.hidden = false;
     importButton.setAttribute("aria-disabled", "true");
-    showBusy();
+    if (button) button.setAttribute("aria-busy", "true");
     form.submit();
   });
 
-  // Escape is the way back from a submit the person cancelled, which aborts
-  // the navigation without unloading the page, so no pageshow follows it
-  dialog.addEventListener("cancel", function () {
-    if (!handingOff) return;
-    reset();
-    drop.release();
-  });
+  // Escape aborts the navigation without unloading the page, so no pageshow
+  // follows it
+  dialog.addEventListener("cancel", reset);
 
   window.addEventListener("pageshow", function (event) {
     if (!event.persisted) return;
@@ -115,18 +122,12 @@
     if (dialog.open) dialog.close();
   });
 
-  // drop.js clears its own state on Escape and registered first, so by now
-  // a cancelled pasted file has already let go
-  document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") showBusy();
-  });
-
   if (!button) return;
 
   // readText() is refused outside a secure context and whenever the person
   // declines, and neither is worth more than an empty dialog to type into
   button.addEventListener("click", function () {
-    if (handingOff || drop.busy()) return;
+    if (drop.busy()) return;
     var read =
       navigator.clipboard && navigator.clipboard.readText
         ? navigator.clipboard.readText()

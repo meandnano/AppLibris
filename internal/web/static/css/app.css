@@ -631,10 +631,6 @@ a.masthead__link:hover {
   overflow-wrap: anywhere;
 }
 
-.paste__host[hidden] {
-  display: none;
-}
-
 .paste__actions {
   display: flex;
   flex-wrap: wrap;

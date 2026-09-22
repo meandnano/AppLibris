@@ -29,6 +29,11 @@ var (
 	// with an HTML page, the usual result of pasting the page a download
 	// button sits on rather than the button's own link
 	ErrWebPage = errors.New("service: the link opens a web page")
+	// ErrDownloadFailed is a link that could not be fetched: DNS, connect,
+	// TLS, a redirect refused, the body cut off, a request abandoned. One
+	// sentinel for all of them, since a refused private address must read
+	// the same as a host that is down. Its text carries no URL
+	ErrDownloadFailed = errors.New("service: the download failed")
 )
 
 // maxLinkBytes bounds a pasted link. A real download link, signed query
@@ -104,25 +109,66 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 	}
 
 	d, err := s.fetcher.Fetch(ctx, link)
-	if err != nil {
+	var status *importer.StatusError
+	switch {
+	case err == nil:
+	case errors.As(err, &status), errors.Is(err, importer.ErrTooLarge):
 		return nil, err
+	default:
+		return nil, downloadFailure(ctx, err)
 	}
 	defer d.Body.Close()
 
-	staged, err := s.importer.Stage(ctx, d.Name, d.Body)
+	body := &bodyReader{r: d.Body}
+	staged, err := s.importer.Stage(ctx, d.Name, body)
+	switch {
+	case err == nil:
+		return &staged, nil
 	// A body cut short by the deadline can read as a clean end, and the
 	// truncated bytes then fail as not a book, which would blame the file
-	// for what was the wait
-	if err != nil && ctx.Err() != nil {
-		return nil, fmt.Errorf("%w: %v", context.Cause(ctx), err)
-	}
-	if errors.Is(err, importer.ErrUnsupportedFormat) && d.HTML {
+	// for what was the wait. A deadline passing in the moments after the
+	// body ended is reported the same way, which is rare enough not to be
+	// worth telling apart
+	case ctx.Err() != nil, body.err != nil:
+		return nil, downloadFailure(ctx, err)
+	case errors.Is(err, importer.ErrUnsupportedFormat) && d.HTML:
 		return nil, fmt.Errorf("%w: %w", ErrWebPage, err)
-	}
-	if err != nil {
+	default:
 		return nil, err
 	}
-	return &staged, nil
+}
+
+// downloadFailure wraps a failed download in ErrDownloadFailed, adding the
+// context's cause only when ctx itself ended. The fetch error's own chain
+// is cut, because a transport's dial, TLS and header timeouts all match
+// context.DeadlineExceeded and would otherwise read as the caller's
+// deadline, and because an *url.Error prints the link, which can carry a
+// signed token into a log
+func downloadFailure(ctx context.Context, err error) error {
+	msg := err.Error()
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		msg = urlErr.Op + ": " + urlErr.Err.Error()
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("%w: %w: %s", ErrDownloadFailed, context.Cause(ctx), msg)
+	}
+	return fmt.Errorf("%w: %s", ErrDownloadFailed, msg)
+}
+
+// bodyReader remembers a failed read of the download, so a Stage error it
+// caused is told apart from one staging caused on its own
+type bodyReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF {
+		b.err = err
+	}
+	return n, err
 }
 
 func validLink(raw string) (string, error) {
