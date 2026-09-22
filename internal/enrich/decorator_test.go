@@ -109,6 +109,58 @@ func TestWithRateLimitGivesACancelledSlotBack(t *testing.T) {
 	})
 }
 
+// A caller already queued behind the one that gives up keeps the slot it
+// reserved, and the interval after it stays closed: handing a released
+// slot back unconditionally would pull next behind a waiter that is still
+// going to run, and let two calls through one interval
+func TestWithRateLimitKeepsAQueuedSlotWhenAnEarlierCallerCancels(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const every = 50 * time.Millisecond
+		p := WithRateLimit(&fakeProvider{name: "fake"}, every)
+
+		start := time.Now()
+		mustByISBN(t, p, context.Background(), "1")
+
+		// Reserved one after another, so the second is queued behind the
+		// first when it is cancelled
+		bCtx, cancelB := context.WithCancel(context.Background())
+		bErr := make(chan error, 1)
+		go func() {
+			_, err := p.ByISBN(bCtx, "2")
+			bErr <- err
+		}()
+		synctest.Wait()
+
+		cRan := make(chan time.Duration, 1)
+		go func() {
+			_, err := p.ByISBN(context.Background(), "3")
+			if err != nil {
+				cRan <- -1
+				return
+			}
+			cRan <- time.Since(start)
+		}()
+		synctest.Wait()
+
+		cancelB()
+		if err := <-bErr; !errors.Is(err, context.Canceled) {
+			t.Fatalf("the cancelled call returned %v, want context.Canceled", err)
+		}
+
+		if elapsed := <-cRan; elapsed != 2*every {
+			t.Errorf("the call queued behind the cancelled one ran at %v, want %v", elapsed, 2*every)
+		}
+
+		// The discriminating assertion: an unguarded release would have
+		// moved next back to the cancelled call's own slot, leaving this
+		// one free to run at once alongside the call before it
+		mustByISBN(t, p, context.Background(), "4")
+		if elapsed := time.Since(start); elapsed != 3*every {
+			t.Errorf("the call after the queued one ran at %v, want %v", elapsed, 3*every)
+		}
+	})
+}
+
 func TestWithCacheServesRepeatWithoutSecondCall(t *testing.T) {
 	fake := &fakeProvider{name: "fake", byISBN: func(ctx context.Context, isbn string) (Metadata, error) {
 		return Metadata{Title: "Cached Book"}, nil

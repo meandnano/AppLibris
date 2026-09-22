@@ -498,9 +498,10 @@ tidy-up would break. The note named in the heading carries the reasoning.
   its caller. The server's `Client()` sends every host to it, so tests
   never read `URL` before `Client()`, name fixed hosts under `.test`, keep
   one server per client dispatching on `r.Host`, and hand a production
-  client `server.Client().Transport` itself, never a clone. Only a test
-  about the socket — the cover address guard, the import refusals — calls
-  `Start`.
+  client `server.Client().Transport` itself, never a clone. `Start` is
+  for a test that needs a real dial — the cover address guard, the import
+  refusals; the `Worker`'s remaining cover tests share that one loopback
+  server rather than standing up a second.
 - Provider-client fixtures live under `testdata`. A fixture is a live
   capture or is labelled otherwise at the top of its test file.
 - `go test ./...` must pass; CI also runs `go vet` with `-race` and builds

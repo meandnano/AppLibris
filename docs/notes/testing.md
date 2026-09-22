@@ -61,19 +61,24 @@ the URL names, https included. That makes it easy to wire wrongly, so:
   transport's idle connections, and a clone's would outlive a bubble.
 
 A test that is about the socket itself calls `Start` or `StartTLS` on a
-`NewTestServer` and listens on loopback. The `Worker`'s cover tests do,
-because the address guard hangs on the dial its own transport makes; so do
-the import refusal tests, which pin that an answer survives a real socket
-while the body is still arriving.
+`NewTestServer` and listens on loopback. The two `Worker` tests about the
+cover address guard do, because the guard hangs on the dial the worker's
+own transport makes; so do the import refusal tests, which pin that an
+answer survives a real socket while the body is still arriving. The
+`Worker`'s other cover tests reach the same loopback server through
+`coverServer` and opt the guard out — they wait on no clock, so one
+server for all of them is cheaper than a second one on the in-memory
+network.
 
 ## What runs on real time
 
 - **The watcher tests about the kernel** — removal delivery, every
   `Refresh` case, recovery after the library directory is replaced, the
-  kernel watch count. A real fsnotify reader sits in a syscall, which is
-  never durably blocked, so a bubble holding one never goes idle. The
-  debounce, the delivery probe and the event filter are the watcher's own
-  logic, and run on a fake `watchSet` and event channels instead.
+  kernel watch count, and `NewWatcher`'s own refusal of a missing
+  directory. A real fsnotify reader sits in a syscall, which is never
+  durably blocked, so a bubble holding one never goes idle. The debounce,
+  the delivery probe and the event filter are the watcher's own logic, and
+  run on a fake `watchSet` and event channels instead.
 - **`TestWriteWaitsForAnExternalLockInsteadOfFailing`.** SQLite's busy
   handler sleeps through `nanosleep` on Linux and through Go's
   `time.Sleep` on darwin, so in a bubble it would pass on a Mac and time
