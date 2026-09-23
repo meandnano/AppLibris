@@ -289,6 +289,14 @@ From the designer's handoff (`Bookshelf Mockups.dc.html`, sections 01 and
 > has to call `window.stop()` and release the drop's hold, because
 > `dialog.close()` fires no `cancel` event and so leaves the navigation
 > running.
+>
+> **Correction found while implementing.** "The same state `drop.js` sets
+> as `uploading`" was built first: the button went busy whenever
+> `drop.busy()` was true. That put a spinner on the Paste button for a
+> dropped or pasted file, whose upload the drop's own overlay already
+> shows, so the button shows busy for a link handoff only. The link
+> handoff still holds the drop's `uploading` flag, so drops and pastes are
+> refused while a link downloads.
 
 ## What Goes Where
 

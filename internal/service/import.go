@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"library/internal/importer"
@@ -118,16 +119,19 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 	}
 	defer d.Body.Close()
 
+	// The deadline is sized for the download alone, and the body's reads
+	// already end with ctx through the request that fetched it. What Stage
+	// does once the body has ended, the parse and the duplicate lookup, is
+	// not the download, and a deadline passing then must not discard a book
+	// that arrived whole
 	body := &bodyReader{r: d.Body}
-	staged, err := s.importer.Stage(ctx, d.Name, body)
+	staged, err := s.importer.Stage(context.WithoutCancel(ctx), d.Name, body)
 	switch {
 	case err == nil:
 		return &staged, nil
 	// A body cut short by the deadline can read as a clean end, and the
 	// truncated bytes then fail as not a book, which would blame the file
-	// for what was the wait. A deadline passing in the moments after the
-	// body ended is reported the same way, which is rare enough not to be
-	// worth telling apart
+	// for what was the wait
 	case ctx.Err() != nil, body.err != nil:
 		return nil, downloadFailure(ctx, err)
 	case errors.Is(err, importer.ErrUnsupportedFormat) && d.HTML:
@@ -137,18 +141,25 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 	}
 }
 
+// quotedText is a Go-quoted string inside an error's text, which is how
+// net/http and net/url name a URL: a redirect's unparseable Location, a
+// parse failure, the request's own link
+var quotedText = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
 // downloadFailure wraps a failed download in ErrDownloadFailed, adding the
 // context's cause only when ctx itself ended. The fetch error's own chain
 // is cut, because a transport's dial, TLS and header timeouts all match
 // context.DeadlineExceeded and would otherwise read as the caller's
-// deadline, and because an *url.Error prints the link, which can carry a
-// signed token into a log
+// deadline. Its text loses the link and every quoted string, because the
+// link, or a Location a remote host chose, can carry a signed token into a
+// log
 func downloadFailure(ctx context.Context, err error) error {
 	msg := err.Error()
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		msg = urlErr.Op + ": " + urlErr.Err.Error()
 	}
+	msg = quotedText.ReplaceAllString(msg, `"…"`)
 	if ctx.Err() != nil {
 		return fmt.Errorf("%w: %w: %s", ErrDownloadFailed, context.Cause(ctx), msg)
 	}

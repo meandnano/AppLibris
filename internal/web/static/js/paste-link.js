@@ -131,11 +131,11 @@
   // declines, and neither is worth more than an empty dialog to type into
   button.addEventListener("click", function () {
     if (drop.busy()) return;
-    var read =
-      navigator.clipboard && navigator.clipboard.readText
-        ? navigator.clipboard.readText()
-        : Promise.reject(new Error("clipboard unavailable"));
-    read.then(
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      openDialog("");
+      return;
+    }
+    navigator.clipboard.readText().then(
       function (text) {
         var url = parseLink(text);
         openDialog(url ? url.href : "");

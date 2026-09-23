@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -601,6 +603,66 @@ func TestRunWithAReadOnlyLibrary(t *testing.T) {
 		n, err := db.CountBooks(ctx)
 		return err == nil && n == 1
 	})
+}
+
+// The Import page and the Paste button follow the Stager alone, so a run
+// that built no Fetcher would still offer both and answer every pasted link
+// as disabled. A loopback link also proves the production guard is the one
+// dialled through, since nothing but the guard refuses it
+func TestRunWiresTheLinkFetcher(t *testing.T) {
+	addr := freeAddr(t)
+	t.Setenv("ADDR", addr)
+	t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "library.db"))
+	t.Setenv("LIBRARY_DIR", t.TempDir())
+	t.Setenv("COVERS_DIR", t.TempDir())
+	t.Setenv("WATCH_ENABLED", "false")
+	t.Setenv("METADATA_PROVIDERS", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("run: %v", err)
+		}
+	}()
+
+	waitFor(t, done, "the server to answer /healthz", func() bool {
+		resp, err := http.Get("http://" + addr + "/healthz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+
+	form := url.Values{"url": {"http://127.0.0.1:1/book.epub"}}
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/import/url", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /import/url: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnprocessableEntity)
+	}
+	if strings.Contains(string(body), "Importing is disabled") {
+		t.Error("a pasted link was answered as if importing were disabled")
+	}
+	if !strings.Contains(string(body), "t download that link.") {
+		t.Errorf("the loopback link was not refused as a failed download:\n%s", body)
+	}
 }
 
 // "mkdir /data/covers: permission denied" names neither side of the

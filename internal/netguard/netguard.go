@@ -22,7 +22,14 @@ import (
 // host sits in it. The rest are ranges no public host can legitimately
 // answer from — "this network" (RFC 1122), IETF protocol assignments,
 // benchmarking, the reserved former class E, the broadcast address, and
-// IPv6 site-local, which is deprecated but still routed by some stacks
+// IPv6 site-local, which is deprecated but still routed by some stacks.
+//
+// Two IPv6 ranges that embed an IPv4 address are refused whole rather than
+// unwrapped like translatedPrefixes: the NAT64 local-use prefix (RFC 8215),
+// whose network-specific prefixes vary in length and so carry the address
+// at no one offset, and the deprecated IPv4-compatible ::/96, which
+// net.IP.To4 does not treat as IPv4 and which stacks with sit0 still route.
+// Neither is ever a public host's address
 var refusedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
@@ -30,6 +37,8 @@ var refusedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("fec0::/10"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("::/96"),
 }
 
 // translatedPrefixes embed an IPv4 address, at a different offset each, so

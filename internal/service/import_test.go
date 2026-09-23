@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -584,6 +585,39 @@ func TestStageURLFreesTheSlotWhateverTheOutcome(t *testing.T) {
 	})
 }
 
+// A body that ends just as the deadline passes has arrived whole, and the
+// duplicate lookup Stage runs after it must not fail on that deadline
+func TestStageURLKeepsABookWhoseDeadlinePassesAfterTheBody(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		book := importTestEPUB(t, "Dune", "Frank Herbert")
+		svc := newFailingLinkService(t, func(context.Context, string) (importer.Download, error) {
+			return importer.Download{
+				Name: "Dune.epub",
+				Body: io.NopCloser(io.MultiReader(bytes.NewReader(book), lateEOF{2 * time.Second})),
+			}, nil
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		preview, err := svc.StageURL(ctx, "https://books.test/Dune.epub")
+		if err != nil {
+			t.Fatalf("StageURL = %v, want the book staged", err)
+		}
+		if preview.Title != "Dune" {
+			t.Errorf("Title = %q, want %q", preview.Title, "Dune")
+		}
+	})
+}
+
+// lateEOF ends a body only after wait, standing in for the last read of a
+// download that finishes as its deadline passes
+type lateEOF struct{ wait time.Duration }
+
+func (l lateEOF) Read([]byte) (int, error) {
+	time.Sleep(l.wait)
+	return 0, io.EOF
+}
+
 // fetchFunc answers Fetch with an error the in-memory transport cannot
 // produce on demand
 type fetchFunc func(ctx context.Context, rawURL string) (importer.Download, error)
@@ -660,6 +694,27 @@ func TestStageURLDropsTheLinkFromAFetchError(t *testing.T) {
 	if !strings.Contains(err.Error(), "connection refused") {
 		t.Errorf("the error lost its cause: %v", err)
 	}
+}
+
+// net/http names a Location it cannot parse inside the error it returns,
+// and the remote host chose that Location, token and all
+func TestStageURLDropsAnUnparseableLocationFromAFetchError(t *testing.T) {
+	svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://cdn.test/%zz?token=s3cr3t")
+		w.WriteHeader(http.StatusFound)
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/Dune.epub")
+	if !errors.Is(err, ErrDownloadFailed) {
+		t.Fatalf("StageURL = %v, want ErrDownloadFailed", err)
+	}
+	if strings.Contains(err.Error(), "s3cr3t") {
+		t.Errorf("the error carries the redirect's token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Location") {
+		t.Errorf("the error lost what failed: %v", err)
+	}
+	assertStagingEmpty(t, stagingDir)
 }
 
 func TestStageURLCallsABodyCutShortADownloadFailure(t *testing.T) {

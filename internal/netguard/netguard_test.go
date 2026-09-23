@@ -38,18 +38,24 @@ func TestRefusePrivateAddress(t *testing.T) {
 		"::ffff:169.254.169.254",
 
 		// The ranges net.IP has no predicate for.
-		"100.64.0.1",      // CGNAT, and the range Tailscale assigns
-		"100.100.100.100", // the middle of it, not just the edge
-		"0.1.2.3",         // "this network"
-		"192.0.0.1",       // IETF protocol assignments
-		"198.18.0.1",      // benchmarking
-		"240.0.0.1",       // reserved
-		"255.255.255.255", // broadcast
-		"fec0::1",         // deprecated IPv6 site-local
-		"64:ff9b::7f00:1", // NAT64 of 127.0.0.1
-		"64:ff9b::a00:1",  // NAT64 of 10.0.0.1
-		"2002:7f00:1::1",  // 6to4 of 127.0.0.1
-		"2002:6440:1::1",  // 6to4 of 100.64.0.1
+		"100.64.0.1",           // CGNAT, and the range Tailscale assigns
+		"100.100.100.100",      // the middle of it, not just the edge
+		"0.1.2.3",              // "this network"
+		"192.0.0.1",            // IETF protocol assignments
+		"198.18.0.1",           // benchmarking
+		"240.0.0.1",            // reserved
+		"255.255.255.255",      // broadcast
+		"fec0::1",              // deprecated IPv6 site-local
+		"64:ff9b::7f00:1",      // NAT64 of 127.0.0.1
+		"64:ff9b::a00:1",       // NAT64 of 10.0.0.1
+		"2002:7f00:1::1",       // 6to4 of 127.0.0.1
+		"2002:6440:1::1",       // 6to4 of 100.64.0.1
+		"64:ff9b:1::a00:1",     // NAT64 local-use, a /96 inside it naming 10.0.0.1
+		"64:ff9b:1:a00:1::",    // NAT64 local-use, a /64 naming 10.0.0.1 elsewhere
+		"64:ff9b:1::5db8:d822", // NAT64 local-use, even naming a public address
+		"::7f00:1",             // IPv4-compatible 127.0.0.1
+		"::a00:1",              // IPv4-compatible 10.0.0.1
+		"::5db8:d822",          // IPv4-compatible, even naming a public address
 	}
 	for _, addr := range refused {
 		t.Run("refused/"+addr, func(t *testing.T) {
@@ -76,6 +82,11 @@ func TestRefusePrivateAddress(t *testing.T) {
 		"223.255.255.255", // just below the multicast range
 		// A 6to4 address embedding a public IPv4 is an ordinary host.
 		"2002:5db8:d822::1",
+		// Just past each end of the NAT64 local-use /48, and the
+		// well-known NAT64 prefix naming a public IPv4
+		"64:ff9b:0:ffff:ffff:ffff:ffff:ffff",
+		"64:ff9b:2::1",
+		"64:ff9b::5db8:d822",
 	}
 	for _, addr := range allowed {
 		t.Run("allowed/"+addr, func(t *testing.T) {
