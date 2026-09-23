@@ -44,8 +44,8 @@ func solidPNG(t *testing.T) []byte {
 // newTestWorker wires a fresh, per-test covers directory — tests that don't
 // exercise the cover path never need to know it exists — and opts the
 // worker out of the address guard, since the cover servers here listen on
-// loopback and RefusePrivateAddress refuses that by design. A test about
-// the guard itself builds its worker with New directly.
+// loopback and netguard.RefusePrivateAddress refuses that by design. A test
+// about the guard itself builds its worker with New directly.
 func newTestWorker(t *testing.T, db *storage.DB, providers []Provider) *Worker {
 	t.Helper()
 	w := New(db, providers, t.TempDir())

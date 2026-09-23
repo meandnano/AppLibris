@@ -51,10 +51,10 @@ the database a test opens.
   `googlebooks.New` and `resend.NewClient` then exercise the real `Timeout`
   and redirect policy. The server closes only its own transport's idle
   connections, so a clone's would outlive a bubble.
-- **`Start` and `StartTLS` are only for a test about the socket itself.** The two
-  `Worker` tests about the cover address guard need one because the guard
-  hangs on the dial the worker's own transport makes; the import refusal
-  tests need one because they pin that an answer survives a real socket
+- **`Start` and `StartTLS` are only for a test about the socket itself.** The
+  `Worker` and `importer.Fetcher` tests about the address guard need one
+  because the guard hangs on the dial their own transport makes; the import
+  refusal tests need one because they pin that an answer survives a real socket
   while the body is still arriving.
 - **The `Worker`'s other cover tests share that one loopback server through
   `coverServer`, with the guard opted out.** They wait on no clock, so one

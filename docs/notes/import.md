@@ -23,6 +23,7 @@ Rules for `internal/importer`, `scanner.IndexFile`, the import surface of `inter
 - **Staging is bounded in total bytes, `stagingBudgetFactor` times the import cap, never in stages; past it an upload is refused with `ErrStagingFull`.** `os.TempDir()` is tmpfs in a container, so what is held is RAM.
 - **The reservation is taken at the cap before the copy and corrected afterwards to what the stage retains.** A check made after the copy admits everything and reports later.
 - **The charge is the file, the cover kept for the preview and the metadata, never the file alone.** A small archive can hold a `cover.MaxCoverBytes` cover.
+- **`Stage` cuts the offered name to `maxOfferedNameBytes` on a rune boundary before anything else.** The name is charged only after the reservation, and a `Content-Disposition` may run to the transport's 10 MiB header limit, which would overshoot the budget and lock imports out until the stage expired.
 - **The reservation is released by every path that drops a staged file: discard, expiry, confirm, and the duplicate verdict.** The duplicate releases the file's share and keeps charging the cover its page still renders.
 
 ## Format by content
@@ -93,9 +94,43 @@ Rules for `internal/importer`, `scanner.IndexFile`, the import surface of `inter
 - **A refusal is pinned to the viewport where the overlay was, and the live region is the `drop__errors` wrapper, which is never hidden.** No page arrives to carry the refusal, and a live region toggled from `hidden` is not reliably announced where a change inside a standing one is.
 - **`uploading` is cleared by a bfcache `pageshow` and by Escape.** A cancelled submit aborts the navigation without unloading the document, so no `pageshow` follows it.
 
+## Importing from a link
+
+- **`POST /import/url` downloads inside the request and answers a 303 to the preview or the upload's 422 page; from the preview on, a link is an upload.** It needs no stage state of its own: from the 303 on, the upload's preview, confirm and discard apply unchanged.
+- **The body is one more reader for `Stage`, counted once by its copy at the cap plus one byte; `Fetch` refuses only a status other than 200 and a declared length past the cap, before any body byte is read.** One count is one cap, and the transport decompresses gzip before it, so a compressed bomb meets the same limit.
+- **Only public addresses are fetched: `importer.Fetcher` dials through `netguard.DialContext` with `netguard.RefusePrivateAddress`, on every hop, and there is no allowlist.** The app has no login, so anything that reaches it could otherwise make it fetch a Docker neighbour, a tailnet peer or a metadata endpoint; a book on the LAN is dropped or uploaded instead.
+- **The transport's `Proxy` is nil and `DialTLSContext` stays unset.** Through a proxy the guard checks the proxy's address, and a TLS dialer of its own bypasses `DialContext`.
+- **A redirect is followed to any host for at most five hops, `http` or `https` only, with `Referer` deleted from each hop.** Download links bounce to a CDN and the guard judges every hop's address anyway; the previous URL can carry a signed token.
+- **`service.StageURL` refuses a link past 2 KiB, one not `http` or `https`, one with no host and one carrying userinfo as `ErrUnsupportedLink`, before anything is fetched, and the fetcher keeps no cookie jar.** A link that needs a session is not a direct link to a file.
+- **`Download.Name` is `Content-Disposition`'s filename, else the final URL's last path segment, else empty, unsanitised.** `Stage`'s name derivation is the one sanitiser.
+- **`internal/service` holds a `LinkFetcher` interface, `*importer.Fetcher` its one implementation, set by `WithFetcher`; a missing `Stager` or fetcher answers `ErrImportDisabled`.** The guarded transport can be swapped only inside `internal/importer`, so the service and web tests stand in a fetcher on the in-memory network.
+- **One download runs at a time: a one-slot channel taken without waiting, a second link refused with `ErrDownloadBusy`.** The staging budget bounds bytes at rest, not outbound connections held open, and a queued request would wait behind a download of unknown length.
+- **The handler's window is `downloadWindow`: `importer.FetchStartTimeout` plus `uploadWindow` of the cap, carried by the request's context.** `FetchStartTimeout` is the fetcher's dial, TLS and header timeouts summed, so the handler never abandons a download the fetcher is still allowed to be starting.
+- **The link handler extends only its write deadline, after the form is read.** A form trickled in gets no longer than any other request's body, and Go's server clears the read deadline itself once the body is read.
+- **A failure to fetch or to read the body wraps `service.ErrDownloadFailed` with the fetch error as text only, plus the context's cause when the request's context ended.** A transport's dial, TLS and header timeouts match `context.DeadlineExceeded`, and would otherwise read as the handler's window running out.
+- **`Stage` runs on `context.WithoutCancel` of the request's context; the body alone is bound to the deadline, through the request that fetched it.** The window is sized for the download, and a deadline passing during the parse or the duplicate lookup must not discard a book that arrived whole.
+- **A `Stage` failure after the context ended is reported as a download failure carrying the context's cause.** A body cut short by the deadline can read as a clean end, and the truncated bytes would otherwise be blamed as not a book.
+- **A refused content whose response was `text/html` wraps `ErrWebPage`.** Pasting the page a download button sits on is the usual mistake, and the line says so.
+- **Every named cause has its own line through `importFailureLine`; `ErrDownloadFailed`, a refused private address included, is "Couldn't download that link."; any other error is a 500 logged at Error, as an upload's is.** A line of its own for the refusal would confirm that an internal hostname resolves.
+- **A non-200 answer names its status code.** Only public hosts are ever reached, so the code reveals nothing internal.
+- **A failure is logged at Info with the link's scheme, host and path only, and `ErrDownloadFailed` keeps a `*url.Error` as its `Op` and inner error with every quoted string blanked.** The query and fragment routinely carry a signed token and the userinfo a password, net/http quotes the full URL and any unparseable `Location` a host sent into its errors, and the log outlives both.
+- **The Import page's link form is a plain post with no htmx setting, and a refused link is rendered back into it with no `maxlength`.** Only a whole-page navigation puts the preview's URL in the address bar, and a truncated link fetches the wrong file.
+
+## Pasting on the library page
+
+- **A paste whose target is an input, textarea or contenteditable element is left alone.** The search box pastes normally.
+- **A pasted file goes to the drop's own `submitFiles`, exposed on `window.importDrop`, with no dialog.** Both gestures keep one set of refusals and sentences, and the preview is the confirmation.
+- **A pasted file is handed on unless its type is `image/*`; an image paste is read as text.** A copied image rides on the clipboard as a file and must not navigate to a refusal, while `detectSuffix` already decides what any other file is, an FB2 archive named `.zip` included.
+- **Pasted text opens the `paste-link` dialog only when, trimmed, it is one token `new URL()` parses as `http:` or `https:`; anything else is ignored silently.** A stray paste on the page must not become a question.
+- **The dialog holds a real form posted natively to `/import/url`, never a fetch or htmx.** The redirect and the 422 page are the link form's own.
+- **The Paste button reads text only, through `navigator.clipboard.readText()`; denied access or no link opens the dialog empty. It renders `hidden` and the script reveals it.** The clipboard API never reads a file, and with JavaScript off the Import page's link form is the way in.
+- **While a link hands off, `paste-link.js` holds the drop's `uploading` flag, so drops and pastes are refused; a bfcache `pageshow`, the dialog's `cancel` event and its Cancel button release it.** Two submits race to navigate the tab.
+- **The Cancel button and the dialog's `cancel` event share one abort that calls `window.stop()` while the dialog shows a download, tested by its own downloading line rather than `drop.busy()`.** Dismissing the dialog must not leave a navigation that lands on the preview, and drop.js lets go of its hold on the Escape keydown before `cancel` fires.
+- **The button shows busy for a link handoff only.** A file, pasted or dropped, is the drop's upload, and its overlay says so.
+- **`paste-link` is included only from `library.html` beside `import-drop`; `paste-link.js` loads from `site-scripts` after `drop.js` and returns at once without the dialog or `window.importDrop`.** It hands files to the drop's script and has nothing to hand them to elsewhere.
+
 ## Deliberately absent
 
-- **Importing from a URL.** It reuses this machinery unchanged and is its own step.
 - **A programmatic API.** Every state-changing route refuses a request carrying no `Sec-Fetch-Site`, which a non-browser client never sends; see `docs/notes/design.md`.
 - **Deleting a book from the UI.** Discard removes a staged file only.
 - **Editing metadata in the preview.** The detail page does that, and the redirect lands there.

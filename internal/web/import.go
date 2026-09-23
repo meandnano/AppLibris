@@ -1,10 +1,12 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -36,6 +38,11 @@ const uploadRate = 1 << 20
 // rather than measured.
 const responseWindow = 30 * time.Second
 
+// linkFormLimit bounds the link form's body: one urlencoded field whose
+// value StageURL refuses past MaxLinkBytes anyway, with room for
+// percent-encoding to triple it and for the field's name
+const linkFormLimit = 4 * service.MaxLinkBytes
+
 // importPage is the data import.html and its fragments render against.
 // Preview nil is the idle state, where the panel shows the file input;
 // non-nil is a staged file waiting on a decision. Failure is the sentence a
@@ -56,6 +63,9 @@ type importPage struct {
 
 	Preview *importPreviewView
 	Failure string
+	// Link is what a refused download renders back into the link form, so
+	// the 422 page does not ask for the link to be pasted again
+	Link string
 	// Note is the one outcome that is neither a failure nor a redirect:
 	// the file reached the library and indexing did not.
 	Note string
@@ -206,6 +216,71 @@ func importUploadHandler(svc *service.Service) http.HandlerFunc {
 		page.Preview = importPreviewViewOf(preview)
 		renderImport(w, r, http.StatusOK, page)
 	}
+}
+
+// importURLHandler serves POST /import/url: a pasted link, downloaded
+// inside the request and staged like an upload. It answers 303 to the
+// preview, or the upload's own 422 page with the refusal
+//
+// Synchronous so it needs no stage state of its own and works with
+// JavaScript off; a closed tab cancels the download through the request's
+// context
+func importURLHandler(svc *service.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Vary", "HX-Request, HX-History-Restore-Request")
+
+		page, err := newImportPage(r, svc)
+		if err != nil {
+			slog.Error("build import page failed", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, linkFormLimit)
+		rawURL := r.PostFormValue("url")
+
+		// Only the write half: the form is read under cmd/server's own
+		// deadline, so a body trickled in is given no longer than any other
+		// request's, and once it is read the server clears the read
+		// deadline itself
+		window := downloadWindow(svc.MaxImportBytes())
+		extendDeadlines(w, 0, window+responseWindow)
+		ctx, cancel := context.WithTimeout(r.Context(), window)
+		defer cancel()
+
+		preview, err := svc.StageURL(ctx, rawURL)
+		if err != nil {
+			page.Failure = importFailureLine(err, svc.MaxImportBytes())
+			if page.Failure == "" {
+				slog.Error("stage import from link failed", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			page.Link = rawURL
+			logLinkFailure(rawURL, err)
+			renderImportRejection(w, r, page)
+			return
+		}
+		http.Redirect(w, r, "/import/"+preview.ID, http.StatusSeeOther)
+	}
+}
+
+// downloadWindow is how long a pasted link is given to finish downloading,
+// sized at the upload's rate so a link is allowed what the same file
+// uploaded would be
+func downloadWindow(maxBytes int64) time.Duration {
+	return importer.FetchStartTimeout + uploadWindow(maxBytes)
+}
+
+// logLinkFailure names the link by scheme, host and path only: its query
+// and fragment routinely carry a signed token, its userinfo a password, and
+// the log outlives both
+func logLinkFailure(rawURL string, err error) {
+	attrs := []any{"error", err}
+	if u, perr := url.Parse(rawURL); perr == nil {
+		attrs = append(attrs, "scheme", u.Scheme, "host", u.Host, "path", u.Path)
+	}
+	slog.Info("import from link failed", attrs...)
 }
 
 // importPreviewHandler serves GET /import/{id}: the staged file's preview,
@@ -496,9 +571,12 @@ func confirmWindow(maxBytes int64) time.Duration {
 // and enrichmentResultLine already follow.
 func importFailureLine(err error, maxBytes int64) string {
 	var tooBig *http.MaxBytesError
+	var status *importer.StatusError
 	switch {
 	case errors.Is(err, importer.ErrTooLarge), errors.As(err, &tooBig):
 		return "That file is larger than the " + humanSize(maxBytes) + " import limit."
+	case errors.Is(err, service.ErrWebPage):
+		return "That link opens a web page, not a book file."
 	case errors.Is(err, importer.ErrUnsupportedFormat):
 		return "That is not an EPUB or FB2 file."
 	case errors.Is(err, importer.ErrExpired):
@@ -507,6 +585,19 @@ func importFailureLine(err error, maxBytes int64) string {
 		return "Another import is still waiting. Finish or discard it, then try again."
 	case errors.Is(err, errNoFileChosen):
 		return "Choose a file first."
+	case errors.Is(err, service.ErrUnsupportedLink):
+		return "That isn't a supported link."
+	case errors.As(err, &status):
+		return "The server answered " + strconv.Itoa(status.Code) + "."
+	case errors.Is(err, context.DeadlineExceeded):
+		return "The download took too long."
+	case errors.Is(err, service.ErrDownloadFailed):
+		// A refused private address is deliberately among these: a
+		// sentence of its own would confirm to whoever pasted the link
+		// that an internal hostname resolves
+		return "Couldn't download that link."
+	case errors.Is(err, service.ErrDownloadBusy):
+		return "Another link is still downloading."
 	case errors.Is(err, service.ErrImportDisabled):
 		return "Importing is disabled: the library directory is read-only or the staging directory could not be created. See the server log."
 	default:

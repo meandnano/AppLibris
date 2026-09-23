@@ -3,7 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/url"
+	"regexp"
+	"strings"
 
 	"library/internal/importer"
 )
@@ -14,6 +18,34 @@ import (
 // Notify follows. The routes stay registered so a stale tab gets this
 // explanation rather than a 404.
 var ErrImportDisabled = errors.New("service: import is not available")
+
+var (
+	// ErrUnsupportedLink is a link StageURL will not try: not http or
+	// https, no host, credentials in it, or too long
+	ErrUnsupportedLink = errors.New("service: not a supported link")
+	// ErrDownloadBusy is a link refused because another is still
+	// downloading
+	ErrDownloadBusy = errors.New("service: another link is still downloading")
+	// ErrWebPage wraps importer.ErrUnsupportedFormat when the link answered
+	// with an HTML page, the usual result of pasting the page a download
+	// button sits on rather than the button's own link
+	ErrWebPage = errors.New("service: the link opens a web page")
+	// ErrDownloadFailed is a link that could not be fetched: DNS, connect,
+	// TLS, a redirect refused, the body cut off, a request abandoned. One
+	// sentinel for all of them, since a refused private address must read
+	// the same as a host that is down. Its text carries no URL
+	ErrDownloadFailed = errors.New("service: the download failed")
+)
+
+// MaxLinkBytes bounds a pasted link. A real download link, signed query
+// and all, fits well inside it
+const MaxLinkBytes = 2 << 10
+
+// LinkFetcher downloads a link without reading the body.
+// *importer.Fetcher is the one production implementation
+type LinkFetcher interface {
+	Fetch(ctx context.Context, rawURL string) (importer.Download, error)
+}
 
 // ImportPreview is one staged import as the import page needs it.
 //
@@ -54,6 +86,117 @@ func (s *Service) StageImport(ctx context.Context, name string, r io.Reader) (*I
 		return nil, err
 	}
 	return &staged, nil
+}
+
+// StageURL downloads a pasted link into staging and previews it, the same
+// preview StageImport answers for an upload. The download runs inside ctx,
+// so the caller's deadline bounds it and a closed tab cancels it
+func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, error) {
+	if s.importer == nil || s.fetcher == nil {
+		return nil, ErrImportDisabled
+	}
+	link, err := validLink(rawURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Refused rather than queued: a wait here would hold the request open
+	// behind a download of unknown length
+	select {
+	case s.downloads <- struct{}{}:
+		defer func() { <-s.downloads }()
+	default:
+		return nil, ErrDownloadBusy
+	}
+
+	d, err := s.fetcher.Fetch(ctx, link)
+	if err != nil {
+		var status *importer.StatusError
+		if errors.As(err, &status) || errors.Is(err, importer.ErrTooLarge) {
+			return nil, err
+		}
+		return nil, downloadFailure(ctx, err)
+	}
+	defer d.Body.Close()
+
+	// The deadline is sized for the download alone, and the body's reads
+	// already end with ctx through the request that fetched it. What Stage
+	// does once the body has ended, the parse and the duplicate lookup, is
+	// not the download, and a deadline passing then must not discard a book
+	// that arrived whole
+	body := &bodyReader{r: d.Body}
+	staged, err := s.importer.Stage(context.WithoutCancel(ctx), d.Name, body)
+	switch {
+	case err == nil:
+		return &staged, nil
+	// A body cut short by the deadline can read as a clean end, and the
+	// truncated bytes then fail as not a book, which would blame the file
+	// for what was the wait
+	case ctx.Err() != nil, body.err != nil:
+		return nil, downloadFailure(ctx, err)
+	case errors.Is(err, importer.ErrUnsupportedFormat) && d.HTML:
+		return nil, fmt.Errorf("%w: %w", ErrWebPage, err)
+	default:
+		return nil, err
+	}
+}
+
+// quotedText is a Go-quoted string inside an error's text, which is how
+// net/http and net/url name a URL: a redirect's unparseable Location, a
+// parse failure, the request's own link
+var quotedText = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// downloadFailure wraps a failed download in ErrDownloadFailed, adding the
+// context's cause only when ctx itself ended. The fetch error's own chain
+// is cut, because a transport's dial, TLS and header timeouts all match
+// context.DeadlineExceeded and would otherwise read as the caller's
+// deadline. Its text loses the link and every quoted string, because the
+// link, or a Location a remote host chose, can carry a signed token into a
+// log
+func downloadFailure(ctx context.Context, err error) error {
+	msg := err.Error()
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		msg = urlErr.Op + ": " + urlErr.Err.Error()
+	}
+	msg = quotedText.ReplaceAllString(msg, `"…"`)
+	if ctx.Err() != nil {
+		return fmt.Errorf("%w: %w: %s", ErrDownloadFailed, context.Cause(ctx), msg)
+	}
+	return fmt.Errorf("%w: %s", ErrDownloadFailed, msg)
+}
+
+// bodyReader remembers a failed read of the download, so a Stage error it
+// caused is told apart from one staging caused on its own
+type bodyReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF {
+		b.err = err
+	}
+	return n, err
+}
+
+func validLink(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if len(raw) > MaxLinkBytes {
+		return "", ErrUnsupportedLink
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", ErrUnsupportedLink
+	}
+	// url.Parse lowercases the scheme, so HTTPS:// passes as it should.
+	// Credentials are refused because a link that needs a session is not a
+	// direct link to a file, and a password has no business in a log line
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+		return "", ErrUnsupportedLink
+	}
+	return raw, nil
 }
 
 // StagedImport returns one staged import, or nil, nil when it has expired

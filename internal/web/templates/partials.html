@@ -55,6 +55,7 @@
 <script src="/static/js/search.js" defer></script>
 <script src="/static/js/edit.js" defer></script>
 <script src="/static/js/drop.js" defer></script>
+<script src="/static/js/paste-link.js" defer></script>
 {{end}}
 
 {{/* The input is never itself re-rendered by htmx — only #book-grid below
@@ -114,6 +115,18 @@
     {{/* Hidden until search.js binds the shortcut — a hint for a key that
          does nothing would be worse than no hint. */}}
     <kbd class="search__shortcut" data-search-shortcut hidden>/</kbd>
+    {{/* Hidden until paste-link.js can answer it: with JS off the Import
+         page's link form is the way in. type="button" keeps it from
+         submitting the search, and the title names links only, since the
+         clipboard API reads text and never a file */}}
+    {{if .ImportDrop}}<div class="search__paste">
+      <span class="search__rule" aria-hidden="true"></span>
+      <button class="paste-button" type="button" title="Paste a link from the clipboard" data-paste-button hidden>
+        <span class="paste-button__label">Paste</span>
+        <kbd class="paste-button__hint" data-paste-hint></kbd>
+        <span class="paste-button__spinner" aria-hidden="true"></span>
+      </button>
+    </div>{{end}}
   </div>
 </form>
 {{end}}
@@ -473,7 +486,7 @@
   {{else}}
   {{if .Failure}}<p class="import__error" role="alert">{{.Failure}}</p>{{end}}
   {{if .Note}}<p class="import__note" role="status">{{.Note}}</p>{{end}}
-  {{if .Preview}}{{template "import-preview" .Preview}}{{else}}{{template "import-form" .}}{{end}}
+  {{if .Preview}}{{template "import-preview" .Preview}}{{else}}{{template "import-form" .}}{{template "import-link-form" .}}{{end}}
   {{end}}
 </div>
 {{end}}
@@ -505,6 +518,25 @@
 </div>
 {{end}}
 
+{{/* A pasted link's confirmation. The form is the Import page's link form
+     posted natively, so the answer is the same redirect to the preview or
+     422 page; paste-link.js only fills it and names the host. Only included
+     beside import-drop, whose script it hands a pasted file to */}}
+{{define "paste-link"}}
+<dialog class="paste" data-paste-link aria-labelledby="paste-host">
+  <form class="paste__form" method="post" action="/import/url">
+    <p class="paste__host" id="paste-host">Download from <span data-paste-host></span>?</p>
+    <label class="import__label" for="paste-url">Link to an EPUB or FB2 file</label>
+    <input class="import__link" id="paste-url" type="url" name="url" placeholder="https://" autocomplete="off" required>
+    <div class="paste__actions">
+      <button class="button button--md button--primary" type="submit" data-paste-import>Import</button>
+      <button class="button button--md button--secondary" type="button" data-paste-cancel>Cancel</button>
+      <span class="paste__status" role="status"><span data-paste-downloading hidden>Downloading &hellip;</span></span>
+    </div>
+  </form>
+</dialog>
+{{end}}
+
 {{/* Both an action and an hx-post, the one markup path every other control
      here uses: with htmx loaded the panel swaps in place, and without it
      the same handler answers a redirect to the preview's own URL. enctype
@@ -529,6 +561,24 @@
   <div class="import__actions">
     <button class="button button--lg button--primary import__submit" type="submit">Upload</button>
     <span class="import__indicator" role="status">Uploading &hellip;</span>
+  </div>
+</form>
+{{end}}
+
+{{/* A plain post and no hx-post: the route downloads inside the request
+     and answers a 303 to the preview's own URL for every caller, so a
+     whole-page navigation is what puts that URL in the address bar, and the
+     422 page carries the refusal and the typed link back. The browser's own
+     loading state is the indicator, which is also how the form works with
+     JavaScript off. No maxlength: a truncated link would fetch the wrong
+     file, where the route's own refusal says the link is unsupported */}}
+{{define "import-link-form"}}
+<form class="import__form import__form--link" method="post" action="/import/url">
+  <label class="import__label" for="import-link">Link to an EPUB or FB2 file</label>
+  <input class="import__link" id="import-link" type="url" name="url" value="{{.Link}}" placeholder="https://" autocomplete="off" required>
+  <p class="import__hint">A direct link to the file, on a public address. The server downloads it and shows the same preview as an upload.</p>
+  <div class="import__actions">
+    <button class="button button--lg button--secondary import__submit" type="submit">Download</button>
   </div>
 </form>
 {{end}}

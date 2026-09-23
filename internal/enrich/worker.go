@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"library/internal/cover"
+	"library/internal/netguard"
 	"library/internal/storage"
 )
 
@@ -127,7 +128,7 @@ func New(db *storage.DB, providers []Provider, coversDir string) *Worker {
 		providers: providers,
 		coversDir: coversDir,
 		notify:    make(chan struct{}, 1),
-		dialGuard: RefusePrivateAddress,
+		dialGuard: netguard.RefusePrivateAddress,
 	}
 
 	// Cloned from the default rather than built from nothing, so the TLS
@@ -149,7 +150,7 @@ func New(db *storage.DB, providers []Provider, coversDir string) *Worker {
 	// then wraps — so both schemes are covered.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.DialContext = coverDialContext(func(ip net.IP) error { return w.dialGuard(ip) })
+	transport.DialContext = netguard.DialContext(func(ip net.IP) error { return w.dialGuard(ip) }, coverFetchTimeout)
 	w.coverClient = &http.Client{
 		Timeout:       coverFetchTimeout,
 		CheckRedirect: CheckCoverRedirect,

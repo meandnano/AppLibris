@@ -6,11 +6,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"library/internal/importer"
 	"library/internal/storage"
@@ -254,6 +264,9 @@ func TestEveryImportMethodRefusesWithoutAnImporter(t *testing.T) {
 	if err := svc.DiscardImport(ctx, "anything"); !errors.Is(err, ErrImportDisabled) {
 		t.Errorf("DiscardImport = %v, want ErrImportDisabled", err)
 	}
+	if _, err := svc.StageURL(ctx, "https://books.test/Dune.epub"); !errors.Is(err, ErrImportDisabled) {
+		t.Errorf("StageURL = %v, want ErrImportDisabled", err)
+	}
 }
 
 // A Stager exists exactly when importing is available: cmd/server builds
@@ -278,5 +291,461 @@ func TestImportEnabledFollowsWhetherAStagerWasGiven(t *testing.T) {
 	}
 	if got := svc.MaxImportBytes(); got != 64<<20 {
 		t.Errorf("MaxImportBytes = %d, want the configured cap", got)
+	}
+}
+
+// memoryFetcher stands in for importer.Fetcher, whose guarded transport
+// cannot be swapped from outside its package. It keeps the parts of Fetch
+// this layer reacts to: a body that stops with the request's context, the
+// status refusal, the HTML flag and a name from the URL
+type memoryFetcher struct {
+	client *http.Client
+	calls  atomic.Int32
+}
+
+func (f *memoryFetcher) Fetch(ctx context.Context, rawURL string) (importer.Download, error) {
+	f.calls.Add(1)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return importer.Download{}, err
+	}
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return importer.Download{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return importer.Download{}, &importer.StatusError{Code: resp.StatusCode}
+	}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	return importer.Download{
+		Name: path.Base(resp.Request.URL.Path),
+		HTML: mediaType == "text/html",
+		Body: resp.Body,
+	}, nil
+}
+
+// newLinkTestService is newImportTestService with a fetcher reaching
+// handler on the in-memory network. It answers the staging directory, so a
+// test can check a refused download left nothing behind
+func newLinkTestService(t *testing.T, handler http.HandlerFunc) (*Service, *memoryFetcher, string) {
+	t.Helper()
+
+	db := storagetest.Open(t)
+	root := t.TempDir()
+	stagingDir := filepath.Join(root, "staging")
+	stager, err := importer.New(db, importer.Options{
+		LibraryDir: root,
+		CoversDir:  root,
+		TempDir:    stagingDir,
+		MaxSize:    1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("importer.New: %v", err)
+	}
+	fetcher := &memoryFetcher{client: httptest.NewTestServer(t, handler).Client()}
+	return New(db, WithImporter(stager), WithFetcher(fetcher)), fetcher, stagingDir
+}
+
+func assertStagingEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read staging directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("staging directory holds %v, want nothing", entries)
+	}
+}
+
+func TestStageURLPreviewsTheDownloadUnderItsFetchedName(t *testing.T) {
+	book := importTestEPUB(t, "Dune", "Frank Herbert")
+	svc, _, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/epub+zip")
+		w.Write(book)
+	})
+
+	preview, err := svc.StageURL(context.Background(), "  https://books.test/files/Children%20of%20Dune.epub\n")
+	if err != nil {
+		t.Fatalf("StageURL: %v", err)
+	}
+	if preview.Title != "Dune" {
+		t.Errorf("Title = %q, want the embedded title", preview.Title)
+	}
+	if preview.LibraryName != "Children of Dune.epub" {
+		t.Errorf("LibraryName = %q, want the fetched name", preview.LibraryName)
+	}
+
+	again, err := svc.StagedImport(context.Background(), preview.ID)
+	if err != nil || again == nil {
+		t.Fatalf("StagedImport = %+v, %v; want the staged preview", again, err)
+	}
+}
+
+func TestStageURLRefusesAnUnsupportedLinkWithoutFetching(t *testing.T) {
+	links := map[string]string{
+		"ftp":         "ftp://books.test/Dune.epub",
+		"file":        "file:///etc/passwd",
+		"javascript":  "javascript:alert(1)",
+		"no scheme":   "books.test/Dune.epub",
+		"no host":     "https:///Dune.epub",
+		"port only":   "http://:8080/Dune.epub",
+		"opaque":      "http:books.test",
+		"userinfo":    "https://reader:secret@books.test/Dune.epub",
+		"user only":   "https://reader@books.test/Dune.epub",
+		"unparseable": "https://books.test/%zz",
+		"empty":       "",
+		"too long":    "https://books.test/" + strings.Repeat("a", 2<<10),
+	}
+	svc, fetcher, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {})
+
+	for name, link := range links {
+		t.Run(name, func(t *testing.T) {
+			if _, err := svc.StageURL(context.Background(), link); !errors.Is(err, ErrUnsupportedLink) {
+				t.Errorf("StageURL(%q) = %v, want ErrUnsupportedLink", link, err)
+			}
+		})
+	}
+	if n := fetcher.calls.Load(); n != 0 {
+		t.Errorf("the fetcher was asked %d times for links that were refused", n)
+	}
+}
+
+func TestStageURLWithoutAFetcherIsDisabled(t *testing.T) {
+	svc, _, _ := newImportTestService(t)
+	if _, err := svc.StageURL(context.Background(), "https://books.test/Dune.epub"); !errors.Is(err, ErrImportDisabled) {
+		t.Errorf("StageURL = %v, want ErrImportDisabled", err)
+	}
+}
+
+func TestStageURLRefusesASecondDownloadWhileOneRuns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		book := importTestEPUB(t, "Dune", "Frank Herbert")
+		entered := make(chan struct{}, 1)
+		release := make(chan struct{})
+		svc, _, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/slow.epub" {
+				entered <- struct{}{}
+				<-release
+			}
+			w.Write(book)
+		})
+
+		first := make(chan error, 1)
+		go func() {
+			_, err := svc.StageURL(context.Background(), "https://books.test/slow.epub")
+			first <- err
+		}()
+		<-entered
+
+		if _, err := svc.StageURL(context.Background(), "https://books.test/other.epub"); !errors.Is(err, ErrDownloadBusy) {
+			t.Errorf("second StageURL = %v, want ErrDownloadBusy", err)
+		}
+
+		close(release)
+		if err := <-first; err != nil {
+			t.Fatalf("first StageURL: %v", err)
+		}
+		if _, err := svc.StageURL(context.Background(), "https://books.test/other.epub"); err != nil {
+			t.Errorf("StageURL after the first finished = %v, want the slot free again", err)
+		}
+	})
+}
+
+// No Content-Length, so nothing refuses it before the body: the count in
+// Stage is what stops it
+func TestStageURLStopsAnUndeclaredOverCapBody(t *testing.T) {
+	svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.(http.Flusher).Flush()
+		chunk := bytes.Repeat([]byte("x"), 64<<10)
+		for range 20 {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	})
+
+	if _, err := svc.StageURL(context.Background(), "https://books.test/huge.epub"); !errors.Is(err, importer.ErrTooLarge) {
+		t.Fatalf("StageURL = %v, want ErrTooLarge", err)
+	}
+	assertStagingEmpty(t, stagingDir)
+}
+
+func TestStageURLGivesUpOnASlowDripAtTheDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+			for {
+				if _, err := w.Write([]byte("x")); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(time.Second):
+				}
+			}
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		start := time.Now()
+		_, err := svc.StageURL(ctx, "https://books.test/drip.epub")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("StageURL = %v, want the deadline", err)
+		}
+		if errors.Is(err, importer.ErrUnsupportedFormat) {
+			t.Errorf("StageURL = %v, which blames the truncated bytes for the wait", err)
+		}
+		if elapsed := time.Since(start); elapsed != 30*time.Second {
+			t.Errorf("gave up after %v, want exactly the 30s deadline", elapsed)
+		}
+		assertStagingEmpty(t, stagingDir)
+	})
+}
+
+func TestStageURLSaysAWebPageIsOne(t *testing.T) {
+	cases := map[string]struct {
+		contentType string
+		webPage     bool
+	}{
+		"html":  {"text/html; charset=utf-8", true},
+		"plain": {"text/plain", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				w.Write([]byte("<!doctype html><title>Download Dune</title>"))
+			})
+
+			_, err := svc.StageURL(context.Background(), "https://books.test/dune")
+			if !errors.Is(err, importer.ErrUnsupportedFormat) {
+				t.Fatalf("StageURL = %v, want ErrUnsupportedFormat", err)
+			}
+			if got := errors.Is(err, ErrWebPage); got != tc.webPage {
+				t.Errorf("errors.Is(err, ErrWebPage) = %v, want %v", got, tc.webPage)
+			}
+			assertStagingEmpty(t, stagingDir)
+		})
+	}
+}
+
+// Fetch's own refusals reach the caller unwrapped, for the transport to
+// name
+func TestStageURLPassesAStatusRefusalThrough(t *testing.T) {
+	svc, _, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/gone.epub")
+	var status *importer.StatusError
+	if !errors.As(err, &status) || status.Code != http.StatusNotFound {
+		t.Fatalf("StageURL = %v, want a 404 StatusError", err)
+	}
+}
+
+// Every way a download ends releases the one slot, or a single failed link
+// would refuse every later one until a restart
+func TestStageURLFreesTheSlotWhateverTheOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		book := importTestEPUB(t, "Dune", "Frank Herbert")
+		svc, _, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/gone.epub":
+				http.NotFound(w, r)
+			case "/notes.txt":
+				w.Write([]byte("just some text"))
+			case "/huge.epub":
+				w.Write(bytes.Repeat([]byte("x"), 2<<20))
+			case "/reset.epub":
+				panic(http.ErrAbortHandler)
+			case "/cut.epub":
+				w.Write(book[:len(book)/2])
+				w.(http.Flusher).Flush()
+				panic(http.ErrAbortHandler)
+			case "/slow.epub":
+				<-r.Context().Done()
+			default:
+				w.Write(book)
+			}
+		})
+
+		for _, link := range []string{"gone.epub", "notes.txt", "huge.epub", "reset.epub", "cut.epub", "slow.epub"} {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			_, err := svc.StageURL(ctx, "https://books.test/"+link)
+			cancel()
+			if err == nil {
+				t.Fatalf("StageURL(%s) succeeded, want a failure", link)
+			}
+			if _, err := svc.StageURL(context.Background(), "https://books.test/Dune.epub"); err != nil {
+				t.Errorf("StageURL after %s failed = %v, want the slot free again", link, err)
+			}
+		}
+	})
+}
+
+// A body that ends just as the deadline passes has arrived whole, and the
+// duplicate lookup Stage runs after it must not fail on that deadline
+func TestStageURLKeepsABookWhoseDeadlinePassesAfterTheBody(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		book := importTestEPUB(t, "Dune", "Frank Herbert")
+		svc := newFailingLinkService(t, func(context.Context, string) (importer.Download, error) {
+			return importer.Download{
+				Name: "Dune.epub",
+				Body: io.NopCloser(io.MultiReader(bytes.NewReader(book), lateEOF{2 * time.Second})),
+			}, nil
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		preview, err := svc.StageURL(ctx, "https://books.test/Dune.epub")
+		if err != nil {
+			t.Fatalf("StageURL = %v, want the book staged", err)
+		}
+		if preview.Title != "Dune" {
+			t.Errorf("Title = %q, want %q", preview.Title, "Dune")
+		}
+	})
+}
+
+// lateEOF ends a body only after wait, standing in for the last read of a
+// download that finishes as its deadline passes
+type lateEOF struct{ wait time.Duration }
+
+func (l lateEOF) Read([]byte) (int, error) {
+	time.Sleep(l.wait)
+	return 0, io.EOF
+}
+
+// fetchFunc answers Fetch with an error the in-memory transport cannot
+// produce on demand
+type fetchFunc func(ctx context.Context, rawURL string) (importer.Download, error)
+
+func (f fetchFunc) Fetch(ctx context.Context, rawURL string) (importer.Download, error) {
+	return f(ctx, rawURL)
+}
+
+func newFailingLinkService(t *testing.T, fetch fetchFunc) *Service {
+	t.Helper()
+	svc, _, _ := newImportTestService(t)
+	WithFetcher(fetch)(svc)
+	return svc
+}
+
+// A dial, TLS or response header timeout matches context.DeadlineExceeded,
+// which must not read as the caller's own deadline running out
+func TestStageURLKeepsATransportTimeoutApartFromTheDeadline(t *testing.T) {
+	svc := newFailingLinkService(t, func(_ context.Context, link string) (importer.Download, error) {
+		return importer.Download{}, fmt.Errorf("download request failed: %w",
+			&url.Error{Op: "Get", URL: link, Err: context.DeadlineExceeded})
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/Dune.epub")
+	if !errors.Is(err, ErrDownloadFailed) {
+		t.Errorf("StageURL = %v, want ErrDownloadFailed", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("StageURL = %v, which reads as the caller's deadline", err)
+	}
+}
+
+func TestStageURLSaysWhenTheCallerGaveUp(t *testing.T) {
+	svc := newFailingLinkService(t, func(ctx context.Context, _ string) (importer.Download, error) {
+		<-ctx.Done()
+		return importer.Download{}, fmt.Errorf("download request failed: %w", ctx.Err())
+	})
+
+	deadline, cancelDeadline := context.WithTimeout(context.Background(), 0)
+	defer cancelDeadline()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, tc := range map[string]struct {
+		ctx  context.Context
+		want error
+	}{
+		"deadline":  {deadline, context.DeadlineExceeded},
+		"cancelled": {cancelled, context.Canceled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := svc.StageURL(tc.ctx, "https://books.test/Dune.epub")
+			if !errors.Is(err, ErrDownloadFailed) || !errors.Is(err, tc.want) {
+				t.Errorf("StageURL = %v, want ErrDownloadFailed and %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// An *url.Error prints the link, and a signed download link carries its
+// token in the query
+func TestStageURLDropsTheLinkFromAFetchError(t *testing.T) {
+	svc := newFailingLinkService(t, func(_ context.Context, link string) (importer.Download, error) {
+		return importer.Download{}, fmt.Errorf("download request failed: %w",
+			&url.Error{Op: "Get", URL: link, Err: errors.New("connection refused")})
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/Dune.epub?token=s3cr3t")
+	if !errors.Is(err, ErrDownloadFailed) {
+		t.Fatalf("StageURL = %v, want ErrDownloadFailed", err)
+	}
+	if strings.Contains(err.Error(), "s3cr3t") {
+		t.Errorf("the error carries the link's token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("the error lost its cause: %v", err)
+	}
+}
+
+// net/http names a Location it cannot parse inside the error it returns,
+// and the remote host chose that Location, token and all
+func TestStageURLDropsAnUnparseableLocationFromAFetchError(t *testing.T) {
+	svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://cdn.test/%zz?token=s3cr3t")
+		w.WriteHeader(http.StatusFound)
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/Dune.epub")
+	if !errors.Is(err, ErrDownloadFailed) {
+		t.Fatalf("StageURL = %v, want ErrDownloadFailed", err)
+	}
+	if strings.Contains(err.Error(), "s3cr3t") {
+		t.Errorf("the error carries the redirect's token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Location") {
+		t.Errorf("the error lost what failed: %v", err)
+	}
+	assertStagingEmpty(t, stagingDir)
+}
+
+func TestStageURLCallsABodyCutShortADownloadFailure(t *testing.T) {
+	book := importTestEPUB(t, "Dune", "Frank Herbert")
+	svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(book)))
+		w.Write(book[:len(book)/2])
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/Dune.epub")
+	if !errors.Is(err, ErrDownloadFailed) {
+		t.Errorf("StageURL = %v, want ErrDownloadFailed", err)
+	}
+	assertStagingEmpty(t, stagingDir)
+}
+
+// A fault in staging itself is the server's, not the link's, so the
+// transport can answer it as one
+func TestStageURLLeavesAStagingFaultUnwrapped(t *testing.T) {
+	book := importTestEPUB(t, "Dune", "Frank Herbert")
+	svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write(book)
+	})
+	if err := os.RemoveAll(stagingDir); err != nil {
+		t.Fatalf("remove staging directory: %v", err)
+	}
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/Dune.epub")
+	if err == nil || errors.Is(err, ErrDownloadFailed) {
+		t.Errorf("StageURL = %v, want the staging error itself", err)
 	}
 }

@@ -549,6 +549,30 @@ func TestStageDropsACoverThatIsNotAnImage(t *testing.T) {
 // EPUB, and more for an FB2. It is also what the title-match verdict
 // compares, so an uncapped title could never equal a sort_title the scanner
 // derived from a capped one.
+// A name is charged to the budget after the reservation, so one past the
+// whole budget would lock every later import out until the stage expired
+func TestStageBoundsTheOfferedName(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+	stager, _ := testStager(t, db, 1<<20)
+
+	longName := strings.Repeat("é", 5<<20/2) + ".epub"
+	staged, err := stager.Stage(ctx, longName, bytes.NewReader(epubBytes(t, "Dune", "Frank Herbert", 0)))
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if len(staged.OriginalName) > maxOfferedNameBytes {
+		t.Errorf("OriginalName is %d bytes, want at most %d", len(staged.OriginalName), maxOfferedNameBytes)
+	}
+	if !utf8.ValidString(staged.OriginalName) {
+		t.Error("the cut name is not valid UTF-8")
+	}
+
+	if _, err := stager.Stage(ctx, "Emma.epub", bytes.NewReader(epubBytes(t, "Emma", "Jane Austen", 0))); err != nil {
+		t.Fatalf("a second Stage after a long name: %v", err)
+	}
+}
+
 func TestStageCapsWhatThePreviewShows(t *testing.T) {
 	ctx := context.Background()
 	db := storagetest.Open(t)

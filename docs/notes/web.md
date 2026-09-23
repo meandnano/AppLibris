@@ -9,9 +9,9 @@ Rules for `internal/service` and `internal/web`.
 /books/{id}/send`, `GET /books/{id}/sends/{sendID}`, `POST
 /books/{id}/enrich`, `GET /books/{id}/enrichment/{jobID}`, `POST
 /recipients/remove`, `GET /history`, `GET /import`, `POST /import/file`,
-`GET /import/{id}`, `GET /import/{id}/cover`, `POST /import/{id}/confirm`,
-`POST /import/{id}/discard`, `/static/`, `/covers/`. The import routes are
-governed by `docs/notes/import.md`.
+`POST /import/url`, `GET /import/{id}`, `GET /import/{id}/cover`, `POST
+/import/{id}/confirm`, `POST /import/{id}/discard`, `/static/`,
+`/covers/`. The import routes are governed by `docs/notes/import.md`.
 
 ## Service layer
 
@@ -22,8 +22,8 @@ governed by `docs/notes/import.md`.
 - **`Service.now` is the clock for every timestamp the service writes,
   and `relativeTime(t, now)` takes `now` as a parameter.** Timing is
   testable without sleeping.
-- **`New` takes functional options and `WithImporter` is the only one; a
-  nil importer answers `ErrImportDisabled`, the nav asks
+- **`New` takes functional options, `WithImporter` and `WithFetcher`; a
+  nil importer or fetcher answers `ErrImportDisabled`, the nav asks
   `svc.ImportEnabled()`, and `ImportPreview` is an alias for
   `importer.Staged`.** The importer is the service's own, where the
   send and enrich flags are configuration the service never sees.
@@ -131,12 +131,12 @@ governed by `docs/notes/import.md`.
   redirect lands on a page that has forgotten the message and the input.
 - **`includeIndicatorCSS` is false; nothing carries `htmx-indicator`, and
   every indicator is a rule of this app's own keyed on `htmx-request`.**
-- **The timeout is htmx's own 60s everywhere but the two import forms,
-  which carry `hx-config="timeout:0"`. Never move that to
+- **The timeout is htmx's own 60s everywhere but the upload and confirm
+  forms, which carry `hx-config="timeout:0"`. Never move that to
   `defaultTimeout` on the meta tag.** An upload's window scales with
   `MAX_IMPORT_SIZE` and a confirm's with `importer.IndexTimeout`; a hung
   search with no bound leaves its indicator up forever.
-- **Both import forms and the discard form carry `hx-disable="find
+- **The upload, confirm and discard forms carry `hx-disable="find
   button"`.** Dimming is appearance only: a focused button still answers
   Enter, and htmx queues the second submit. The attribute is applied after
   the body is read, so it cannot strip the file part.
@@ -314,14 +314,15 @@ governed by `docs/notes/import.md`.
 
 ## Upload bodies
 
-- **The upload and confirm routes extend their own deadlines through
-  `http.NewResponseController`, both halves; `cmd/server`'s timeouts are
-  never loosened for other routes.** Go installs the write deadline once,
-  when the headers are read, so a widened read window alone sits inside a
-  write deadline that expired while the body arrived, and the import lands
-  with its answer never reaching the browser. Extended rather than removed,
-  so a stalled upload still ends. `confirmWindow` is derived from
-  `importer.IndexTimeout`, never restated.
+- **The upload route extends both halves of its deadline through
+  `http.NewResponseController`, the link and confirm routes the write half
+  alone; `cmd/server`'s timeouts are never loosened for other routes.** Go
+  installs the write deadline once, when the headers are read, so a
+  widened read window alone sits inside a write deadline that expired
+  while the body arrived, and the import lands with its answer never
+  reaching the browser. Extended rather than removed, so a stalled upload
+  still ends. `confirmWindow` is derived from `importer.IndexTimeout`,
+  never restated.
 - **`http.MaxBytesReader` bounds the body at the cap plus multipart
   overhead and is installed before any refusal; the number a refusal names
   is the importer's own count of the file part.** The read-only refusal
@@ -361,9 +362,14 @@ governed by `docs/notes/import.md`.
   itself and clears the base `min-height` as `--md` and `--lg` do, since
   the base minimum is shaped for the editors. `.search__spinner` stays
   outside because it is coloured against the input and shares only the
-  keyframes; `.send__remove` because it is a borderless text affordance,
-  not a button. Known limit:
+  keyframes; `.paste-button` because it is a toolbar control drawn to the
+  search row's metrics; `.send__remove` because it is a borderless text
+  affordance, not a button. Known limit:
   `docs/backlog/2026090702-button-base-carries-the-editors-size.md`.
+- **The Paste button's separator hides with the button through
+  `.search__paste:has(> [data-paste-button][hidden])`.** The script
+  reveals one element, and a rule standing beside nothing reads as a
+  broken toolbar.
 - **`.button--primary`'s foreground stays `var(--bg-raised)`, never
   `#fff`.** `--accent` is a light tan in dark theme, where white measures
   2.9:1; the token holds 5.8:1 in both.
