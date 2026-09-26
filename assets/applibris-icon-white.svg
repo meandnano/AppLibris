@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" role="img" aria-label="Applibris icon">
+  <rect x="138" y="142" width="364" height="356" rx="44" fill="none" stroke="#fff" stroke-width="20"/>
+  <path d="M192 219c36-7 78 1 115 24 5 3 8 8 8 14v161c0 8-9 12-15 8-31-22-70-32-106-27-11 1-20-7-20-18V240c0-10 7-19 18-21Z" fill="#fff"/>
+  <path d="M448 219c-36-7-78 1-115 24-5 3-8 8-8 14v161c0 8 9 12 15 8 31-22 70-32 106-27 11 1 20-7 20-18V240c0-10-7-19-18-21Z" fill="#fff"/>
+  <circle cx="320" cy="457" r="13" fill="#fff"/>
+</svg>
