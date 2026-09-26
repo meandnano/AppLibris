@@ -1,3 +1,5 @@
+<img src="assets/applibris-icon-256.png" alt="AppLibris icon" width="96">
+
 # AppLibris
 
 A self-hosted ebook library server. Point it at a directory of EPUB and FB2
