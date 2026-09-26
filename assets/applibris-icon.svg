@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640" role="img" aria-label="Applibris icon">
+  <defs>
+    <linearGradient id="warm" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff9b32"/>
+      <stop offset="0.52" stop-color="#ff6c2c"/>
+      <stop offset="1" stop-color="#f23a32"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="640" fill="#1c1c1c"/>
+  <rect x="138" y="142" width="364" height="356" rx="44" fill="none" stroke="url(#warm)" stroke-width="20"/>
+  <path d="M192 219c36-7 78 1 115 24 5 3 8 8 8 14v161c0 8-9 12-15 8-31-22-70-32-106-27-11 1-20-7-20-18V240c0-10 7-19 18-21Z" fill="url(#warm)"/>
+  <path d="M448 219c-36-7-78 1-115 24-5 3-8 8-8 14v161c0 8 9 12 15 8 31-22 70-32 106-27 11 1 20-7 20-18V240c0-10-7-19-18-21Z" fill="url(#warm)"/>
+  <circle cx="320" cy="457" r="13" fill="#f8dec0"/>
+</svg>
