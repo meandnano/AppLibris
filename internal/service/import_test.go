@@ -573,6 +573,15 @@ func TestStageURLKeepsThePageErrorWhenTheEpubAddressIsNoBook(t *testing.T) {
 			w.Header().Set("Content-Type", "text/html")
 			w.Write([]byte("<!doctype html>"))
 		},
+		// S3 and CloudFront answer a key that does not exist with 403
+		"forbidden": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<!doctype html>"))
+		},
 		"not a book": func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.URL.Path, "/epub") {
 				w.Header().Set("Content-Type", "text/plain")
@@ -719,7 +728,7 @@ func TestStageURLReportsAFaultOfTheEpubAddressItself(t *testing.T) {
 		assertStagingEmpty(t, stagingDir)
 	})
 
-	for _, code := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusForbidden} {
+	for _, code := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			svc, _, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/epub") {

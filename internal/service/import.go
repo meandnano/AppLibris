@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -157,12 +158,13 @@ func (s *Service) stageLink(ctx context.Context, link string) (*ImportPreview, e
 	if d.HTML {
 		head, err := readPageHead(d.Body, cancelFetch)
 		switch {
+		// The caller's window ending is the answer even for a page, the
+		// same order the Stage errors below keep, and a retry started on an
+		// ended window could only fail
+		case ctx.Err() != nil:
+			return nil, downloadFailure(ctx, cmp.Or(err, errPageHeadCut))
 		case err != nil:
 			return nil, downloadFailure(ctx, err)
-		// The caller's window ending is the answer even for a page, the
-		// same order the Stage errors below keep
-		case head == nil && ctx.Err() != nil:
-			return nil, downloadFailure(ctx, errPageHeadCut)
 		case head == nil || !importer.MayBeBook(head):
 			return nil, fmt.Errorf("%w: %w", ErrWebPage, importer.ErrUnsupportedFormat)
 		}
@@ -195,11 +197,14 @@ var errPageHeadCut = errors.New("the page's head was cut off")
 
 // readPageHead reads the head of a body labelled a web page and ends its
 // fetch once importer.PageSniffTimeout passes. A head cut off that way is
-// nil with no error: the label stands, since no byte said otherwise
+// nil with no error: the label stands, since no byte said otherwise. A head
+// whose read succeeded is kept even when the timer fired in the same
+// instant, because those bytes did arrive in time and decide what the body
+// is; a book's remaining body then fails as cut off, which is what happened
 func readPageHead(body io.Reader, cancelFetch context.CancelFunc) ([]byte, error) {
 	timer := time.AfterFunc(importer.PageSniffTimeout, cancelFetch)
 	head, err := importer.ReadHead(body)
-	if !timer.Stop() {
+	if fired := !timer.Stop(); fired && err != nil {
 		return nil, nil
 	}
 	return head, err
@@ -231,16 +236,19 @@ func epubFallback(link string) (string, bool) {
 }
 
 // fallbackMiss reports whether a failed retry only says the guessed address
-// holds no book. Anything else, a 429 or a 5xx, a body cut off, the
-// caller's deadline, a full staging area, a file over the cap, can change on
-// a second try or with a smaller file, which the page's message would hide
+// holds no book. Any 4xx but a timeout or a rate limit counts, since S3,
+// CloudFront and many firewalls answer a path that does not exist with 403
+// or 400. Anything else, a 408, a 429, a 5xx, a body cut off, the caller's
+// deadline, a full staging area, a file over the cap, can change on a second
+// try or with a smaller file, which the page's message would hide
 func fallbackMiss(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
 	}
 	var status *importer.StatusError
 	if errors.As(err, &status) {
-		return status.Code == http.StatusNotFound || status.Code == http.StatusGone
+		return status.Code >= 400 && status.Code < 500 &&
+			status.Code != http.StatusRequestTimeout && status.Code != http.StatusTooManyRequests
 	}
 	return errors.Is(err, importer.ErrUnsupportedFormat)
 }
