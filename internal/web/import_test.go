@@ -1426,8 +1426,8 @@ func TestImportURLLogsNoCredentialsFromTheLink(t *testing.T) {
 // to be starting
 func TestDownloadWindowOutlastsTheFetchersStartAndTheBody(t *testing.T) {
 	got := downloadWindow(64 << 20)
-	if want := importer.FetchStartTimeout + uploadWindow(64<<20); got < want {
-		t.Errorf("downloadWindow = %s, want at least the fetcher's %s start plus the body's %s", got, importer.FetchStartTimeout, uploadWindow(64<<20))
+	if want := 2*importer.FetchStartTimeout + uploadWindow(64<<20); got < want {
+		t.Errorf("downloadWindow = %s, want at least two of the fetcher's %s starts plus the body's %s", got, importer.FetchStartTimeout, uploadWindow(64<<20))
 	}
 }
 

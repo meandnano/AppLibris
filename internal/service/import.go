@@ -109,6 +109,26 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 		return nil, ErrDownloadBusy
 	}
 
+	staged, err := s.stageLink(ctx, link)
+	if !errors.Is(err, ErrWebPage) {
+		return staged, err
+	}
+	// A book's page on a site that serves the file at <page>/epub is the
+	// link people actually have at hand. Only a web page is retried, so a
+	// failure of any other kind is never hidden behind a second request
+	if fallback, ok := epubFallback(link); ok {
+		if retried, retryErr := s.stageLink(ctx, fallback); retryErr == nil || !fallbackMiss(ctx, retryErr) {
+			return retried, retryErr
+		}
+	}
+	// The page the person pasted is what they need to hear about, not the
+	// guess made on their behalf
+	return nil, err
+}
+
+// stageLink downloads one link into staging. The caller holds the download
+// slot, so a retry reuses it instead of queueing behind other people
+func (s *Service) stageLink(ctx context.Context, link string) (*ImportPreview, error) {
 	d, err := s.fetcher.Fetch(ctx, link)
 	if err != nil {
 		var status *importer.StatusError
@@ -139,6 +159,44 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 	default:
 		return nil, err
 	}
+}
+
+// epubFallback appends /epub to the link's path, leaving the query alone
+// since some sites select the book with it. The path is extended in its
+// escaped form, because decoding it first turns an encoded slash into a
+// separator and names a different address. A link already ending in /epub
+// has had that address tried, so it has no fallback
+func epubFallback(link string) (string, bool) {
+	u, err := url.Parse(link)
+	if err != nil {
+		return "", false
+	}
+	escaped := strings.TrimRight(u.EscapedPath(), "/")
+	if strings.EqualFold(escaped[strings.LastIndex(escaped, "/")+1:], "epub") {
+		return "", false
+	}
+	escaped += "/epub"
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil {
+		return "", false
+	}
+	u.Path = decoded
+	u.RawPath = escaped
+	u.Fragment = ""
+	return u.String(), true
+}
+
+// fallbackMiss reports whether a failed retry only says the guessed address
+// is no book, as opposed to a fault that holds for the page too (the
+// caller's deadline, a full staging area, a file over the cap)
+func fallbackMiss(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var status *importer.StatusError
+	return errors.As(err, &status) ||
+		errors.Is(err, importer.ErrUnsupportedFormat) ||
+		errors.Is(err, ErrDownloadFailed)
 }
 
 // quotedText is a Go-quoted string inside an error's text, which is how

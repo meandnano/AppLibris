@@ -267,9 +267,10 @@ func importURLHandler(svc *service.Service) http.HandlerFunc {
 
 // downloadWindow is how long a pasted link is given to finish downloading,
 // sized at the upload's rate so a link is allowed what the same file
-// uploaded would be
+// uploaded would be. It leaves room for two connection starts, since a web
+// page is followed by one retry at its /epub address
 func downloadWindow(maxBytes int64) time.Duration {
-	return importer.FetchStartTimeout + uploadWindow(maxBytes)
+	return 2*importer.FetchStartTimeout + uploadWindow(maxBytes)
 }
 
 // logLinkFailure names the link by scheme, host and path only: its query
