@@ -31,6 +31,11 @@ const (
 // the body's own time
 const FetchStartTimeout = fetchDialTimeout + fetchTLSHandshakeTimeout + fetchResponseHeaderTimeout
 
+// PageSniffTimeout bounds the read of a web page's head. The page is not
+// what the window is sized for, so a page that trickles must not spend the
+// time a retry at another address needs
+const PageSniffTimeout = 10 * time.Second
+
 // fetchUserAgent is the agent the provider clients and the cover fetch
 // also send, so a host that throttles Go's generic default treats a
 // download no worse than a cover fetch

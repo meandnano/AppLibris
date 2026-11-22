@@ -531,6 +531,315 @@ func TestStageURLSaysAWebPageIsOne(t *testing.T) {
 	}
 }
 
+func TestStageURLRetriesAWebPageAtItsEpubAddress(t *testing.T) {
+	book := importTestEPUB(t, "Dune", "Frank Herbert")
+	svc, fetcher, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/books/dune/epub" {
+			w.Header().Set("Content-Type", "application/epub+zip")
+			w.Write(book)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<!doctype html><title>Dune</title>"))
+	})
+
+	preview, err := svc.StageURL(context.Background(), "https://books.test/books/dune/?lang=en#top")
+	if err != nil {
+		t.Fatalf("StageURL: %v", err)
+	}
+	if preview.Title != "Dune" {
+		t.Errorf("Title = %q, want the embedded title", preview.Title)
+	}
+	if got := fetcher.calls.Load(); got != 2 {
+		t.Errorf("fetches = %d, want the page and its /epub address", got)
+	}
+}
+
+func TestStageURLKeepsThePageErrorWhenTheEpubAddressIsNoBook(t *testing.T) {
+	cases := map[string]http.HandlerFunc{
+		"missing": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<!doctype html>"))
+		},
+		"gone": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				w.WriteHeader(http.StatusGone)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<!doctype html>"))
+		},
+		// S3 and CloudFront answer a key that does not exist with 403
+		"forbidden": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<!doctype html>"))
+		},
+		"not a book": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				w.Header().Set("Content-Type", "text/plain")
+				w.Write([]byte("just some text"))
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<!doctype html>"))
+		},
+		"another page": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<!doctype html>"))
+		},
+	}
+	for name, handler := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc, _, stagingDir := newLinkTestService(t, handler)
+
+			_, err := svc.StageURL(context.Background(), "https://books.test/books/dune")
+			if !errors.Is(err, ErrWebPage) {
+				t.Fatalf("StageURL = %v, want ErrWebPage", err)
+			}
+			assertStagingEmpty(t, stagingDir)
+		})
+	}
+}
+
+func TestStageURLDoesNotGuessAfterANonPageFailure(t *testing.T) {
+	svc, fetcher, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("just some text"))
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/notes")
+	if !errors.Is(err, importer.ErrUnsupportedFormat) {
+		t.Fatalf("StageURL = %v, want ErrUnsupportedFormat", err)
+	}
+	if got := fetcher.calls.Load(); got != 1 {
+		t.Errorf("fetches = %d, want only the pasted link", got)
+	}
+}
+
+func TestEpubFallback(t *testing.T) {
+	cases := map[string]string{
+		"https://books.test/b/1":           "https://books.test/b/1/epub",
+		"https://books.test/b/1/":          "https://books.test/b/1/epub",
+		"https://books.test/b/1?lang=en#x": "https://books.test/b/1/epub?lang=en",
+		"https://books.test":               "https://books.test/epub",
+		"https://books.test/b/a%2Fb":       "https://books.test/b/a%2Fb/epub",
+		"https://books.test/b/caf%C3%A9":   "https://books.test/b/caf%C3%A9/epub",
+	}
+	for in, want := range cases {
+		if got, ok := epubFallback(in); !ok || got != want {
+			t.Errorf("epubFallback(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+}
+
+func TestEpubFallbackSkipsALinkAlreadyAtItsEpubAddress(t *testing.T) {
+	for _, in := range []string{
+		"https://books.test/b/1/epub",
+		"https://books.test/b/1/EPUB/",
+	} {
+		if got, ok := epubFallback(in); ok {
+			t.Errorf("epubFallback(%q) = %q, want no fallback", in, got)
+		}
+	}
+}
+
+func TestStageURLDoesNotRetryALinkAlreadyAtItsEpubAddress(t *testing.T) {
+	svc, fetcher, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<!doctype html>"))
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/b/1/epub")
+	if !errors.Is(err, ErrWebPage) {
+		t.Fatalf("StageURL = %v, want ErrWebPage", err)
+	}
+	if got := fetcher.calls.Load(); got != 1 {
+		t.Errorf("fetches = %d, want only the pasted link", got)
+	}
+}
+
+// A fault of the guessed address that a second try or a smaller file can
+// change is the answer, not the page's own refusal
+func TestStageURLReportsAFaultOfTheEpubAddressItself(t *testing.T) {
+	page := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<!doctype html>"))
+	}
+	t.Run("too large", func(t *testing.T) {
+		svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				w.Header().Set("Content-Type", "application/epub+zip")
+				w.Write(bytes.Repeat([]byte("x"), 2<<20))
+				return
+			}
+			page(w)
+		})
+
+		_, err := svc.StageURL(context.Background(), "https://books.test/b/1")
+		if !errors.Is(err, importer.ErrTooLarge) || errors.Is(err, ErrWebPage) {
+			t.Fatalf("StageURL = %v, want ErrTooLarge alone", err)
+		}
+		assertStagingEmpty(t, stagingDir)
+	})
+
+	t.Run("deadline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			svc, _, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/epub") {
+					w.Header().Set("Content-Type", "application/epub+zip")
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+					return
+				}
+				page(w)
+			})
+
+			_, err := svc.StageURL(ctx, "https://books.test/b/1")
+			if !errors.Is(err, ErrDownloadFailed) || errors.Is(err, ErrWebPage) {
+				t.Fatalf("StageURL = %v, want ErrDownloadFailed alone", err)
+			}
+		})
+	})
+
+	t.Run("body cut off", func(t *testing.T) {
+		svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				w.Header().Set("Content-Length", "10")
+				w.Write([]byte("short"))
+				return
+			}
+			page(w)
+		})
+
+		_, err := svc.StageURL(context.Background(), "https://books.test/b/1")
+		if !errors.Is(err, ErrDownloadFailed) || errors.Is(err, ErrWebPage) {
+			t.Fatalf("StageURL = %v, want ErrDownloadFailed alone", err)
+		}
+		assertStagingEmpty(t, stagingDir)
+	})
+
+	for _, code := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			svc, _, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/epub") {
+					w.WriteHeader(code)
+					return
+				}
+				page(w)
+			})
+
+			_, err := svc.StageURL(context.Background(), "https://books.test/b/1")
+			var status *importer.StatusError
+			if !errors.As(err, &status) || status.Code != code || errors.Is(err, ErrWebPage) {
+				t.Fatalf("StageURL = %v, want the %d alone", err, code)
+			}
+		})
+	}
+}
+
+// The log names only the pasted link, so the error has to say the guessed
+// address is the one that failed
+func TestStageURLSaysAReportedFaultCameFromTheEpubAddress(t *testing.T) {
+	svc, _, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/epub") {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<!doctype html>"))
+	})
+
+	_, err := svc.StageURL(context.Background(), "https://books.test/b/1")
+	if err == nil || !strings.Contains(err.Error(), "retry at /epub") {
+		t.Errorf("StageURL = %v, want it to name the /epub retry", err)
+	}
+}
+
+// A page is never a book, so reading it to the cap would spend the retry's
+// time on bytes that are thrown away
+func TestStageURLReadsOnlyThePagesHead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, stagingDir := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<!doctype html>" + strings.Repeat(" ", 8<<10)))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		})
+
+		start := time.Now()
+		_, err := svc.StageURL(context.Background(), "https://books.test/b/1")
+		if !errors.Is(err, ErrWebPage) {
+			t.Fatalf("StageURL = %v, want ErrWebPage", err)
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("StageURL took %v, want no wait for the rest of the page", elapsed)
+		}
+		assertStagingEmpty(t, stagingDir)
+	})
+}
+
+func TestStageURLGivesUpOnATricklingPagesHead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, fetcher, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/epub") {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<!doctype"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		})
+
+		start := time.Now()
+		_, err := svc.StageURL(context.Background(), "https://books.test/b/1")
+		if !errors.Is(err, ErrWebPage) {
+			t.Fatalf("StageURL = %v, want ErrWebPage", err)
+		}
+		if elapsed := time.Since(start); elapsed != importer.PageSniffTimeout {
+			t.Errorf("StageURL took %v, want the %v head timeout", elapsed, importer.PageSniffTimeout)
+		}
+		if got := fetcher.calls.Load(); got != 2 {
+			t.Errorf("fetches = %d, want the page and its /epub address", got)
+		}
+	})
+}
+
+// Some servers label every download text/html, so the label alone does not
+// refuse a book
+func TestStageURLStagesABookLabelledAWebPage(t *testing.T) {
+	book := importTestEPUB(t, "Dune", "Frank Herbert")
+	svc, fetcher, _ := newLinkTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write(book)
+	})
+
+	preview, err := svc.StageURL(context.Background(), "https://books.test/b/1")
+	if err != nil {
+		t.Fatalf("StageURL: %v", err)
+	}
+	if preview.Title != "Dune" {
+		t.Errorf("Title = %q, want the embedded title", preview.Title)
+	}
+	if got := fetcher.calls.Load(); got != 1 {
+		t.Errorf("fetches = %d, want only the pasted link", got)
+	}
+}
+
 // Fetch's own refusals reach the caller unwrapped, for the transport to
 // name
 func TestStageURLPassesAStatusRefusalThrough(t *testing.T) {

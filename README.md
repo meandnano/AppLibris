@@ -124,8 +124,10 @@ The Import page uploads one EPUB or FB2 at a time; dropping a file onto the
 library page, or pasting a copied one there with Cmd/Ctrl+V, does the same.
 A link to a book file works too: paste it on the library page, use its
 Paste button, or type it into the Import page's link field, and the server
-downloads it to the same preview. Only publicly reachable addresses are
-downloaded, so a book on your own network is dropped or uploaded instead.
+downloads it to the same preview. If the link opens a web page, the
+server tries that address with `/epub` added before it gives up. Only
+publicly reachable addresses are downloaded, so a book on your own network
+is dropped or uploaded instead.
 
 The file is held in `applibris-imports` under `TMPDIR` (`/tmp` in the
 container) while you look at the preview, and is copied into the root of

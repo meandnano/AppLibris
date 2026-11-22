@@ -1,13 +1,17 @@
 package service
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"library/internal/importer"
 )
@@ -109,7 +113,38 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 		return nil, ErrDownloadBusy
 	}
 
-	d, err := s.fetcher.Fetch(ctx, link)
+	staged, err := s.stageLink(ctx, link)
+	if !errors.Is(err, ErrWebPage) {
+		return staged, err
+	}
+	// A book's page on a site that serves the file at <page>/epub is the
+	// link people actually have at hand. Only a web page is retried, so a
+	// failure of any other kind is never hidden behind a second request
+	if fallback, ok := epubFallback(link); ok {
+		retried, retryErr := s.stageLink(ctx, fallback)
+		if retryErr == nil {
+			return retried, nil
+		}
+		// The log names the pasted link only, so the error says which
+		// request it came from
+		if !fallbackMiss(ctx, retryErr) {
+			return nil, fmt.Errorf("retry at /epub: %w", retryErr)
+		}
+	}
+	// The page the person pasted is what they need to hear about, not the
+	// guess made on their behalf
+	return nil, err
+}
+
+// stageLink downloads one link into staging. The caller holds the download
+// slot, so a retry reuses it instead of queueing behind other people
+func (s *Service) stageLink(ctx context.Context, link string) (*ImportPreview, error) {
+	// A context of its own so a page's head can be cut off without ending
+	// the caller's window
+	fetchCtx, cancelFetch := context.WithCancel(ctx)
+	defer cancelFetch()
+
+	d, err := s.fetcher.Fetch(fetchCtx, link)
 	if err != nil {
 		var status *importer.StatusError
 		if errors.As(err, &status) || errors.Is(err, importer.ErrTooLarge) {
@@ -119,12 +154,29 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 	}
 	defer d.Body.Close()
 
+	var src io.Reader = d.Body
+	if d.HTML {
+		head, err := readPageHead(d.Body, cancelFetch)
+		switch {
+		// The caller's window ending is the answer even for a page, the
+		// same order the Stage errors below keep, and a retry started on an
+		// ended window could only fail
+		case ctx.Err() != nil:
+			return nil, downloadFailure(ctx, cmp.Or(err, errPageHeadCut))
+		case err != nil:
+			return nil, downloadFailure(ctx, err)
+		case head == nil || !importer.MayBeBook(head):
+			return nil, fmt.Errorf("%w: %w", ErrWebPage, importer.ErrUnsupportedFormat)
+		}
+		src = io.MultiReader(bytes.NewReader(head), d.Body)
+	}
+
 	// The deadline is sized for the download alone, and the body's reads
 	// already end with ctx through the request that fetched it. What Stage
 	// does once the body has ended, the parse and the duplicate lookup, is
 	// not the download, and a deadline passing then must not discard a book
 	// that arrived whole
-	body := &bodyReader{r: d.Body}
+	body := &bodyReader{r: src}
 	staged, err := s.importer.Stage(context.WithoutCancel(ctx), d.Name, body)
 	switch {
 	case err == nil:
@@ -139,6 +191,66 @@ func (s *Service) StageURL(ctx context.Context, rawURL string) (*ImportPreview, 
 	default:
 		return nil, err
 	}
+}
+
+var errPageHeadCut = errors.New("the page's head was cut off")
+
+// readPageHead reads the head of a body labelled a web page and ends its
+// fetch once importer.PageSniffTimeout passes. A head cut off that way is
+// nil with no error: the label stands, since no byte said otherwise. A head
+// whose read succeeded is kept even when the timer fired in the same
+// instant, because those bytes did arrive in time and decide what the body
+// is; a book's remaining body then fails as cut off, which is what happened
+func readPageHead(body io.Reader, cancelFetch context.CancelFunc) ([]byte, error) {
+	timer := time.AfterFunc(importer.PageSniffTimeout, cancelFetch)
+	head, err := importer.ReadHead(body)
+	if fired := !timer.Stop(); fired && err != nil {
+		return nil, nil
+	}
+	return head, err
+}
+
+// epubFallback appends /epub to the link's path, leaving the query alone
+// since some sites select the book with it. The path is extended in its
+// escaped form, because decoding it first turns an encoded slash into a
+// separator and names a different address. A link already ending in /epub
+// has had that address tried, so it has no fallback
+func epubFallback(link string) (string, bool) {
+	u, err := url.Parse(link)
+	if err != nil {
+		return "", false
+	}
+	escaped := strings.TrimRight(u.EscapedPath(), "/")
+	if strings.EqualFold(escaped[strings.LastIndex(escaped, "/")+1:], "epub") {
+		return "", false
+	}
+	escaped += "/epub"
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil {
+		return "", false
+	}
+	u.Path = decoded
+	u.RawPath = escaped
+	u.Fragment = ""
+	return u.String(), true
+}
+
+// fallbackMiss reports whether a failed retry only says the guessed address
+// holds no book. Any 4xx but a timeout or a rate limit counts, since S3,
+// CloudFront and many firewalls answer a path that does not exist with 403
+// or 400. Anything else, a 408, a 429, a 5xx, a body cut off, the caller's
+// deadline, a full staging area, a file over the cap, can change on a second
+// try or with a smaller file, which the page's message would hide
+func fallbackMiss(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var status *importer.StatusError
+	if errors.As(err, &status) {
+		return status.Code >= 400 && status.Code < 500 &&
+			status.Code != http.StatusRequestTimeout && status.Code != http.StatusTooManyRequests
+	}
+	return errors.Is(err, importer.ErrUnsupportedFormat)
 }
 
 // quotedText is a Go-quoted string inside an error's text, which is how
