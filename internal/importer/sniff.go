@@ -56,12 +56,10 @@ func detectSuffix(path string) (string, error) {
 	}
 	defer f.Close()
 
-	head := make([]byte, sniffBytes)
-	n, err := io.ReadFull(f, head)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+	head, err := ReadHead(f)
+	if err != nil {
 		return "", err
 	}
-	head = head[:n]
 
 	if bytes.HasPrefix(head, zipMagic) {
 		return zipSuffix(path)
@@ -77,6 +75,25 @@ func detectSuffix(path string) (string, error) {
 		return ".fb2", nil
 	}
 	return "", ErrUnsupportedFormat
+}
+
+// ReadHead reads the window detectSuffix decides from. A body shorter than
+// the window is all head, so its end is not an error
+func ReadHead(r io.Reader) ([]byte, error) {
+	head := make([]byte, sniffBytes)
+	n, err := io.ReadFull(r, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	return head[:n], nil
+}
+
+// MayBeBook reports whether head can start a file detectSuffix accepts,
+// for a body whose server labelled it a web page. Some servers label every
+// download text/html, so the label alone must not refuse a book, while the
+// zip branch needs the whole archive and is left to Stage
+func MayBeBook(head []byte) bool {
+	return bytes.HasPrefix(head, zipMagic) || (hasXMLOpening(head) && bytes.Contains(head, fb2Root))
 }
 
 // hasXMLOpening reports whether head begins, after an optional UTF-8

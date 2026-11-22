@@ -1043,6 +1043,17 @@ func serving(name string, html bool, body []byte) fetchFunc {
 	}
 }
 
+// pageWithEpubAddress answers a link with a web page and the link's /epub
+// address with epubErr
+func pageWithEpubAddress(epubErr error) fetchFunc {
+	return func(_ context.Context, link string) (importer.Download, error) {
+		if strings.HasSuffix(link, "/epub") {
+			return importer.Download{}, epubErr
+		}
+		return importer.Download{Name: "dune", HTML: true, Body: io.NopCloser(strings.NewReader("<!doctype html>"))}, nil
+	}
+}
+
 // newLinkHandler routes the log into a buffer nobody reads, since every
 // refusal logs a line. A test that asserts on the log calls captureLog
 // after this, which replaces that buffer with its own
@@ -1151,6 +1162,19 @@ func TestImportURLRefusalsSayWhy(t *testing.T) {
 			link:    "https://books.test/dune",
 			fetcher: serving("dune", true, []byte("<!doctype html><title>Dune</title>")),
 			want:    "That link opens a web page, not a book file.",
+		},
+		{
+			name:    "web page with no book at its /epub address",
+			link:    "https://books.test/dune",
+			fetcher: pageWithEpubAddress(&importer.StatusError{Code: http.StatusNotFound}),
+			want:    "That link opens a web page, not a book file.",
+		},
+		{
+			name:    "web page whose /epub address is down",
+			link:    "https://books.test/dune",
+			fetcher: pageWithEpubAddress(&importer.StatusError{Code: http.StatusServiceUnavailable}),
+			want:    "The server answered 503.",
+			absent:  []string{"web page"},
 		},
 		{
 			name:    "not a book",
@@ -1422,13 +1446,67 @@ func TestImportURLLogsNoCredentialsFromTheLink(t *testing.T) {
 	}
 }
 
-// The handler must not give up on a download the fetcher is still allowed
-// to be starting
-func TestDownloadWindowOutlastsTheFetchersStartAndTheBody(t *testing.T) {
-	got := downloadWindow(64 << 20)
-	if want := 2*importer.FetchStartTimeout + uploadWindow(64<<20); got < want {
-		t.Errorf("downloadWindow = %s, want at least two of the fetcher's %s starts plus the body's %s", got, importer.FetchStartTimeout, uploadWindow(64<<20))
+// The log names only the pasted link, so the error it carries says the
+// failure was the guessed address's
+func TestImportURLLogsAFaultOfTheEpubAddressAsTheRetrys(t *testing.T) {
+	handler := newLinkHandler(t, 1<<20, pageWithEpubAddress(&importer.StatusError{Code: http.StatusServiceUnavailable}))
+	logs := captureLog(t)
+
+	postLink(handler, "https://books.test/books/dune")
+
+	out := logs.String()
+	for _, want := range []string{"path=/books/dune", "retry at /epub"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not carry %q:\n%s", want, out)
+		}
 	}
+}
+
+// lateBody delivers its bytes only after delay, or fails when ctx ends first
+type lateBody struct {
+	ctx   context.Context
+	delay time.Duration
+	r     io.Reader
+}
+
+func (b *lateBody) Read(p []byte) (int, error) {
+	if b.delay > 0 {
+		select {
+		case <-time.After(b.delay):
+			b.delay = 0
+		case <-b.ctx.Done():
+			return 0, b.ctx.Err()
+		}
+	}
+	return b.r.Read(p)
+}
+
+func (b *lateBody) Close() error { return nil }
+
+// The slowest page the fetcher allows, a head that never arrives, then an
+// /epub address as slow to start as allowed and a book that takes its whole
+// body time, must still reach the preview
+func TestImportURLGivesABookBehindASlowPageItsWholeBodyTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const maxSize = 1 << 20
+		book := importEPUB(t, "Dune", "Frank Herbert", 0)
+		handler := newLinkHandler(t, maxSize, fetchFunc(func(ctx context.Context, link string) (importer.Download, error) {
+			select {
+			case <-time.After(importer.FetchStartTimeout):
+			case <-ctx.Done():
+				return importer.Download{}, fmt.Errorf("download request failed: %w", ctx.Err())
+			}
+			if !strings.HasSuffix(link, "/epub") {
+				return importer.Download{HTML: true, Body: &lateBody{ctx: ctx, delay: time.Hour, r: strings.NewReader("")}}, nil
+			}
+			return importer.Download{Name: "Dune.epub", Body: &lateBody{ctx: ctx, delay: uploadWindow(maxSize) - time.Second, r: bytes.NewReader(book)}}, nil
+		}))
+
+		rec := postLink(handler, "https://books.test/books/dune")
+		if rec.Code != http.StatusSeeOther {
+			t.Errorf("status = %d, want 303:\n%s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestImportPageOffersTheLinkForm(t *testing.T) {
